@@ -21,8 +21,8 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 
 ## Before reporting done
 
-1. Run `lab check --new-only`. Fix every new error, or show that the finding is wrong and correct the checker or its configuration. Never delete or edit stored findings.
-2. If something went wrong or worked unusually well in this session, record it: `lab lesson add --kind bad|good --rule "<one imperative sentence>" --evidence <path:line or finding fingerprint>`. Add `--metric tool:rule` when a checker rule measures it.
+1. Run `lab check --new-only`. It lists the errors that are not in the baseline. Fix every one, or show that the finding is wrong and correct the checker or its configuration. Re-running the check does not clear it. Never delete or edit stored findings, and never run `lab baseline set` to make the gate pass; accepting findings into the baseline is a person's decision.
+2. If something went wrong or worked unusually well in this session, record it: `lab lesson add --id <kebab-id> --title "<short title>" --kind bad|good --rule "<one imperative sentence>" --evidence <path:line or finding fingerprint>`. Add `--metric tool:rule` when a checker or `agentprof` rule measures it.
 3. Periodically, run `lab retro` and `lab evaluate`. Propose lessons for recurring rules. Adopt a lesson only after reading its evidence, and mark it `verified` only when `lab evaluate` shows it helped.
 
 ## Reporting

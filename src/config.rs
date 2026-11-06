@@ -46,8 +46,13 @@ pub struct LabConfig {
     /// `rf.finding/1` JSON Lines file written by `agentprof scan`, for `lab retro`.
     #[serde(default)]
     pub agent_findings: Option<String>,
-    /// A finding rule that recurs in at least this many check runs or sessions
-    /// without a lesson covering it becomes a lesson candidate.
+    /// `rf.session/1` JSON Lines file written by `agentprof scan`, for measuring
+    /// lessons whose metric is an agent-session rule (default: `sessions.jsonl`
+    /// next to `agent_findings`).
+    #[serde(default)]
+    pub agent_sessions: Option<String>,
+    /// A finding rule with at least this many distinct findings (by fingerprint)
+    /// and no lesson covering it becomes a lesson candidate.
     #[serde(default = "default_recurrence")]
     pub recurrence: usize,
 }
@@ -58,6 +63,7 @@ impl Default for LabConfig {
             lessons_dir: default_lessons_dir(),
             checks: Vec::new(),
             agent_findings: None,
+            agent_sessions: None,
             recurrence: default_recurrence(),
         }
     }
@@ -89,10 +95,12 @@ impl Project {
     pub fn discover(start: &Path, explicit: Option<&Path>) -> Result<Self, String> {
         let config = match explicit {
             Some(path) => {
+                // A bare relative name such as `research.toml` has an empty parent.
+                let path = start.join(path);
                 if !path.is_file() {
                     return Err(format!("{}: no such config file", path.display()));
                 }
-                Some(path.to_path_buf())
+                Some(path)
             }
             None => start
                 .ancestors()
@@ -124,8 +132,20 @@ impl Project {
             None => jiff::tz::TimeZone::system(),
         };
         let state_dir = root.join(raw.project.state_dir.as_deref().unwrap_or(".research"));
-        if raw.lab.checks.iter().any(|c| c.run.is_empty()) {
-            return Err("[lab] every check needs a non-empty `run`".into());
+        let mut names = std::collections::BTreeSet::new();
+        for c in &raw.lab.checks {
+            if c.name.trim().is_empty() {
+                return Err("[lab] every check needs a non-empty `name`".into());
+            }
+            if !names.insert(c.name.as_str()) {
+                return Err(format!(
+                    "[lab] two checks are named `{}`; names must be unique",
+                    c.name
+                ));
+            }
+            if c.run.is_empty() {
+                return Err(format!("[lab] check `{}` needs a non-empty `run`", c.name));
+            }
         }
         Ok(Self {
             root,
@@ -142,6 +162,21 @@ impl Project {
 
     pub fn lessons_dir(&self) -> PathBuf {
         self.path(&self.lab.lessons_dir)
+    }
+
+    /// A check's program: a relative path with a directory part (`scripts/x`)
+    /// resolves against the project root; a bare name is looked up on `PATH`.
+    pub fn program(&self, spec: &CheckSpec) -> PathBuf {
+        let program = Path::new(&spec.run[0]);
+        if program.is_relative() && program.components().count() > 1 {
+            self.root.join(program)
+        } else {
+            program.to_path_buf()
+        }
+    }
+
+    pub fn baseline_path(&self) -> PathBuf {
+        self.state_dir.join("lab").join("baseline.json")
     }
 
     pub fn checks_dir(&self) -> PathBuf {
@@ -208,5 +243,29 @@ mod tests {
         assert!(Project::discover(dir.path(), None).is_err());
         std::fs::write(&cfg, "[[lab.checks]]\nname = \"a\"\nrun = []\n").unwrap();
         assert!(Project::discover(dir.path(), None).is_err());
+        std::fs::write(
+            &cfg,
+            "[[lab.checks]]\nname = \"x\"\nrun = [\"a\"]\n[[lab.checks]]\nname = \"x\"\nrun = [\"b\"]\n",
+        )
+        .unwrap();
+        let err = Project::discover(dir.path(), None).unwrap_err();
+        assert!(err.contains("two checks are named `x`"), "{err}");
+    }
+
+    #[test]
+    fn a_bare_relative_config_resolves_against_the_start_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(CONFIG_FILE),
+            "[project]\nname = \"demo\"\n[[lab.checks]]\nname = \"s\"\nrun = [\"scripts/check.sh\"]\n",
+        )
+        .unwrap();
+        let p = Project::discover(dir.path(), Some(Path::new(CONFIG_FILE))).unwrap();
+        assert_eq!(p.root, dir.path());
+        assert_eq!(p.name, "demo");
+        assert_eq!(
+            p.program(&p.lab.checks[0]),
+            dir.path().join("scripts/check.sh")
+        );
     }
 }

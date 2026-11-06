@@ -61,7 +61,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 ## 5. Agent-session records: `rf.session/1`
 
-`agentprof` owns these. Their schema is in the `agentprof` README. `lab` does not read them. `lab retro` reads `agentprof`'s `rf.finding/1` findings instead (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings.
+`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id` and `start` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session. It matches a finding to its session by the finding's `subject`, `source:id`.
 
 ## 6. Conventions every repository follows
 

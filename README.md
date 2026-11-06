@@ -44,15 +44,20 @@ cwd = "."                      # optional, relative to research.toml
 
 | Command | What it does |
 | --- | --- |
-| `lab check [--only NAME] [--new-only] [--verbose]` | Runs the checks, stores the findings under `<state_dir>/lab/checks/`, and prints each check's counts with new and resolved findings since the last run. Exits 1 on any error finding, or with `--new-only` only on errors that are new, and on any check that failed to run. |
+| `lab check [--only NAME] [--new-only] [--verbose]` | Runs the checks, stores the findings under `<state_dir>/lab/checks/`, prints each check's counts with the findings new and resolved relative to its baseline, and lists the errors that fail the gate. Exits 1 on any error finding, or with `--new-only` only on errors not in the baseline, and on any check that failed to run or printed output that is not `rf.finding/1`. |
+| `lab baseline set --note WHY [--only NAME]` / `lab baseline show` | Accepts each check's findings from its latest completed run as the baseline that `--new-only` compares against, and records the note in the baseline's history. `lab check` never moves the baseline, so re-running it cannot clear the gate. Without a baseline, every error counts as new. |
 | `lab brief [--tag TAG]` | The session-start brief: the rules of adopted lessons (failures to avoid first), the last check's results, lessons due for evaluation, and the number of lesson candidates. |
-| `lab retro [--agent-findings FILE] [--since DATE] [--write]` | Finds warn and error rules that recur in at least `recurrence` check runs or subjects and that no lesson covers. `--write` drafts each as an `observed` lesson. |
+| `lab retro [--agent-findings FILE] [--since DATE] [--write]` | Finds warn and error rules with at least `recurrence` distinct findings (by fingerprint) across stored check runs and agent sessions that no lesson covers. A finding left unfixed across many runs counts once. `--write` drafts each as an `observed` lesson. |
 | `lab lesson add / list / set` | Records lessons and moves them through `observed → proposed → adopted → verified` or `retired`. Every status change needs a note and is appended to the lesson's history. |
-| `lab evaluate` | For each adopted lesson with a metric, compares that rule's findings per check run before and after adoption. |
+| `lab evaluate` | For each adopted lesson with a metric, compares that rule's findings per check run before and after adoption, counting only runs in which every configured check that reports the tool completed. A metric of an agent-session tool such as `agentprof` is measured per session instead, from `sessions.jsonl`. |
 
-A lesson can be marked `verified` only when `lab evaluate` reports fewer findings since adoption, with at least two runs on each side, unless `--force` is given with a note that cites other evidence. The comparison is observational: other changes in the same period can explain a difference.
+A lesson can be marked `verified` only when `lab evaluate` reports fewer findings since adoption, with at least two runs (or sessions) on each side, unless `--force` is given with a note that cites other evidence. A lesson without a metric always needs `--force`. The comparison is observational: other changes in the same period can explain a difference. Adopting a lesson again after retiring it restarts the measured period.
 
-`<state_dir>` defaults to `.research`. The lessons directory should be committed. Commit `.research/lab/checks/` as well if check history should travel with the project, which `lab evaluate` needs on every machine; otherwise ignore `.research/`.
+A finding's fingerprint covers its tool, rule, severity, message and subject, without the line number of a `path:line` subject. So a finding keeps its fingerprint when lines are added above it, and becomes new when its severity or message changes. Identical findings are numbered in order.
+
+`<state_dir>` defaults to `.research`. The lessons directory should be committed. Commit `.research/lab/checks/` and `.research/lab/baseline.json` as well if check history and the accepted baseline should travel with the project, which `lab evaluate` and `--new-only` need on every machine; otherwise ignore `.research/`.
+
+Check names must be unique. A check's program with a directory part, such as `scripts/check.sh`, resolves against the folder holding `research.toml`; a bare name is looked up on `PATH`.
 
 Lesson files are Markdown with YAML frontmatter, so they read well on GitHub and in Obsidian:
 

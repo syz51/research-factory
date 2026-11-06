@@ -43,18 +43,21 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Run the configured checkers, store their findings, and compare with the last run.
+    /// Run the configured checkers, store their findings, and compare with the baseline.
     Check {
         /// Run only these checks (repeatable).
         #[arg(long = "only", value_name = "NAME")]
         only: Vec<String>,
-        /// Fail only on error findings that are new since the previous run.
+        /// Fail only on error findings that are not in the baseline (`lab baseline set`).
         #[arg(long)]
         new_only: bool,
         /// Print every finding, not only the summary.
         #[arg(long)]
         verbose: bool,
     },
+    /// Show or set the accepted findings that `lab check --new-only` does not fail on.
+    #[command(subcommand)]
+    Baseline(BaselineCommand),
     /// Print the session-start brief: adopted rules, last check, maintenance due.
     Brief {
         /// Only lessons with one of these tags (repeatable).
@@ -78,6 +81,21 @@ enum Command {
     /// Manage lessons.
     #[command(subcommand)]
     Lesson(LessonCommand),
+}
+
+#[derive(Subcommand)]
+enum BaselineCommand {
+    /// Accept each check's findings from its latest completed run.
+    Set {
+        /// Only these checks (repeatable); default: every configured check.
+        #[arg(long = "only", value_name = "NAME")]
+        only: Vec<String>,
+        /// Why the current findings are accepted, e.g. "existing backlog before the gate".
+        #[arg(long)]
+        note: String,
+    },
+    /// Print the baseline of each check and its history.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -153,12 +171,16 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             new_only,
             verbose,
         } => check(&project, &only, new_only, verbose),
+        Command::Baseline(cmd) => baseline(&project, cmd),
         Command::Brief { tags } => {
             let lessons = lessons::load(&project.lessons_dir())?;
             let runs = check::history(&project)?;
             let agent = agent_findings(&project, None)?;
-            let rec = retro::recurrences(&runs, &agent);
+            let rec = retro::recurrences(&runs, &agent.findings);
             let n = retro::candidates(&rec, &lessons, project.lab.recurrence).len();
+            if let Some(note) = &agent.note {
+                eprintln!("lab: {note}");
+            }
             print!(
                 "{}",
                 brief::render(
@@ -194,10 +216,13 @@ state_dir = ".research"
 lessons_dir = "lessons"
 recurrence = 3
 # Agent-session findings for `lab retro`: run `agentprof scan --out .research/agentprof` first.
-# Do not also list agentprof under [[lab.checks]], or its findings count twice.
+# Do not also list agentprof under [[lab.checks]]. `lab evaluate` measures agentprof lessons per
+# session from the sessions.jsonl next to this file (override with agent_sessions).
 # agent_findings = ".research/agentprof/findings.jsonl"
 
 # Each check prints rf.finding/1 JSON Lines and exits 0 (no errors), 1 (errors) or 2 (failed).
+# Names must be unique. After the first `lab check`, accept the existing backlog with
+# `lab baseline set --note "<why>"` so that `lab check --new-only` fails only on new errors.
 # [[lab.checks]]
 # name = "references"
 # run = ["papers", "registry", "check", "--format", "jsonl"]
@@ -260,6 +285,8 @@ fn check(
         "check", "status", "errors", "warn", "info", "new", "resolved", "ms"
     );
     let mut failing = false;
+    let mut failing_items = Vec::new();
+    let mut no_baseline = Vec::new();
     for c in &run.header.checks {
         let count = |sev| {
             run.items
@@ -283,19 +310,39 @@ fn check(
             resolved,
             c.duration_ms
         );
-        if c.unparsed > 0 {
-            println!(
-                "  {} stdout line(s) were not rf.finding/1 records",
-                c.unparsed
-            );
+        if c.ran() && delta.is_none() {
+            no_baseline.push(c.name.as_str());
         }
-        // Without a previous run of this check, every error counts as new.
-        let has_failing = run
+        // Without a baseline for this check, every error counts as new.
+        let errors = run
             .items
             .iter()
             .filter(|i| i.check == c.name && i.finding.severity == Severity::Error)
-            .any(|i| !new_only || delta.is_none_or(|d| d.new.contains(&i.fingerprint)));
-        failing |= has_failing || !c.ran();
+            .filter(|i| !new_only || delta.is_none_or(|d| d.new.contains(&i.fingerprint)));
+        let before = failing_items.len();
+        failing_items.extend(errors);
+        failing |= failing_items.len() > before || !c.ran();
+    }
+    if new_only && !no_baseline.is_empty() {
+        println!(
+            "No baseline for {}: every error counts as new. Accept the current findings with \
+             `lab baseline set --note \"<why>\"`.",
+            no_baseline.join(", ")
+        );
+    }
+    if !verbose && !failing_items.is_empty() {
+        println!(
+            "{} error(s){}:",
+            failing_items.len(),
+            if new_only { " not in the baseline" } else { "" }
+        );
+        for item in &failing_items {
+            let f = &item.finding;
+            println!(
+                "{} {}:{} {}: {}",
+                item.fingerprint, f.tool, f.rule, f.subject, f.message
+            );
+        }
     }
     if verbose {
         for item in &run.items {
@@ -319,16 +366,90 @@ fn check(
     })
 }
 
-fn agent_findings(
-    project: &Project,
-    explicit: Option<&Path>,
-) -> Result<Vec<finding::Finding>, String> {
-    let path = match (explicit, &project.lab.agent_findings) {
-        (Some(p), _) => p.to_path_buf(),
-        (None, Some(p)) => project.path(p),
-        (None, None) => return Ok(Vec::new()),
+struct AgentFiles {
+    findings: Vec<finding::Finding>,
+    /// The findings file, when one is named.
+    path: Option<PathBuf>,
+    /// Why the configured findings file was not read.
+    note: Option<String>,
+}
+
+/// Agent findings from `explicit` (must exist) or `[lab] agent_findings` (may
+/// be missing, for example before the first `agentprof scan`, with a note).
+fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFiles, String> {
+    let (path, required) = match (explicit, &project.lab.agent_findings) {
+        (Some(p), _) => (p.to_path_buf(), true),
+        (None, Some(p)) => (project.path(p), false),
+        (None, None) => {
+            return Ok(AgentFiles {
+                findings: Vec::new(),
+                path: None,
+                note: None,
+            });
+        }
     };
-    retro::read_findings(&path)
+    if !required && !path.exists() {
+        return Ok(AgentFiles {
+            findings: Vec::new(),
+            note: Some(format!(
+                "{} does not exist yet; agent-session findings are left out (run `agentprof scan --out <dir>`)",
+                path.display()
+            )),
+            path: Some(path),
+        });
+    }
+    Ok(AgentFiles {
+        findings: retro::read_findings(&path)?,
+        path: Some(path),
+        note: None,
+    })
+}
+
+/// The agent sessions that measure agent-rule lessons, or why they are unavailable.
+fn agent_sessions(project: &Project, agent: &AgentFiles) -> Result<Vec<retro::Session>, String> {
+    let path = match (&project.lab.agent_sessions, &agent.path) {
+        (Some(p), _) => project.path(p),
+        (None, Some(findings)) => findings.with_file_name("sessions.jsonl"),
+        (None, None) => return Err("no [lab] agent_findings or agent_sessions configured".into()),
+    };
+    retro::read_sessions(&path)
+}
+
+fn baseline(project: &Project, cmd: BaselineCommand) -> Result<ExitCode, String> {
+    let mut b = check::Baseline::load(project)?;
+    match cmd {
+        BaselineCommand::Set { only, note } => {
+            let specs = check::select(project, &only)?;
+            let runs = check::history(project)?;
+            let names = b.set(&runs, &specs, &note)?;
+            b.save(project)?;
+            for name in names {
+                let e = &b.checks[&name];
+                println!(
+                    "{name}: {} finding(s) accepted from {}",
+                    e.fingerprints.len(),
+                    e.run
+                );
+            }
+        }
+        BaselineCommand::Show => {
+            if b.checks.is_empty() {
+                println!("No baseline set: `lab check --new-only` treats every error as new.");
+            }
+            for (name, e) in &b.checks {
+                println!(
+                    "{name}: {} finding(s) from {} ({})",
+                    e.fingerprints.len(),
+                    e.run,
+                    e.at
+                );
+            }
+            for h in &b.history {
+                println!("- {}: {}: {}", h.at, h.checks.join(", "), h.note);
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn retro_cmd(
@@ -349,12 +470,15 @@ fn retro_cmd(
         .filter(|r| since.is_none_or(|s| project.date_of(&r.header.at).is_ok_and(|d| d >= s)))
         .collect();
     let agent = agent_findings(project, path)?;
-    let rec = retro::recurrences(&runs, &agent);
+    if let Some(note) = &agent.note {
+        println!("{note}");
+    }
+    let rec = retro::recurrences(&runs, &agent.findings);
     let cands = retro::candidates(&rec, &lessons, project.lab.recurrence);
     println!(
-        "{} check run(s), {} agent finding(s), {} rule(s) seen; {} recurring rule(s) without a lesson (threshold {}).",
+        "{} check run(s), {} agent finding(s), {} rule(s) seen; {} recurring rule(s) without a lesson (threshold: {} distinct findings).",
         runs.len(),
-        agent.len(),
+        agent.findings.len(),
         rec.len(),
         cands.len(),
         project.lab.recurrence
@@ -364,8 +488,8 @@ fn retro_cmd(
         let sev = r.severity.map_or("?", Severity::as_str);
         let sample: Vec<&str> = r.subjects.iter().take(3).map(String::as_str).collect();
         println!(
-            "- {sev} {tool}:{rule}: {} finding(s), {} run(s), {} subject(s); e.g. {}",
-            r.findings,
+            "- {sev} {tool}:{rule}: {} distinct finding(s), {} run(s), {} subject(s); e.g. {}",
+            r.findings(),
             r.runs,
             r.subjects.len(),
             sample.join(", ")
@@ -408,12 +532,49 @@ fn retro_cmd(
     Ok(ExitCode::SUCCESS)
 }
 
+/// Everything a lesson is measured against, loaded once.
+struct Evidence<'p> {
+    project: &'p Project,
+    runs: Vec<check::Run>,
+    agent: AgentFiles,
+    sessions: Result<Vec<retro::Session>, String>,
+}
+
+impl<'p> Evidence<'p> {
+    fn load(project: &'p Project) -> Result<Self, String> {
+        let agent = agent_findings(project, None)?;
+        Ok(Self {
+            project,
+            runs: check::history(project)?,
+            sessions: agent_sessions(project, &agent),
+            agent,
+        })
+    }
+
+    fn measure(&self, lesson: &lessons::Lesson) -> Option<retro::Evaluation> {
+        let configured: Vec<&str> = self
+            .project
+            .lab
+            .checks
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        let agent = retro::Agent {
+            findings: &self.agent.findings,
+            sessions: self.sessions.as_deref().map_err(String::as_str),
+        };
+        retro::evaluate(lesson, &self.runs, &configured, &agent, |t| {
+            self.project.date_of(t).ok()
+        })
+    }
+}
+
 fn evaluate(project: &Project) -> Result<ExitCode, String> {
     let lessons = lessons::load(&project.lessons_dir())?;
-    let runs = check::history(project)?;
+    let evidence = Evidence::load(project)?;
     let mut any = false;
     for l in lessons.iter().filter(|l| l.meta.status.active()) {
-        let Some(e) = retro::evaluate(l, &runs, |t| project.date_of(t).ok()) else {
+        let Some(e) = evidence.measure(l) else {
             continue;
         };
         any = true;
@@ -425,13 +586,14 @@ fn evaluate(project: &Project) -> Result<ExitCode, String> {
             .map(|m| format!("{}:{}", m.tool, m.rule))
             .unwrap_or_default();
         println!(
-            "{} ({metric}): {} per run before ({} runs), {} after ({} runs): {}",
+            "{} ({metric}): {} per {unit} before ({} {unit}s), {} after ({} {unit}s): {}",
             l.meta.id,
             fmt(e.before_mean),
             e.before_runs,
             fmt(e.after_mean),
             e.after_runs,
-            e.verdict
+            e.verdict,
+            unit = e.unit
         );
     }
     if any {
@@ -511,11 +673,16 @@ fn lesson(project: &Project, cmd: LessonCommand) -> Result<ExitCode, String> {
                 .iter_mut()
                 .find(|l| l.meta.id == id)
                 .ok_or_else(|| format!("no lesson `{id}` in {}", dir.display()))?;
-            // A measured lesson is verified only when its own metric improved.
-            if status == Status::Verified && lesson.meta.metric.is_some() && !force {
-                let runs = check::history(project)?;
-                let verdict = retro::evaluate(lesson, &runs, |t| project.date_of(t).ok())
-                    .map_or("not measurable", |e| e.verdict);
+            // `verified` needs the lesson's own metric to have improved, or --force.
+            if status == Status::Verified && !force {
+                if lesson.meta.metric.is_none() {
+                    return Err(format!(
+                        "`{id}` has no metric to measure; pass --force with a note citing the evidence"
+                    ));
+                }
+                let verdict = Evidence::load(project)?
+                    .measure(lesson)
+                    .map_or_else(|| "not measurable".to_string(), |e| e.verdict);
                 if verdict != retro::IMPROVED {
                     return Err(format!(
                         "`{id}` cannot be verified: its metric shows {verdict}; \

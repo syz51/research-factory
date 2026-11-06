@@ -197,7 +197,10 @@ impl Lesson {
         }
         self.meta.status = to;
         self.meta.updated = date.into();
-        if to == Status::Adopted && self.meta.adopted.is_none() {
+        // Adoption starts the period `lab evaluate` measures, so a lesson that
+        // is adopted again after being retired gets the new date. Moving back
+        // from verified to adopted keeps it.
+        if to == Status::Adopted && !from.active() {
             self.meta.adopted = Some(date.into());
         }
         self.append_history(&format!(
@@ -229,13 +232,15 @@ pub fn load(dir: &Path) -> Result<Vec<Lesson>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("{}: {e}", dir.display())),
     };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.extension().is_some_and(|x| x == "md")
-                && p.file_name().is_some_and(|n| n != "README.md")
-        })
-        .collect();
+    let mut paths = Vec::new();
+    for entry in entries {
+        let p = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+        if p.extension().is_some_and(|x| x == "md")
+            && p.file_name().is_some_and(|n| n != "README.md")
+        {
+            paths.push(p);
+        }
+    }
     paths.sort();
     let mut lessons = Vec::new();
     let mut errors = Vec::new();
@@ -354,6 +359,23 @@ mod tests {
         assert!(text.contains("- 2026-11-07: recorded as observed."));
         assert!(text.contains("- 2026-11-08: observed → adopted. agreed in review"));
         assert_eq!(load(dir.path()).unwrap()[0].meta.status, Status::Adopted);
+    }
+
+    #[test]
+    fn readoption_restarts_the_measured_period() {
+        let dir = tempfile::tempdir().unwrap();
+        create(dir.path(), meta("again"), "").unwrap();
+        let lesson = &mut load(dir.path()).unwrap()[0];
+        lesson
+            .transition(Status::Adopted, "a", "2026-01-01")
+            .unwrap();
+        lesson
+            .transition(Status::Retired, "b", "2026-02-01")
+            .unwrap();
+        lesson
+            .transition(Status::Adopted, "c", "2026-06-01")
+            .unwrap();
+        assert_eq!(lesson.meta.adopted.as_deref(), Some("2026-06-01"));
     }
 
     #[test]

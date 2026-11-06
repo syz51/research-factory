@@ -32,18 +32,18 @@ These shared rules let `lab` run any checker without knowing anything about it. 
 
 1. **Start:** `lab brief` prints the adopted rules (failures to avoid first, then practices to keep), the state of the last check, and any lessons due for evaluation. The agent skill tells an agent to run it first and follow it.
 2. **Work:** the agent registers each new source with `papers`, saves the extracted text, and records its reading depth. Experiments run under `prov run` and are scored with `ireval`.
-3. **Check:** `lab check` runs every checker. With `--new-only` it fails only on errors introduced since the previous run, so an old backlog does not block new work, while `lab brief` still shows the backlog.
+3. **Check:** `lab check` runs every checker. With `--new-only` it fails only on errors outside the baseline, the findings accepted with `lab baseline set --note`, so an old backlog does not block new work, while `lab brief` still shows the backlog. Re-running the check never moves the baseline, so the gate clears only when the new errors are fixed or someone deliberately accepts them with a recorded note.
 4. **Fix:** errors are fixed or, if the finding is wrong, the checker or its configuration is corrected. Findings are not deleted by hand.
 
 ## The learning loop
 
 The factory improves from what goes wrong and from what works.
 
-- **Bad lessons** record a failure to avoid. They usually come from recurring findings: `lab retro` lists every warn or error rule that recurred in at least `recurrence` check runs or subjects (default 3) and that no lesson yet measures. `agentprof` findings join the same pool, so a waste pattern in agent sessions, such as rereading the same large file, becomes a candidate too.
+- **Bad lessons** record a failure to avoid. They usually come from recurring findings: `lab retro` lists every warn or error rule with at least `recurrence` distinct findings (default 3) that no lesson yet measures. One finding left unfixed over many runs counts once. `agentprof` findings join the same pool, so a waste pattern in agent sessions, such as rereading the same large file, becomes a candidate too.
 - **Good lessons** record a practice to keep. They come from people and agents noticing what worked, such as a prompt pattern or a checking order. Without a metric, they rely on the evidence cited in the lesson.
 - **Status** moves `observed → proposed → adopted → verified`, or to `retired` from any status. Each change needs a note, and the note is appended to the lesson's history, so the file shows why the rule exists.
 - **Adoption** is a decision, not a side effect. `lab retro --write` only drafts `observed` lessons; a person or agent adopts one after reading its evidence. Only adopted and verified lessons reach `lab brief`.
-- **Evaluation:** a lesson with a metric (`tool:rule`) is measured by `lab evaluate`, which compares that rule's findings per check run before and after the adoption date, using only runs in which the relevant checker ran successfully. `verified` requires a decrease with at least two runs on each side, or `--force` with a note citing other evidence.
+- **Evaluation:** a lesson with a metric (`tool:rule`) is measured by `lab evaluate`, which compares that rule's findings per check run before and after the adoption date, using only runs in which every configured checker that reports the tool ran successfully. A metric of `agentprof` is measured per agent session, from the `sessions.jsonl` next to the agent findings, so sessions without the finding count as zero. `verified` requires a decrease with at least two runs or sessions on each side, or `--force` with a note citing other evidence; a lesson without a metric always needs `--force`.
 - **Retirement:** a lesson that did not help, or no longer applies, is retired with a note rather than deleted, so the same idea is not adopted again without knowing it failed before.
 
 The loop is deliberately conservative. Rules reach every session, so a wrong rule costs more than a missing one. That is why adoption needs a person or agent to decide, and why `verified` needs evidence.
