@@ -9,7 +9,7 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 
 ## Start of a session
 
-1. Run `lab brief` and follow every rule it prints. Rules marked `[avoid]` are past failures; rules marked `[keep]` are practices that worked.
+1. Run `lab brief` and follow every rule it prints. Each rule is an instruction to follow: those under "Learned from failures" came from past mistakes, those under "Practices that worked" from successes.
 2. Note the errors the last check left open; fix those in the area you are working on.
 
 ## While working

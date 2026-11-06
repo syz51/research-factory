@@ -115,7 +115,7 @@ fn full_cycle() {
 
     let brief = stdout(&lab(d, &["brief"]));
     assert!(
-        brief.contains("[avoid] Copy quotations from extracted text."),
+        brief.contains("Learned from failures:\n\n- Copy quotations from extracted text."),
         "{brief}"
     );
     assert!(brief.contains("1 errors"), "{brief}");

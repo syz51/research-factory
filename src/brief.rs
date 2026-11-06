@@ -31,16 +31,23 @@ pub fn render(
     if active.is_empty() {
         out.push_str("None adopted yet.\n");
     }
-    for kind in [Kind::Bad, Kind::Good] {
-        for l in active.iter().filter(|l| l.meta.kind == kind) {
-            let mark = match kind {
-                Kind::Bad => "avoid",
-                Kind::Good => "keep",
-            };
-            let _ = writeln!(out, "- [{mark}] {} (`{}`)", l.meta.rule.trim(), l.meta.id);
+    // Every rule is an instruction to follow; the kind says only where it came from.
+    for (kind, heading) in [
+        (Kind::Bad, "Learned from failures"),
+        (Kind::Good, "Practices that worked"),
+    ] {
+        let rules: Vec<&&Lesson> = active.iter().filter(|l| l.meta.kind == kind).collect();
+        if rules.is_empty() {
+            continue;
+        }
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        let _ = writeln!(out, "{heading}:\n");
+        for l in rules {
+            let _ = writeln!(out, "- {} (`{}`)", l.meta.rule.trim(), l.meta.id);
         }
     }
-
     out.push_str("\n## Last check\n\n");
     match last {
         None => out.push_str("No `lab check` run recorded.\n"),
@@ -167,9 +174,20 @@ mod tests {
             lesson("c", Kind::Bad, Status::Observed, None, &["lit"]),
         ];
         let text = render("demo", "2026-11-07", &lessons, None, &[], 2);
-        let avoid = text.find("[avoid] rule b").unwrap();
-        let keep = text.find("[keep] rule a").unwrap();
-        assert!(avoid < keep, "failures to avoid come first:\n{text}");
+        let failures = text
+            .find("Learned from failures:\n\n- rule b (`b`)")
+            .unwrap();
+        let worked = text
+            .find("Practices that worked:\n\n- rule a (`a`)")
+            .unwrap();
+        assert!(
+            failures < worked,
+            "lessons from failures come first:\n{text}"
+        );
+        assert!(
+            !text.contains("[avoid]"),
+            "a rule is never shown inverted:\n{text}"
+        );
         assert!(!text.contains("rule c"));
         assert!(text.contains("not yet verified: b"));
         assert!(text.contains("2 recurring finding rule(s)"));
