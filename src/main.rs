@@ -193,6 +193,8 @@ state_dir = ".research"
 [lab]
 lessons_dir = "lessons"
 recurrence = 3
+# Agent-session findings for `lab retro`: run `agentprof scan --out .research/agentprof` first.
+# Do not also list agentprof under [[lab.checks]], or its findings count twice.
 # agent_findings = ".research/agentprof/findings.jsonl"
 
 # Each check prints rf.finding/1 JSON Lines and exits 0 (no errors), 1 (errors) or 2 (failed).
