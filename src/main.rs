@@ -212,6 +212,19 @@ enum LessonCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Mark a check-run lesson's introduced findings as reviewed, for those that
+    /// cannot be fixed: `lab evaluate` then counts only findings introduced
+    /// after the latest complete run.
+    Review {
+        id: String,
+        /// How many introduced findings were reviewed, as `lab evaluate` listed
+        /// them; refused when the current count differs.
+        #[arg(long)]
+        count: usize,
+        /// What the review found, e.g. "5 in append-only log lines, 2 misread".
+        #[arg(long)]
+        note: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -701,6 +714,7 @@ fn retro_cmd(
                 created: today.clone(),
                 updated: today.clone(),
                 adopted: None,
+                reviewed: None,
                 evidence: sample.iter().map(|s| s.to_string()).collect(),
             };
             let body = "Drafted by `lab retro` from recurring findings. Replace the rule with the concrete practice once the cause is known.";
@@ -810,7 +824,7 @@ fn evaluate(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
          The comparison is observational: other changes since adoption can explain a difference, \
          and with {} lessons measured some will cross the threshold by chance. \
          Check runs are described, not judged: \"introduced\" counts findings in the latest \
-         complete run beyond the count of the same message and data in the first complete run since adoption.",
+         complete run beyond the count of the same message and data in the first complete run since adoption, or in the run of the last `lab lesson review`.",
         s.min_sessions,
         s.alpha / 2.0,
         s.alpha,
@@ -850,6 +864,7 @@ fn lesson(project: &Project, cmd: LessonCommand) -> Result<ExitCode, String> {
                 metric,
                 created: today.clone(),
                 updated: today,
+                reviewed: None,
                 adopted,
                 evidence,
             };
@@ -906,6 +921,45 @@ fn lesson(project: &Project, cmd: LessonCommand) -> Result<ExitCode, String> {
             lesson.transition(status, &note, &project.today().to_string())?;
             lessons::save(lesson)?;
             println!("{} is now {}", id, status.as_str());
+        }
+        LessonCommand::Review { id, count, note } => {
+            let mut all = lessons::load(&dir)?;
+            let lesson = all
+                .iter_mut()
+                .find(|l| l.meta.id == id)
+                .ok_or_else(|| format!("no lesson `{id}` in {}", dir.display()))?;
+            lesson.reviewable(&note)?;
+            let e = Evidence::load(project)?.measure(lesson);
+            let Some(found) = e.introduced else {
+                return Err(format!(
+                    "`{id}` has no introduced findings to review: `lab evaluate` says {}{}",
+                    e.verdict.as_str(),
+                    e.reason.map(|r| format!(" ({r})")).unwrap_or_default()
+                ));
+            };
+            let since = found.since_text(e.adopted.as_deref());
+            if found.count == 0 {
+                return Err(format!("`{id}` has no findings introduced since {since}"));
+            }
+            if found.count != count {
+                return Err(format!(
+                    "`{id}` has {} findings introduced since {since} in run {}, not {count}; \
+                     list them with `lab evaluate` and review again",
+                    found.count, found.latest_run
+                ));
+            }
+            let summary = format!(
+                "{} finding(s) introduced since {since}, through run {}",
+                found.count, found.latest_run
+            );
+            lesson.review(
+                &found.latest_run,
+                &summary,
+                &note,
+                &project.today().to_string(),
+            )?;
+            lessons::save(lesson)?;
+            println!("{id}: reviewed {summary}");
         }
     }
     Ok(ExitCode::SUCCESS)

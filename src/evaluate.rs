@@ -150,16 +150,23 @@ pub struct Evaluation {
 
 /// Findings of the metric's rule in the latest complete check run beyond
 /// their message and data's count in the first complete run on or after
-/// adoption.
+/// adoption, or in the reviewed run when the lesson records a later review.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Introduced {
-    /// The first complete run on or after adoption (its `at`, UTC).
+    /// The first complete run on or after adoption, or the reviewed run
+    /// (its `at`, UTC).
     pub since: String,
     /// That run's date in the project's time zone.
     #[serde(default)]
     pub since_date: Option<String>,
     /// The latest complete run.
     pub latest: String,
+    /// Its file name, which `lab lesson review` records.
+    #[serde(default)]
+    pub latest_run: String,
+    /// The file name of the lesson's last reviewed run, when `since` is it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<String>,
     /// The sum of `added`.
     pub count: usize,
     pub findings: Vec<IntroducedFinding>,
@@ -171,6 +178,9 @@ impl Introduced {
     /// run came later, since violations written in between count as backlog.
     pub fn since_text(&self, adopted: Option<&str>) -> String {
         let date = self.since_date.as_deref().unwrap_or(&self.since);
+        if self.reviewed.is_some() {
+            return format!("the reviewed run of {date}");
+        }
         match adopted {
             Some(a) if a != date => {
                 format!("the first complete run after adoption, on {date} (adopted {a})")
@@ -418,7 +428,8 @@ pub fn evaluate(
         .map(|i| i.check.as_str())
         .collect();
     if !required.is_empty() {
-        return check_runs(e, metric, &required, inputs, place, &date_of);
+        let reviewed = lesson.meta.reviewed.as_deref();
+        return check_runs(e, metric, &required, inputs, reviewed, place, &date_of);
     }
     if inputs.findings.iter().any(|f| f.tool == metric.tool) {
         return sessions(e, metric, None, inputs, place);
@@ -442,8 +453,11 @@ pub fn evaluate(
 /// usually holds the sentence, which tells two violations with one message
 /// apart. A finding is introduced when the latest complete run has more
 /// findings with its key than the first complete run on or after adoption,
-/// which holds the violations written before that run. The baseline plays no
-/// part, so a finding stays introduced after `lab baseline set` accepts it.
+/// which holds the violations written before that run. A review (`lab lesson
+/// review`) moves that run to the reviewed one, so findings that cannot be
+/// fixed, such as those in append-only files, stop counting once reviewed.
+/// The baseline plays no part, so a finding stays introduced after
+/// `lab baseline set` accepts it.
 ///
 /// `improved` would need a denominator (such as new citing sentences) and
 /// runs on enough distinct commits; lab records neither, so the verdict
@@ -453,14 +467,17 @@ fn check_runs(
     metric: &Metric,
     required: &BTreeSet<&str>,
     inputs: &Inputs,
+    reviewed: Option<&str>,
     place: impl Fn(&str) -> Option<bool>,
     date_of: impl Fn(&str) -> Option<jiff::civil::Date>,
 ) -> Evaluation {
     e.unit = Some(Unit::Run);
     e.method = Some(Method::Descriptive);
     let (mut before, mut after) = (Vec::new(), Vec::new());
-    // The first and the latest complete run since adoption.
+    // The first and the latest complete run since adoption, and the reviewed
+    // one, found by its file name.
     let mut first: Option<&Run> = None;
+    let mut reviewed_run: Option<&Run> = None;
     let mut last: Option<&Run> = None;
     let mut observed = false;
     for run in inputs.runs {
@@ -476,6 +493,9 @@ fn check_runs(
             Some(true) => {
                 after.push(count as f64);
                 first.get_or_insert(run);
+                if reviewed.is_some_and(|r| run.name() == r) {
+                    reviewed_run = Some(run);
+                }
                 last = Some(run);
             }
             Some(false) => before.push(count as f64),
@@ -495,6 +515,21 @@ fn check_runs(
         e.reason = Some("no complete check run since adoption".into());
         return e;
     };
+    let first = reviewed_run.unwrap_or(first);
+    let mut reason = format!(
+        "descriptive: a verdict needs a denominator, such as new citing sentences, \
+         and runs on {} or more commits; lab records neither",
+        inputs.settings.min_sessions
+    );
+    // A missing reviewed run (deleted, or not a complete run since adoption)
+    // falls back to the adoption baseline, which shows more, not less.
+    if let (Some(r), None) = (reviewed, reviewed_run) {
+        let _ = write!(
+            reason,
+            "; the reviewed run `{r}` is not a stored complete run since adoption, \
+             so findings count from the first one"
+        );
+    }
     let mut found = introduced(
         &metric_items(first, metric, required),
         &metric_items(last, metric, required),
@@ -502,12 +537,10 @@ fn check_runs(
     found.since = first.header.at.clone();
     found.since_date = date_of(&first.header.at).map(|d| d.to_string());
     found.latest = last.header.at.clone();
+    found.latest_run = last.name();
+    found.reviewed = reviewed_run.map(Run::name);
     e.introduced = Some(found);
-    e.reason = Some(format!(
-        "descriptive: a verdict needs a denominator, such as new citing sentences, \
-         and runs on {} or more commits; lab records neither",
-        inputs.settings.min_sessions
-    ));
+    e.reason = Some(reason);
     e
 }
 
@@ -582,6 +615,8 @@ fn introduced(first: &[&Item], last: &[&Item]) -> Introduced {
         since: String::new(),
         since_date: None,
         latest: String::new(),
+        latest_run: String::new(),
+        reviewed: None,
         count: findings.iter().map(|f| f.added).sum(),
         findings,
     }
@@ -977,6 +1012,7 @@ mod tests {
                 created: "2026-01-01".into(),
                 updated: adopted.into(),
                 adopted: Some(adopted.into()),
+                reviewed: None,
                 evidence: vec![],
             },
             body: String::new(),
@@ -1648,6 +1684,7 @@ mod tests {
         let fps = finding::fingerprints(&findings);
         let mut run = run("x", 0, true);
         run.header.at = at.into();
+        run.path = format!("{at}.jsonl").into();
         run.items = findings
             .into_iter()
             .zip(fps)
@@ -1662,12 +1699,18 @@ mod tests {
     }
 
     fn eval_runs(runs: &[Run]) -> Evaluation {
+        eval_reviewed(runs, None)
+    }
+
+    fn eval_reviewed(runs: &[Run], reviewed: Option<&str>) -> Evaluation {
         let cfg = EvaluateConfig {
             min_sessions: 2,
             ..EvaluateConfig::default()
         };
+        let mut l = lesson("claimcheck:source-text-missing", "2026-11-03");
+        l.meta.reviewed = reviewed.map(Into::into);
         evaluate(
-            &lesson("claimcheck:source-text-missing", "2026-11-03"),
+            &l,
             &Inputs {
                 runs,
                 configured: &["claims"],
@@ -1681,6 +1724,76 @@ mod tests {
 
     const OLD: &str = "references 1, 484 have no source text";
     const NEW: &str = "reference 786 has no source text";
+
+    #[test]
+    fn a_review_moves_the_introduced_count_to_the_reviewed_run() {
+        let runs = vec![
+            run_with("2026-11-03T00:00:00Z", &[("a.md:3", OLD, "s3")]),
+            run_with(
+                "2026-11-04T00:00:00Z",
+                &[("a.md:3", OLD, "s3"), ("log.md:9", NEW, "n9")],
+            ),
+            run_with(
+                "2026-11-05T00:00:00Z",
+                &[
+                    ("a.md:3", OLD, "s3"),
+                    ("log.md:9", NEW, "n9"),
+                    ("b.md:1", OLD, "s1"),
+                ],
+            ),
+        ];
+        // Without a review both later findings count.
+        assert_eq!(eval_runs(&runs).introduced.unwrap().count, 2);
+        // Reviewed through the run of 4 November: only b.md:1 is new.
+        let e = eval_reviewed(&runs, Some("2026-11-04T00:00:00Z.jsonl"));
+        let i = e.introduced.clone().unwrap();
+        assert_eq!(
+            (i.since.as_str(), i.reviewed.as_deref(), i.count),
+            (
+                "2026-11-04T00:00:00Z",
+                Some("2026-11-04T00:00:00Z.jsonl"),
+                1
+            )
+        );
+        assert_eq!(i.latest_run, "2026-11-05T00:00:00Z.jsonl");
+        assert_eq!(e.introduced_lines(), vec![format!("  +1 {OLD} [b.md:1]")]);
+        let line = e.line();
+        assert!(
+            line.contains("1 introduced since the reviewed run of 2026-11-04)"),
+            "{line}"
+        );
+        let back: Evaluation = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+        // Reviewed through the latest run: nothing introduced.
+        let i = eval_reviewed(&runs, Some("2026-11-05T00:00:00Z.jsonl"))
+            .introduced
+            .unwrap();
+        assert_eq!((i.since.as_str(), i.count), ("2026-11-05T00:00:00Z", 0));
+        // Runs that share a second are told apart by their file names: a run
+        // stored after the reviewed one still counts.
+        let at = "2026-11-05T00:00:00Z";
+        let mut tied = [
+            run_with(at, &[("a.md:3", OLD, "s3")]),
+            run_with(at, &[("a.md:3", OLD, "s3"), ("log.md:9", NEW, "n9")]),
+        ];
+        tied[1].path = format!("{at}-1.jsonl").into();
+        let i = eval_reviewed(&tied, Some("2026-11-05T00:00:00Z.jsonl"))
+            .introduced
+            .unwrap();
+        assert_eq!((i.reviewed.is_some(), i.count), (true, 1));
+        // A reviewed run that is no longer stored falls back to adoption.
+        let e = eval_reviewed(&runs, Some("gone.jsonl"));
+        let i = e.introduced.clone().unwrap();
+        assert_eq!(
+            (i.since.as_str(), i.reviewed, i.count),
+            ("2026-11-03T00:00:00Z", None, 2)
+        );
+        assert!(
+            e.reason.unwrap().contains(
+                "the reviewed run `gone.jsonl` is not a stored complete run since adoption"
+            )
+        );
+    }
 
     #[test]
     fn check_runs_count_findings_introduced_since_adoption_by_message_and_data() {

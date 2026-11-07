@@ -252,6 +252,7 @@ mod tests {
                 created: "2026-11-01".into(),
                 updated: adopted.into(),
                 adopted: Some(adopted.into()),
+                reviewed: None,
                 evidence: vec![],
             },
             body: String::new(),

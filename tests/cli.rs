@@ -300,4 +300,103 @@ fn evaluate_counts_a_baselined_new_finding_but_not_a_moved_one() {
         brief.contains("- `quote-check`: 1 introduced since the first complete run after adoption"),
         "{brief}"
     );
+
+    // A review moves the count to the reviewed run, so the signal clears.
+    assert!(
+        !lab(
+            d,
+            &[
+                "lesson",
+                "review",
+                "quote-check",
+                "--count",
+                "1",
+                "--note",
+                " "
+            ]
+        )
+        .status
+        .success()
+    );
+    let out = lab(
+        d,
+        &[
+            "lesson",
+            "review",
+            "quote-check",
+            "--count",
+            "2",
+            "--note",
+            "x",
+        ],
+    );
+    assert!(
+        stderr(&out)
+            .contains("has 1 findings introduced since the first complete run after adoption"),
+        "{}",
+        stderr(&out)
+    );
+    let out = lab(
+        d,
+        &[
+            "lesson",
+            "review",
+            "quote-check",
+            "--count",
+            "1",
+            "--note",
+            "quote 3 is accepted",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("reviewed 1 finding(s) introduced since"),
+        "{}",
+        stdout(&out)
+    );
+    let lesson = std::fs::read_to_string(d.join("lessons/quote-check.md")).unwrap();
+    assert!(lesson.contains("\nreviewed: "), "{lesson}");
+    assert!(
+        lesson.contains(
+            ": reviewed 1 finding(s) introduced since the first complete run after adoption"
+        ),
+        "{lesson}"
+    );
+    let out = lab(d, &["evaluate", "--format", "jsonl"]);
+    let e: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(e["introduced"]["count"].as_u64(), Some(0), "{e}");
+    assert_eq!(
+        e["introduced"]["reviewed"], e["introduced"]["latest_run"],
+        "{e}"
+    );
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("- `quote-check`: reviewed after the last `lab loop`"),
+        "{brief}"
+    );
+    let out = lab(d, &["loop"]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    assert!(!stdout(&out).contains("[notified]"), "{}", stdout(&out));
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("- `quote-check`: none introduced since the reviewed run of "),
+        "{brief}"
+    );
+    let out = lab(
+        d,
+        &[
+            "lesson",
+            "review",
+            "quote-check",
+            "--count",
+            "1",
+            "--note",
+            "again",
+        ],
+    );
+    assert!(
+        stderr(&out).contains("has no findings introduced since the reviewed run of"),
+        "{}",
+        stderr(&out)
+    );
 }

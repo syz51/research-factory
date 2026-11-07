@@ -188,14 +188,17 @@ fn age(d: jiff::SignedDuration) -> String {
 }
 
 /// One lesson's verdict, as short as the brief needs.
-/// `status` is the lesson's current status, which can be newer than the
-/// loop's record.
-fn verdict_line(e: &Evaluation, status: Status) -> String {
+/// `status` and `reviewed` are the lesson's current ones, which can be newer
+/// than the loop's record.
+fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> String {
     let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     let unit = e.unit.map_or("session", |u| u.as_str());
     // Check runs get no verdict; their introduced findings are the news.
     if e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting {
         return match &e.introduced {
+            Some(i) if reviewed.is_some() && i.reviewed.as_deref() != reviewed => {
+                "reviewed after the last `lab loop`; `lab evaluate` gives the current count".into()
+            }
             Some(i) if i.count > 0 => format!(
                 "{} introduced since {} → review (`lab evaluate`)",
                 i.count,
@@ -291,7 +294,7 @@ pub fn measurements(
             Some(e) => lines.push(format!(
                 "- `{}`: {}",
                 l.meta.id,
-                verdict_line(e, l.meta.status)
+                verdict_line(e, l.meta.status, l.meta.reviewed.as_deref())
             )),
             None => lines.push(format!("- `{}`: not measured yet", l.meta.id)),
         }
@@ -408,6 +411,7 @@ mod tests {
                 created: "2026-10-01".into(),
                 updated: "2026-10-01".into(),
                 adopted: adopted.map(Into::into),
+                reviewed: None,
                 evidence: vec![],
             },
             body: String::new(),

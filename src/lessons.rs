@@ -93,6 +93,11 @@ pub struct Meta {
     pub updated: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted: Option<String>,
+    /// Check-run lessons: the file name of the stored check run whose
+    /// introduced findings were reviewed; `lab evaluate` counts introduced
+    /// findings from that run on. Cleared when the lesson is adopted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed: Option<String>,
     /// Pointers: `path:line`, session ids, finding fingerprints, URLs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
@@ -169,6 +174,13 @@ impl Lesson {
                 return Err(format!("{where_}: `{field}` must be YYYY-MM-DD, got `{v}`"));
             }
         }
+        if let Some(r) = &m.reviewed
+            && (!r.ends_with(".jsonl") || r.contains(['/', '\\']))
+        {
+            return Err(format!(
+                "{where_}: `reviewed` must be a check run's file name, got `{r}`"
+            ));
+        }
         if m.status.active() && m.adopted.is_none() {
             return Err(format!(
                 "{where_}: an {} lesson needs `adopted`",
@@ -202,6 +214,7 @@ impl Lesson {
         // from verified to adopted keeps it.
         if to == Status::Adopted && !from.active() {
             self.meta.adopted = Some(date.into());
+            self.meta.reviewed = None;
         }
         self.append_history(&format!(
             "{date}: {} → {}. {}",
@@ -209,6 +222,37 @@ impl Lesson {
             to.as_str(),
             note.trim()
         ));
+        self.validate()
+    }
+
+    /// Whether this lesson can take a review with this note.
+    pub fn reviewable(&self, note: &str) -> Result<(), String> {
+        if note.trim().is_empty() {
+            return Err("a review needs a note saying what was found".into());
+        }
+        if !self.meta.status.active() {
+            return Err(format!(
+                "`{}` is {}; only an adopted or verified lesson is reviewed",
+                self.meta.id,
+                self.meta.status.as_str()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Records that the introduced findings up to the stored check run named
+    /// `run` were reviewed, and appends a History line.
+    pub fn review(
+        &mut self,
+        run: &str,
+        summary: &str,
+        note: &str,
+        date: &str,
+    ) -> Result<(), String> {
+        self.reviewable(note)?;
+        self.meta.reviewed = Some(run.into());
+        self.meta.updated = date.into();
+        self.append_history(&format!("{date}: reviewed {summary}. {}", note.trim()));
         self.validate()
     }
 
@@ -324,6 +368,7 @@ mod tests {
             created: "2026-11-07".into(),
             updated: "2026-11-07".into(),
             adopted: None,
+            reviewed: None,
             evidence: vec!["references.md:3013".into()],
         }
     }
@@ -359,6 +404,65 @@ mod tests {
         assert!(text.contains("- 2026-11-07: recorded as observed."));
         assert!(text.contains("- 2026-11-08: observed → adopted. agreed in review"));
         assert_eq!(load(dir.path()).unwrap()[0].meta.status, Status::Adopted);
+    }
+
+    #[test]
+    fn a_review_is_recorded_and_cleared_by_readoption() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = meta("checked");
+        m.status = Status::Adopted;
+        m.adopted = Some("2026-11-01".into());
+        let path = create(dir.path(), m, "").unwrap();
+        let mut l = load(dir.path()).unwrap().remove(0);
+        assert!(
+            l.review(
+                "20261105T000000.000Z.jsonl",
+                "2 finding(s)",
+                " ",
+                "2026-11-06"
+            )
+            .is_err()
+        );
+        l.review(
+            "20261105T000000.000Z.jsonl",
+            "2 finding(s)",
+            "both in sealed lines",
+            "2026-11-06",
+        )
+        .unwrap();
+        save(&l).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("reviewed: 20261105T000000.000Z.jsonl\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("- 2026-11-06: reviewed 2 finding(s). both in sealed lines\n"),
+            "{text}"
+        );
+        let mut l = load(dir.path()).unwrap().remove(0);
+        assert_eq!(
+            l.meta.reviewed.as_deref(),
+            Some("20261105T000000.000Z.jsonl")
+        );
+        l.transition(Status::Retired, "superseded", "2026-11-07")
+            .unwrap();
+        assert!(
+            l.review("20261107T000000.000Z.jsonl", "1", "x", "2026-11-07")
+                .is_err()
+        );
+        l.transition(Status::Adopted, "again", "2026-11-08")
+            .unwrap();
+        assert_eq!(l.meta.reviewed, None);
+        let bad = text.replace(
+            "reviewed: 20261105T000000.000Z.jsonl",
+            "reviewed: ../x.jsonl",
+        );
+        assert!(
+            Lesson::parse(&path, &bad)
+                .unwrap_err()
+                .contains("`reviewed` must be a check run's file name")
+        );
     }
 
     #[test]

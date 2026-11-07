@@ -59,6 +59,15 @@ pub struct Run {
 }
 
 impl Run {
+    /// The stored run's file name, which identifies it exactly (its `at` has
+    /// whole seconds and is the start time).
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut lines = text
@@ -380,11 +389,7 @@ impl Baseline {
             self.checks.insert(
                 spec.name.clone(),
                 BaselineEntry {
-                    run: run
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    run: run.name(),
                     at: run.header.at.clone(),
                     fingerprints: run
                         .fingerprints(&spec.name)

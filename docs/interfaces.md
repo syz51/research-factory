@@ -128,7 +128,7 @@ notify = ["sh", "scripts/notify.sh"]   # optional
 renotify_hours = 24            # at most 87600
 ```
 
-**`rf.evaluation/2`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`. Version 2 (lab 0.4.0) counts agent sessions in session groups: `unit` `session-group`, and `sessions` on each side. lab 0.4 still reads version 1 records in an older `last.json`; lab 0.3 cannot read version 2. lab 0.5.0 adds `introduced` for check-run metrics; older readers ignore it.
+**`rf.evaluation/2`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`. Version 2 (lab 0.4.0) counts agent sessions in session groups: `unit` `session-group`, and `sessions` on each side. lab 0.4 still reads version 1 records in an older `last.json`; lab 0.3 cannot read version 2. lab 0.5.0 adds `introduced` for check-run metrics, and lab 0.6.0 its `reviewed` and `latest_run`; older readers ignore them.
 
 ```json
 {"schema":"rf.evaluation/2","lesson":"read-by-section","lesson_status":"adopted","metric":"agentprof:file-reread","unit":"session-group","method":"cluster-permutation","verdict":"collecting","reason":"3 of 10 session groups after adoption, 540 of 10 before, in comparable strata","adopted":"2026-11-07","before":{"n":540,"sessions":612,"positives":5,"rate":0.008169934640522876,"mean":null,"median":null},"after":{"n":3,"sessions":4,"positives":0,"rate":0.0,"mean":null,"median":null},"p_lower":null,"p_upper":null,"strata":[{"source":"claude","role":"main","before":540,"after":3}],"excluded":12,"sessions_needed":295,"min_sessions":10,"alpha":0.05,"baseline_days":90}
@@ -146,7 +146,7 @@ renotify_hours = 24            # at most 87600
 | `strata` | Each contributing `(source, role)` with its `before` and `after` session-group counts |
 | `excluded` | Session groups in strata without groups on both sides |
 | `sessions_needed` | For a rule that is collecting or inconclusive: about how many more session groups without the finding would show a decrease |
-| `introduced` | Check runs only, when a complete run exists since adoption: `since` (the first such run's `at`, UTC), `since_date` (its date in the project's time zone), `latest` (the latest complete run's `at`), `count`, and `findings`, one per message and data with more findings in the latest run than in the `since` run: `message`, `added` (the excess), `subjects` (where the new ones are: the latest run's subjects for that key whose fingerprint the `since` run lacks, or all of them when none does; at most ten) and `more` (subjects left out). Left out otherwise |
+| `introduced` | Check runs only, when a complete run exists since adoption: `since` (the first such run's `at`, UTC, or, after `lab lesson review`, the reviewed run's), `since_date` (its date in the project's time zone), `reviewed` (the reviewed run's file name when `since` is that run; left out otherwise), `latest` (the latest complete run's `at`), `latest_run` (its file name), `count`, and `findings`, one per message and data with more findings in the latest run than in the `since` run: `message`, `added` (the excess), `subjects` (where the new ones are: the latest run's subjects for that key whose fingerprint the `since` run lacks, or all of them when none does; at most ten) and `more` (subjects left out). Left out otherwise |
 
 **`rf.signal/1`**: something to act on, sent to the notify command.
 
@@ -158,7 +158,7 @@ renotify_hours = 24            # at most 87600
 | --- | --- | --- |
 | `lesson-verifiable` | `lesson-verifiable:<lesson>` | An adopted lesson's verdict is `improved`: verify it |
 | `lesson-worse` | `lesson-worse:<lesson>` | An adopted or verified lesson's verdict is `worse`: revise the rule or retire it |
-| `lesson-introduced` | `lesson-introduced:<lesson>` | An adopted or verified check-run lesson has findings introduced since adoption; the body lists them. Its detail is the messages and their counts, so a change sends it again |
+| `lesson-introduced` | `lesson-introduced:<lesson>` | An adopted or verified check-run lesson has findings introduced since adoption, or since its last review; the body lists them. Its detail is the run they are counted from, the messages and their counts, so a change, including a review, sends it again (once `renotify_hours` after the last send) |
 | `lesson-unmeasurable` | `lesson-unmeasurable:<lesson>` | An adopted lesson's verdict is `unmeasurable` (a verified one stays verified on its other evidence): choose a metric that can show an effect, or decide on other evidence with `--force` and a note |
 | `uncovered-rules` | `uncovered-rules` | `lab retro` finds recurring rules without a lesson; one signal lists them all |
 | `measure-failed` | `measure-failed:<index>` | A `measure` command failed; the body has its command, status and last output lines |

@@ -102,7 +102,7 @@ fn measured(e: &Evaluation) -> String {
             "stratified permutation test that moves whole session groups (the subagents below one root session, or one session) between the sides, on the share of sessions with the finding or a field's rank within its stratum, strata = (source, role); lower is better"
         }
         Some(Method::Descriptive) => {
-            "findings introduced since the first complete check run after adoption, keyed by message and data, without a verdict (runs repeat the same backlog, so they are not independent)"
+            "findings introduced since the first complete check run after adoption, or since the run of the last `lab lesson review`, keyed by message and data, without a verdict (runs repeat the same backlog, so they are not independent)"
         }
         None => "none",
     };
@@ -292,10 +292,16 @@ pub fn derive(
                 let i = e.introduced.as_ref().expect("checked above");
                 (
                     "lesson-introduced",
-                    format!("Review findings introduced since lesson {id} was adopted"),
+                    if i.reviewed.is_some() {
+                        format!("Review findings introduced since lesson {id} was last reviewed")
+                    } else {
+                        format!("Review findings introduced since lesson {id} was adopted")
+                    },
                     format!(
                         "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
-                         Fix each, or show that the finding is wrong. If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
+                         Fix each, or show that the finding is wrong. When `lab evaluate` lists only findings that cannot be fixed, such as those in append-only files, record their review with their count:\n\n\
+                         ```sh\nlab lesson review {id} --count <n> --note \"<what was found>\"\n```\n\n\
+                         If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
                          Check runs give no verdict; to verify the lesson, cite other evidence with `--force`.\n",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
@@ -309,14 +315,15 @@ pub fn derive(
             (Verdict::Unmeasurable, _) => {
                 format!("unmeasurable: {}", e.reason.as_deref().unwrap_or(""))
             }
-            // A changed set of introduced findings is news; their subjects alone are not.
+            // A changed set of introduced findings, or a review that moved the
+            // run they are counted from, is news; their subjects alone are not.
             (Verdict::Collecting, Some(i)) => {
                 let keys: Vec<String> = i
                     .findings
                     .iter()
                     .map(|f| format!("+{} {}", f.added, f.message))
                     .collect();
-                format!("introduced: {}", keys.join("; "))
+                format!("introduced since {}: {}", i.since, keys.join("; "))
             }
             (v, _) => v.as_str().to_string(),
         };
@@ -564,6 +571,90 @@ mod tests {
             first_seen: String::new(),
             at: String::new(),
         }
+    }
+
+    #[test]
+    fn a_review_changes_the_introduced_signal_title_and_detail() {
+        use crate::evaluate::{Introduced, IntroducedFinding, Method, Side, Unit};
+        use crate::lessons::{Kind, Meta};
+        let lesson = Lesson {
+            path: "q.md".into(),
+            meta: Meta {
+                id: "q".into(),
+                title: "t".into(),
+                kind: Kind::Bad,
+                status: Status::Adopted,
+                scope: "writing".into(),
+                tags: vec![],
+                rule: "r".into(),
+                metric: Some("claimcheck:quote-not-found".parse().unwrap()),
+                created: "2026-11-01".into(),
+                updated: "2026-11-01".into(),
+                adopted: Some("2026-11-01".into()),
+                reviewed: None,
+                evidence: vec![],
+            },
+            body: String::new(),
+        };
+        let eval = |since: &str, reviewed: Option<&str>| Evaluation {
+            schema: crate::evaluate::SCHEMA.into(),
+            lesson: "q".into(),
+            lesson_status: Status::Adopted,
+            metric: Some("claimcheck:quote-not-found".into()),
+            unit: Some(Unit::Run),
+            method: Some(Method::Descriptive),
+            verdict: Verdict::Collecting,
+            reason: None,
+            adopted: Some("2026-11-01".into()),
+            before: Side::default(),
+            after: Side::default(),
+            p_lower: None,
+            p_upper: None,
+            strata: vec![],
+            excluded: 0,
+            sessions_needed: None,
+            min_sessions: 10,
+            alpha: 0.05,
+            baseline_days: 90,
+            introduced: Some(Introduced {
+                since: since.into(),
+                since_date: Some(since[..10].into()),
+                latest: "2026-11-05T00:00:00Z".into(),
+                latest_run: "r5.jsonl".into(),
+                reviewed: reviewed.map(Into::into),
+                count: 1,
+                findings: vec![IntroducedFinding {
+                    message: "quote missing".into(),
+                    added: 1,
+                    subjects: vec!["a.md:1".into()],
+                    more: 0,
+                }],
+            }),
+        };
+        let one = |e: Evaluation| {
+            derive(
+                "p",
+                Path::new("."),
+                "now",
+                std::slice::from_ref(&lesson),
+                &[e],
+                &[],
+                &[],
+            )
+            .remove(0)
+        };
+        let before = one(eval("2026-11-01T00:00:00Z", None));
+        let after = one(eval("2026-11-04T00:00:00Z", Some("r4.jsonl")));
+        assert_eq!(before.kind, "lesson-introduced");
+        assert!(before.title.contains("was adopted"), "{}", before.title);
+        assert!(after.title.contains("was last reviewed"), "{}", after.title);
+        // The same message after a review is a new detail, so it is sent again.
+        assert_ne!(before.detail, after.detail);
+        assert!(
+            after.body.contains("lab lesson review q --count <n>"),
+            "{}",
+            after.body
+        );
     }
 
     fn t(h: i64) -> jiff::Timestamp {
