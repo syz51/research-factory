@@ -810,7 +810,7 @@ fn evaluate(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
          The comparison is observational: other changes since adoption can explain a difference, \
          and with {} lessons measured some will cross the threshold by chance. \
          Check runs are described, not judged: \"introduced\" counts findings in the latest \
-         complete run beyond their message's count in the first complete run since adoption.",
+         complete run beyond the count of the same message and data in the first complete run since adoption.",
         s.min_sessions,
         s.alpha / 2.0,
         s.alpha,
