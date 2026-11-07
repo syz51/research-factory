@@ -228,16 +228,29 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 eprintln!("lab: {note}");
             }
             let checks: Vec<String> = project.lab.checks.iter().map(|c| c.name.clone()).collect();
-            let archive = project.lab.archive.as_ref().map(|a| brief::Archive {
-                start: a.start.as_ref().map(|s| {
-                    let bytes = std::fs::metadata(project.path(s))
-                        .ok()
-                        .filter(|m| m.is_file())
-                        .map(|m| m.len());
-                    (s.clone(), bytes)
-                }),
-                indexes: a.index.iter().map(|i| i.output.clone()).collect(),
-            });
+            let archive = match project.lab.archive.as_ref() {
+                None => None,
+                Some(a) => {
+                    let start = match &a.start {
+                        None => None,
+                        Some(s) => {
+                            // A missing start page is reported in the brief; any other
+                            // problem with it is an error, not an invitation to create it.
+                            let bytes = match std::fs::metadata(project.path(s)) {
+                                Ok(m) if m.is_file() => Some(m.len()),
+                                Ok(_) => return Err(format!("{s}: the start page is not a file")),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                                Err(e) => return Err(format!("{s}: {e}")),
+                            };
+                            Some((s.clone(), bytes))
+                        }
+                    };
+                    Some(brief::Archive {
+                        start,
+                        indexes: a.index.iter().map(|i| i.output.clone()).collect(),
+                    })
+                }
+            };
             print!(
                 "{}{}",
                 brief::render(

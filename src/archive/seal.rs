@@ -103,8 +103,6 @@ impl Manifest {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())? + "\n";
         super::write_atomically(path, body.as_bytes())
     }

@@ -555,3 +555,82 @@ fn without_an_archive_table_the_commands_explain() {
         stderr(&out)
     );
 }
+
+#[test]
+fn review_cases_links_titles_and_seals() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    archive(d);
+    // Prose shaped like a reference definition, a heading inside a comment, a
+    // comment inside a heading, a link with the wrong case, a record whose file
+    // name needs escaping and a summary with a relative link.
+    write(
+        d,
+        "docs/history/03-2026-10-04-review.md",
+        "<!--\n# Template heading\n-->\n# Review <!-- fill in -->\n\n## Findings <!-- todo -->\n\n\
+         [TODO]: check the baseline\n[ref]: ../log/2026-10.md \"Log\"\n\n\
+         [ok](#findings) [gone](#template-heading) [case](02-2026-10-03-PILOT.md)\n",
+    );
+    write(
+        d,
+        "docs/decisions/D003-c#-notes.md",
+        "---\nstatus: accepted\nsummary: See [data](data/x.md) first\n---\n# C# notes\n",
+    );
+    // A log whose first line is a rule, not front matter, stays sealed in full.
+    write(
+        d,
+        "docs/log/2026-11.md",
+        "---\n## 2026-11-01\nentry one\n---\n## 2026-11-02\n",
+    );
+    assert!(lab(d, &["archive", "update"]).status.success());
+
+    let (_, text) = check(d);
+    assert_eq!(
+        rules(&text),
+        [
+            "warn superseded-link docs/START.md:3",
+            "error broken-anchor docs/history/03-2026-10-04-review.md:11",
+            "error broken-link docs/history/03-2026-10-04-review.md:11",
+        ],
+        "{text}"
+    );
+    assert!(text.contains("#template-heading"), "{text}");
+    assert!(text.contains("02-2026-10-03-PILOT.md"), "{text}");
+    let history = read(d, "docs/history/INDEX.md");
+    assert!(
+        history.contains("[H3](03-2026-10-04-review.md) · 2026-10-04 — Review."),
+        "{history}"
+    );
+    let decisions = read(d, "docs/decisions/INDEX.md");
+    assert!(
+        decisions.contains("[D003](D003-c%23-notes.md) — C# notes. See data first."),
+        "{decisions}"
+    );
+
+    // Editing the log's first entry is caught although the file starts with `---`.
+    write(
+        d,
+        "docs/log/2026-11.md",
+        "---\n## 2026-11-01\nentry ONE\n---\n## 2026-11-02\n",
+    );
+    assert!(rules(&check(d).1).contains(&"error sealed-edited docs/log/2026-11.md".to_string()));
+    write(
+        d,
+        "docs/log/2026-11.md",
+        "---\n## 2026-11-01\nentry one\n---\n## 2026-11-02\nmore\n",
+    );
+    // An append is not an edit: --accept refuses it and records nothing.
+    let out = lab(
+        d,
+        &[
+            "archive",
+            "seal",
+            "--accept",
+            "docs/log/2026-11.md",
+            "--note",
+            "x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(!read(d, "docs/.seal.json").contains("\"note\""));
+}

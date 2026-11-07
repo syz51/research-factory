@@ -87,7 +87,7 @@ tags: [retrieval]
 | Field | Meaning |
 | --- | --- |
 | `id` | Stable identifier, such as `H158` or `D012`. When absent, the index derives it from the file name (`id_from`, `id_prefix`, `trim_leading_zeros`), the folder name for `README.md`, or else the file stem. |
-| `title` | When absent, the first `# ` heading after the front matter. |
+| `title` | When absent, the first `# ` heading after the front matter, without a leading copy of the record's id and its separator (`# H158 — Moved` gives `Moved`). |
 | `date` | `YYYY-MM-DD`. When absent, the first date in the file's path. |
 | `status` | One of `[lab.archive] statuses` (default: `current`, `draft`, `proposed`, `accepted`, `open`, `resolved`, `superseded`, `rejected`, `withdrawn`, `historical`). The `inactive_statuses` (default: `superseded`, `rejected`, `withdrawn`, `historical`) mark records that no longer apply. |
 | `summary` | One line shown in the index. |

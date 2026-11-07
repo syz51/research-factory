@@ -311,7 +311,7 @@ fn seal_files(spec: &Spec, sealed: &[String]) -> Result<bool, String> {
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for path in sealed {
         let bytes = std::fs::read(spec.root().join(path)).map_err(|e| format!("{path}: {e}"))?;
-        let body = front::split(&bytes).body;
+        let body = front::sealed_body(&bytes);
         let state = Entry::state(manifest.files.get(path), body);
         let label = match state {
             State::New => "newly sealed",
@@ -401,12 +401,22 @@ fn accept_edit(spec: &Spec, path: &str, note: &str) -> Result<ExitCode, String> 
         )
     })?;
     let bytes = std::fs::read(spec.root().join(&key)).map_err(|e| format!("{key}: {e}"))?;
-    let new = Entry::of(front::split(&bytes).body);
+    let body = front::sealed_body(&bytes);
     let old = manifest.files[&key].clone();
-    if new == old {
-        println!("{key} is unchanged since it was sealed; nothing to accept");
-        return Ok(ExitCode::SUCCESS);
+    match Entry::state(Some(&old), body) {
+        State::Edited => {}
+        State::Unchanged => {
+            println!("{key} is unchanged since it was sealed; nothing to accept");
+            return Ok(ExitCode::SUCCESS);
+        }
+        State::Appended | State::New => {
+            println!(
+                "{key} was only appended to, which is not an edit; `lab archive seal` records it without --accept"
+            );
+            return Ok(ExitCode::FAILURE);
+        }
     }
+    let new = Entry::of(body);
     manifest.history.push(seal::Change {
         at: crate::finding::now(),
         path: key.clone(),
@@ -475,10 +485,17 @@ pub fn check(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
         for p in &problems {
             println!("{}", p.text());
         }
-        println!(
-            "{errors} error(s), {} warning(s) in the archive.",
-            problems.len() - errors
-        );
+        let warnings = problems
+            .iter()
+            .filter(|p| p.severity == Severity::Warn)
+            .count();
+        let notes = problems.len() - errors - warnings;
+        let notes = if notes > 0 {
+            format!(", {notes} note(s)")
+        } else {
+            String::new()
+        };
+        println!("{errors} error(s), {warnings} warning(s){notes} in the archive.");
     }
     Ok(exit(errors == 0))
 }
@@ -551,6 +568,7 @@ pub fn find(project: &Project, terms: &[String], limit: usize) -> Result<ExitCod
     Ok(ExitCode::SUCCESS)
 }
 
+/// The first record of each path (a file can belong to several indexes).
 fn unique_refs<'r>(records: &[&'r Record]) -> Vec<&'r Record> {
     let mut seen = BTreeSet::new();
     records
@@ -581,17 +599,26 @@ pub fn next(project: &Project, prefix: &str, width: Option<usize>) -> Result<Exi
 }
 
 /// A heading-derived title without a leading copy of the record's id, as in
-/// `# H158 — Personal details moved`.
+/// `# H158 — Personal details moved` or `# H12: Pilot`. The separator needs
+/// space after it, and a dash needs space before it too, so `topic-modelling`
+/// and `H1-H3` are left whole.
 fn without_id<'t>(title: &'t str, id: Option<&str>) -> &'t str {
     let Some(rest) = id.and_then(|id| title.strip_prefix(id)) else {
         return title;
     };
-    match rest
-        .trim_start()
-        .strip_prefix(['—', '–', '·', ':', '-'])
-        .map(str::trim_start)
-    {
-        Some(stripped) if !stripped.is_empty() => stripped,
+    let after = match rest.strip_prefix(':') {
+        Some(after) => Some(after),
+        None => {
+            let spaced = rest.trim_start();
+            (spaced.len() < rest.len())
+                .then(|| spaced.strip_prefix(['—', '–', '·', ':', '-']))
+                .flatten()
+        }
+    };
+    match after {
+        Some(after) if after.starts_with(char::is_whitespace) && !after.trim().is_empty() => {
+            after.trim_start()
+        }
         _ => title,
     }
 }
@@ -608,10 +635,18 @@ mod tests {
         );
         assert_eq!(without_id("H12 · Pilot", Some("H12")), "Pilot");
         assert_eq!(without_id("H1: Scope", Some("H1")), "Scope");
-        // Another id, no separator, or nothing after it: unchanged.
+        assert_eq!(without_id("H3 - Recap", Some("H3")), "Recap");
+        // Another id, no separator, a hyphenated word or nothing after it: unchanged.
         assert_eq!(without_id("H158 — Moved", Some("H15")), "H158 — Moved");
         assert_eq!(without_id("H15 plan", Some("H15")), "H15 plan");
         assert_eq!(without_id("H15 —", Some("H15")), "H15 —");
+        assert_eq!(
+            without_id("topic-modelling notes", Some("topic")),
+            "topic-modelling notes"
+        );
+        assert_eq!(without_id("H1-H3 recap", Some("H1")), "H1-H3 recap");
+        assert_eq!(without_id("H158 -- Moved", Some("H158")), "H158 -- Moved");
+        assert_eq!(without_id("H1:Scope", Some("H1")), "H1:Scope");
         assert_eq!(without_id("Initial topic", None), "Initial topic");
     }
 }

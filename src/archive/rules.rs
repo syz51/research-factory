@@ -136,11 +136,7 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
 
 /// Each record once, by path, in index order.
 fn unique(records: &[Record]) -> Vec<&Record> {
-    let mut seen = BTreeSet::new();
-    records
-        .iter()
-        .filter(|r| seen.insert(r.path.as_str()))
-        .collect()
+    super::unique_refs(&records.iter().collect::<Vec<_>>())
 }
 
 fn record_problems(spec: &Spec, records: &[Record], out: &mut Vec<Problem>) {
@@ -363,6 +359,44 @@ fn resolve(root: &Path, dir: &str, dest: &str) -> Target {
     Target::There { abs, rel, fragment }
 }
 
+/// Directory listings, to check that a path exists with exactly the spelling a
+/// link uses. On a case-insensitive file system (macOS by default)
+/// `Path::exists` accepts `TOPIC.md` for `topic.md`, a link that breaks on
+/// GitHub and Linux.
+#[derive(Default)]
+struct Listings(HashMap<PathBuf, Option<BTreeSet<String>>>);
+
+impl Listings {
+    /// Whether `rel`, relative to `root`, exists. A component that the file
+    /// system finds but that differs from the listed name only in case is
+    /// missing; another difference (such as Unicode normalisation) is accepted.
+    fn exists(&mut self, root: &Path, rel: &str) -> bool {
+        let mut dir = root.to_path_buf();
+        for part in rel.split('/').filter(|p| !p.is_empty()) {
+            let names = self.0.entry(dir.clone()).or_insert_with(|| {
+                std::fs::read_dir(&dir).ok().map(|entries| {
+                    entries
+                        .filter_map(Result::ok)
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+            });
+            let Some(names) = names else {
+                // Unlisted directory: fall back to the file system's answer.
+                return root.join(rel).exists();
+            };
+            if !names.contains(part) {
+                let lower = part.to_lowercase();
+                if !dir.join(part).exists() || names.iter().any(|n| n.to_lowercase() == lower) {
+                    return false;
+                }
+            }
+            dir.push(part);
+        }
+        true
+    }
+}
+
 fn is_markdown(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str())
@@ -388,6 +422,7 @@ fn link_problems(
     let checked: BTreeSet<&str> = links.iter().map(String::as_str).collect();
     let current: BTreeSet<&str> = current.iter().map(String::as_str).collect();
     let mut exists: HashMap<PathBuf, bool> = HashMap::new();
+    let mut listings = Listings::default();
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -407,7 +442,11 @@ fn link_problems(
                     }
                 }
                 Target::There { abs, rel, fragment } => {
-                    if !*exists.entry(abs.clone()).or_insert_with(|| abs.exists()) {
+                    let found = *exists.entry(abs.clone()).or_insert_with(|| match &rel {
+                        Some(r) => listings.exists(root, r),
+                        None => abs.exists(),
+                    });
+                    if !found {
                         if check {
                             out.push(problem(
                                 "broken-link",
@@ -439,7 +478,13 @@ fn link_problems(
                         let bytes = texts.bytes(&abs_file)?;
                         let text = String::from_utf8_lossy(&bytes);
                         let line = text.lines().nth(link.line - 1).unwrap_or("").to_lowercase();
-                        if !HISTORY_WORDS.iter().any(|w| line.contains(w)) {
+                        let marked = HISTORY_WORDS.iter().any(|w| line.contains(w))
+                            || spec
+                                .cfg
+                                .inactive_statuses
+                                .iter()
+                                .any(|s| line.contains(&s.to_lowercase()));
+                        if !marked {
                             let mut p = problem(
                                 "superseded-link",
                                 format!(
@@ -463,7 +508,7 @@ fn seal_problems(spec: &Spec, sealed: &[String], out: &mut Vec<Problem>) -> Resu
     let manifest = Manifest::load(&spec.manifest)?;
     for path in sealed {
         let bytes = std::fs::read(spec.root().join(path)).map_err(|e| format!("{path}: {e}"))?;
-        match Entry::state(manifest.files.get(path), front::split(&bytes).body) {
+        match Entry::state(manifest.files.get(path), front::sealed_body(&bytes)) {
             State::New => out.push(Problem::new(
                 "unsealed",
                 Severity::Warn,

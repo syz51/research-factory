@@ -84,6 +84,19 @@ pub fn valid_date(s: &str) -> bool {
 
 /// Parses front matter that starts on file line 2. `statuses` are the allowed
 /// values of `status`.
+/// The part of a sealed file that the seal covers: the body after front
+/// matter that parses as a YAML mapping, else the whole file. A log that starts
+/// with a `---` rule therefore stays sealed in full.
+pub fn sealed_body(bytes: &[u8]) -> &[u8] {
+    let s = split(bytes);
+    match s.yaml {
+        Some(yaml) if matches!(yaml_serde::from_slice::<Value>(yaml), Ok(Value::Mapping(_))) => {
+            s.body
+        }
+        _ => bytes,
+    }
+}
+
 pub fn parse(yaml: &[u8], statuses: &[String]) -> Result<Meta, Invalid> {
     let invalid = |message: String| Invalid { line: 1, message };
     let text =

@@ -256,17 +256,55 @@ fn reference_definition(line: &str, m: &[u8]) -> Option<String> {
     while m.get(p).is_some_and(|&c| c == b' ' || c == b'\t') {
         p += 1;
     }
-    let (ds, de) = if m.get(p) == Some(&b'<') {
+    let (ds, de, rest) = if m.get(p) == Some(&b'<') {
         let e = p + 1 + m[p + 1..].iter().position(|&c| c == b'>')?;
-        (p + 1, e)
+        (p + 1, e, e + 1)
     } else {
         let len = m[p..]
             .iter()
             .position(|c| c.is_ascii_whitespace())
             .unwrap_or(m.len() - p);
-        (p, p + len)
+        (p, p + len, p + len)
     };
-    Some(unescape(&line[ds..de]))
+    // Only an optional title may follow the destination; `[TODO]: check this` is prose.
+    let title = line[rest..].trim();
+    let is_title = title.is_empty()
+        || (title.len() >= 2
+            && matches!(
+                (title.as_bytes()[0], title.as_bytes()[title.len() - 1]),
+                (b'"', b'"') | (b'\'', b'\'') | (b'(', b')')
+            ));
+    (de > ds && is_title).then(|| unescape(&line[ds..de]))
+}
+
+/// `line` without the parts inside HTML comments, given whether a comment
+/// was open when the line began.
+fn strip_comments(line: &str, mut in_comment: bool) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    loop {
+        if in_comment {
+            match rest.find("-->") {
+                Some(j) => {
+                    rest = &rest[j + 3..];
+                    in_comment = false;
+                }
+                None => return out,
+            }
+        } else {
+            match rest.find("<!--") {
+                Some(j) => {
+                    out.push_str(&rest[..j]);
+                    rest = &rest[j + 4..];
+                    in_comment = true;
+                }
+                None => {
+                    out.push_str(rest);
+                    return out;
+                }
+            }
+        }
+    }
 }
 
 /// An ATX heading's level and text.
@@ -321,7 +359,7 @@ fn paragraph_text(line: &str) -> bool {
     !(list || t.starts_with(['>', '|', '<']))
 }
 
-static LINK_TEXT: LazyLock<Regex> =
+pub(super) static LINK_TEXT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!?\[([^\]]*)\](?:\([^)]*\)|\[[^\]]*\])").expect("valid regex"));
 static HTML_TAG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"</?[A-Za-z][^>]*>").expect("valid regex"));
@@ -392,9 +430,10 @@ pub fn parse(body: &str, first_line: usize) -> Doc {
             previous = None;
             continue;
         }
+        let visible = strip_comments(line, in_comment);
         let m = mask(line, &mut in_comment);
         let masked = String::from_utf8_lossy(&m);
-        if let Some((level, text)) = atx(line) {
+        if let Some((level, text)) = atx(&visible) {
             if level == 1 && doc.title.is_none() {
                 doc.title = Some(ATTR_ID.replace_all(text, "").trim().to_string());
             }

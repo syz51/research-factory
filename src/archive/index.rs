@@ -118,13 +118,19 @@ fn link_dest(path: &str) -> String {
             ')' => out.push_str("%29"),
             '<' => out.push_str("%3C"),
             '>' => out.push_str("%3E"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            '`' => out.push_str("%60"),
             c => out.push(c),
         }
     }
     out
 }
 
+/// `s` on one line, with inline links reduced to their text: a relative link
+/// in a record's title or summary would not resolve from the index.
 fn one_line(s: &str) -> String {
+    let s = super::markdown::LINK_TEXT.replace_all(s, "$1");
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
