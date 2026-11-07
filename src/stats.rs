@@ -1,6 +1,7 @@
 //! The tests `lab evaluate` uses: an exact stratified hypergeometric test for
-//! per-session indicators, and the van Elteren stratified Wilcoxon rank-sum
-//! test for numeric session fields.
+//! per-session indicators, the van Elteren stratified Wilcoxon rank-sum test
+//! for numeric session fields, and a stratified cluster permutation test for
+//! either when sessions come in groups that are not independent.
 //!
 //! Both answer one question per lesson: is the after-adoption group lower
 //! (`p_lower`) or higher (`p_upper`) than the before group would make likely
@@ -202,6 +203,130 @@ pub fn van_elteren(strata: &[Samples]) -> Option<(f64, f64, f64)> {
     }
     let z = num / var.sqrt();
     Some((z, normal_cdf(z), normal_cdf(-z)))
+}
+
+/// One cluster of observations in a stratum: its side, and the sum and number
+/// of its observations' scores.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cluster {
+    pub after: bool,
+    pub sum: f64,
+    pub count: usize,
+}
+
+/// A stratified cluster permutation test of the per-observation mean score
+/// after adoption against before.
+///
+/// The statistic sums, over strata, `w × (mean after − mean before)` with
+/// `w = n_b n_a / (n_b + n_a)` over observations. Under the null hypothesis
+/// whole clusters are exchangeable between the sides within a stratum, so
+/// each round reassigns them at random, keeping each stratum's number of
+/// after clusters. Means per observation do not depend on cluster size, so a
+/// different mix of cluster sizes on the two sides does not by itself move
+/// the statistic. Returns `(p_lower, p_upper)` with the add-one estimate
+/// `(1 + hits) / (1 + rounds)`; a fixed `seed` makes it reproducible. Strata
+/// without clusters on both sides are skipped.
+pub fn cluster_permutation(strata: &[Vec<Cluster>], rounds: u32, seed: u64) -> (f64, f64) {
+    let strata: Vec<&Vec<Cluster>> = strata
+        .iter()
+        .filter(|s| s.iter().any(|c| c.after) && s.iter().any(|c| !c.after))
+        .collect();
+    let statistic = |assign: &dyn Fn(usize, usize) -> bool| -> f64 {
+        strata
+            .iter()
+            .enumerate()
+            .map(|(k, s)| {
+                let (mut sa, mut na, mut sb, mut nb) = (0.0, 0usize, 0.0, 0usize);
+                for (i, c) in s.iter().enumerate() {
+                    if assign(k, i) {
+                        (sa, na) = (sa + c.sum, na + c.count);
+                    } else {
+                        (sb, nb) = (sb + c.sum, nb + c.count);
+                    }
+                }
+                let (na, nb) = (na as f64, nb as f64);
+                na * nb / (na + nb) * (sa / na - sb / nb)
+            })
+            .sum()
+    };
+    let observed = statistic(&|k, i| strata[k][i].after);
+    let tolerance = 1e-9 * (1.0 + observed.abs());
+    // Per stratum: its number of after clusters, and an order of its
+    // clusters whose first `after` entries form the permuted after side.
+    let mut orders: Vec<(usize, Vec<usize>)> = strata
+        .iter()
+        .map(|s| (s.iter().filter(|c| c.after).count(), (0..s.len()).collect()))
+        .collect();
+    let mut rng = SplitMix64(seed);
+    let (mut lower, mut upper) = (0u32, 0u32);
+    let mut chosen: Vec<Vec<bool>> = strata.iter().map(|s| vec![false; s.len()]).collect();
+    for _ in 0..rounds {
+        for (k, (after, order)) in orders.iter_mut().enumerate() {
+            // A partial Fisher–Yates shuffle picks the after clusters.
+            for i in 0..*after {
+                let j = i + rng.below(order.len() - i);
+                order.swap(i, j);
+            }
+            chosen[k].fill(false);
+            for &i in &order[..*after] {
+                chosen[k][i] = true;
+            }
+        }
+        let t = statistic(&|k, i| chosen[k][i]);
+        if t <= observed + tolerance {
+            lower += 1;
+        }
+        if t >= observed - tolerance {
+            upper += 1;
+        }
+    }
+    let p = |hits: u32| (1.0 + f64::from(hits)) / (1.0 + f64::from(rounds));
+    (p(lower), p(upper))
+}
+
+/// Average ranks (1-based) of `values`, ties sharing their mean rank.
+pub fn midranks(values: &[f64]) -> Vec<f64> {
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut ranks = vec![0.0; values.len()];
+    let mut i = 0;
+    while i < order.len() {
+        let mut j = i;
+        while j + 1 < order.len() && values[order[j + 1]] == values[order[i]] {
+            j += 1;
+        }
+        let rank = (i + j + 2) as f64 / 2.0;
+        for &k in &order[i..=j] {
+            ranks[k] = rank;
+        }
+        i = j + 1;
+    }
+    ranks
+}
+
+/// SplitMix64: a small, fast generator; reproducible from its seed.
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number in `0..n`, by rejection so that it is unbiased.
+    fn below(&mut self, n: usize) -> usize {
+        let n = n as u64;
+        let zone = u64::MAX - u64::MAX % n;
+        loop {
+            let x = self.next();
+            if x < zone {
+                return (x % n) as usize;
+            }
+        }
+    }
 }
 
 /// The standard normal distribution function, from `erfc`.

@@ -115,6 +115,9 @@ pub struct Session {
     pub role: Option<String>,
     /// Time of the session's first record; `None` when unknown.
     pub start: Option<String>,
+    /// The session that started this one, for a subagent; `None` for a main
+    /// session or when the record does not say.
+    pub parent_id: Option<String>,
     record: Box<str>,
 }
 
@@ -127,6 +130,8 @@ struct SessionHead {
     role: Option<String>,
     #[serde(default)]
     start: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
 }
 
 impl Session {
@@ -145,6 +150,7 @@ impl Session {
             id: head.id,
             role: head.role,
             start: head.start,
+            parent_id: head.parent_id,
             record: line.into(),
         })
     }

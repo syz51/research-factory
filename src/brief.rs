@@ -192,6 +192,7 @@ fn age(d: jiff::SignedDuration) -> String {
 /// loop's record.
 fn verdict_line(e: &Evaluation, status: Status) -> String {
     let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
+    let unit = e.unit.map_or("session", |u| u.as_str());
     match e.verdict {
         Verdict::Collecting => {
             let mut s = format!("collecting {}/{}", e.after.n, e.min_sessions);
@@ -199,12 +200,12 @@ fn verdict_line(e: &Evaluation, status: Status) -> String {
                 let _ = write!(s, " after, {}/{} before", e.before.n, e.min_sessions);
             }
             if let Some(m) = e.sessions_needed {
-                let _ = write!(s, ", about {m} more sessions");
+                let _ = write!(s, ", about {m} more {unit}s");
             }
             s
         }
         Verdict::Inconclusive => match e.sessions_needed {
-            Some(m) => format!("inconclusive, about {m} more sessions"),
+            Some(m) => format!("inconclusive, about {m} more {unit}s"),
             None => format!("inconclusive{}", p(e.p_lower)),
         },
         Verdict::Improved if status == Status::Adopted => {

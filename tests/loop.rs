@@ -193,7 +193,7 @@ fn the_loop_signals_once_and_feeds_the_brief() {
         "{body}"
     );
     assert!(
-        body.contains("50 of 100 (50.0%)") && body.contains("0 of 100 (0.0%)"),
+        body.contains("50 of 100 sessions (50.0%)") && body.contains("0 of 100 sessions (0.0%)"),
         "{body}"
     );
     assert!(
@@ -258,7 +258,7 @@ fn the_loop_signals_once_and_feeds_the_brief() {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0]["schema"], "rf.evaluation/1");
+    assert_eq!(rows[0]["schema"], "rf.evaluation/2");
     assert_eq!(rows[0]["verdict"], "improved");
     assert_eq!(rows[0]["method"], "stratified-hypergeometric");
     assert_eq!(rows[1]["verdict"], "unmeasurable");

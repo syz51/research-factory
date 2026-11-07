@@ -63,7 +63,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 ## 5. Agent-session records: `rf.session/1`
 
-`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id`, `role` and `start` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out.
+`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id`, `role`, `start` and `parent_id` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). Within a stratum, the sessions below one root session (following `parent_id` up, within one `source`) form one session group, on the root's side of the adoption date; a session without a `parent_id` is a group of its own. It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out.
 
 ## 6. Archive records and seals: front matter and `rf.archive-seal/1`
 
@@ -112,13 +112,13 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
 }
 ```
 
-## 7. Lesson evaluations and loop signals: `rf.evaluation/1`, `rf.signal/1`, `rf.loop/1`
+## 7. Lesson evaluations and loop signals: `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 
 `lab` owns these. [factory.md](factory.md#how-a-lesson-is-evaluated) explains the method.
 
 ```toml
 [lab.evaluate]                 # all optional; these are the defaults
-min_sessions = 10              # observations (sessions or check runs) needed on each side
+min_sessions = 10              # observations (session groups or check runs) needed on each side
 alpha = 0.05                   # two-sided; each direction is tested at alpha/2
 baseline_days = 90             # baseline: observations this many days before adoption; 0 = all; at most 36500
 
@@ -128,24 +128,24 @@ notify = ["sh", "scripts/notify.sh"]   # optional
 renotify_hours = 24            # at most 87600
 ```
 
-**`rf.evaluation/1`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`.
+**`rf.evaluation/2`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`. Version 2 (lab 0.4.0) counts agent sessions in session groups: `unit` `session-group`, and `sessions` on each side. lab 0.4 still reads version 1 records in an older `last.json`; lab 0.3 cannot read version 2.
 
 ```json
-{"schema":"rf.evaluation/1","lesson":"read-by-section","lesson_status":"adopted","metric":"agentprof:file-reread","unit":"session","method":"stratified-hypergeometric","verdict":"collecting","reason":"3 of 10 sessions after adoption, 540 of 10 before, in comparable strata","adopted":"2026-11-07","before":{"n":540,"positives":5,"rate":0.009259259259259259,"mean":null,"median":null},"after":{"n":3,"positives":0,"rate":0.0,"mean":null,"median":null},"p_lower":null,"p_upper":null,"strata":[{"source":"claude","role":"main","before":540,"after":3}],"excluded":12,"sessions_needed":295,"min_sessions":10,"alpha":0.05,"baseline_days":90}
+{"schema":"rf.evaluation/2","lesson":"read-by-section","lesson_status":"adopted","metric":"agentprof:file-reread","unit":"session-group","method":"cluster-permutation","verdict":"collecting","reason":"3 of 10 session groups after adoption, 540 of 10 before, in comparable strata","adopted":"2026-11-07","before":{"n":540,"sessions":612,"positives":5,"rate":0.008169934640522876,"mean":null,"median":null},"after":{"n":3,"sessions":4,"positives":0,"rate":0.0,"mean":null,"median":null},"p_lower":null,"p_upper":null,"strata":[{"source":"claude","role":"main","before":540,"after":3}],"excluded":12,"sessions_needed":295,"min_sessions":10,"alpha":0.05,"baseline_days":90}
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `metric` | `tool:rule`, or `null` for a lesson without one |
-| `unit` | `session` or `run`; `null` when nothing measures the metric |
-| `method` | `stratified-hypergeometric` (a finding rule per session), `van-elteren` (a `session.` field), `descriptive` (check runs, means without a test) or `null` |
+| `unit` | `session-group` (a root session, or the subagents below one root session) or `run`; `null` when nothing measures the metric. Version 1 records say `session` |
+| `method` | `stratified-hypergeometric` (a finding rule, every group a single session), `van-elteren` (a `session.` field, every group a single session), `cluster-permutation` (either, when a group has several sessions), `descriptive` (check runs, means without a test) or `null` |
 | `verdict` | `collecting`, `improved`, `worse`, `inconclusive` or `unmeasurable` |
 | `reason` | Why the verdict is `collecting` or `unmeasurable`; otherwise `null` |
-| `before`, `after` | `n` observations, and `positives` and `rate` (rule per session) or `mean` and `median` (field or check run); over the contributing strata, or over every session when no stratum contributes yet |
+| `before`, `after` | `n` observations (session groups or check runs), `sessions` (the agent sessions in those groups; `null` for check runs), and `positives` (sessions with the finding) and `rate` (per session) for a rule, or `mean` and `median` (per session, or per check run); over the contributing strata only, so 0 when no stratum contributes yet |
 | `p_lower`, `p_upper` | One-sided p-values for a decrease and an increase after adoption; `null` without a test |
-| `strata` | Each contributing `(source, role)` with its `before` and `after` session counts |
-| `excluded` | Sessions in strata without sessions on both sides |
-| `sessions_needed` | For a rule that is collecting or inconclusive: about how many more sessions without the finding would show a decrease |
+| `strata` | Each contributing `(source, role)` with its `before` and `after` session-group counts |
+| `excluded` | Session groups in strata without groups on both sides |
+| `sessions_needed` | For a rule that is collecting or inconclusive: about how many more session groups without the finding would show a decrease |
 
 **`rf.signal/1`**: something to act on, sent to the notify command.
 

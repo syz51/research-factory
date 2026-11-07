@@ -98,6 +98,9 @@ fn measured(e: &Evaluation) -> String {
         Some(Method::VanElteren) => {
             "van Elteren stratified rank-sum test, strata = (source, role); lower is better"
         }
+        Some(Method::ClusterPermutation) => {
+            "stratified permutation test that moves whole session groups (the subagents below one root session, or one session) between the sides, on the share of sessions with the finding or a field's rank within its stratum, strata = (source, role); lower is better"
+        }
         Some(Method::Descriptive) => {
             "mean findings per complete check run, without a significance test (runs repeat the same backlog, so they are not independent)"
         }
@@ -109,13 +112,20 @@ fn measured(e: &Evaluation) -> String {
         e.metric.as_deref().unwrap_or("none")
     );
     let _ = writeln!(out, "- Method: {method}");
-    let side = |s: &crate::evaluate::Side| match (s.positives, s.rate, s.median, s.mean) {
-        (Some(p), Some(r), _, _) => format!("{p} of {} ({:.1}%)", s.n, r * 100.0),
-        (_, _, Some(med), Some(mean)) if e.method == Some(Method::VanElteren) => {
-            format!("n {}, median {med}, mean {mean:.2}", s.n)
+    let side = |s: &crate::evaluate::Side| {
+        let count = match s.sessions {
+            Some(sessions) if sessions == s.n => format!("{sessions} sessions"),
+            Some(sessions) => format!("{sessions} sessions in {} {unit}s", s.n),
+            None => format!("{} {unit}s", s.n),
+        };
+        match (s.positives, s.rate, s.median, s.mean) {
+            (Some(p), Some(r), _, _) => format!("{p} of {count} ({:.1}%)", r * 100.0),
+            (_, _, Some(med), Some(mean)) if s.sessions.is_some() => {
+                format!("{count}, median {med}, mean {mean:.2}")
+            }
+            (_, _, _, Some(mean)) => format!("{count}, mean {mean:.2}"),
+            _ => count,
         }
-        (_, _, _, Some(mean)) => format!("n {}, mean {mean:.2}", s.n),
-        _ => format!("n {}", s.n),
     };
     let window = if e.baseline_days == 0 {
         format!("all {unit}s")
@@ -146,7 +156,7 @@ fn measured(e: &Evaluation) -> String {
             .collect();
         let _ = writeln!(
             out,
-            "- Strata (sessions before → after): {}; {} session(s) in strata without both sides left out",
+            "- Strata ({unit}s before → after): {}; {} {unit}(s) in strata without both sides left out",
             strata.join(", "),
             e.excluded
         );
@@ -184,6 +194,7 @@ fn summary(e: &Evaluation) -> String {
         Some(Method::StratifiedHypergeometric) => "stratified hypergeometric",
         Some(Method::VanElteren) => "van Elteren",
         Some(Method::Descriptive) => "descriptive",
+        Some(Method::ClusterPermutation) => "cluster permutation",
         None => "",
     };
     match (e.verdict, e.p_lower, e.p_upper) {

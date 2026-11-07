@@ -1,9 +1,12 @@
 //! `lab evaluate`: whether each active lesson's metric changed after adoption.
 //!
-//! Agent-session metrics are tested within strata of comparable sessions
-//! (same source and role): a finding rule by the exact stratified
-//! hypergeometric test on per-session indicators, a numeric session field by
-//! the van Elteren test. Check runs repeat the same backlog and are not
+//! Agent-session metrics are measured per session and tested within strata
+//! of comparable sessions (same source and role). The subagents below one
+//! root session share its task, so they are not independent: they form one
+//! session group, the unit counted and moved by the test. Without such
+//! groups, a finding rule is tested by the exact stratified hypergeometric
+//! test on per-session indicators and a numeric session field by the van
+//! Elteren test; with them, both by a stratified cluster permutation test. Check runs repeat the same backlog and are not
 //! independent observations, so they are only described.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,7 +21,7 @@ use crate::lessons::{Lesson, Metric, Status};
 use crate::retro::Session;
 use crate::stats;
 
-pub const SCHEMA: &str = "rf.evaluation/1";
+pub const SCHEMA: &str = "rf.evaluation/2";
 
 /// A metric rule with this prefix is a numeric field of `rf.session/1`.
 pub const SESSION_FIELD: &str = "session.";
@@ -56,7 +59,11 @@ impl Verdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Unit {
+    /// One agent session: `rf.evaluation/1` records.
     Session,
+    /// A root session, or the subagents below one root session.
+    #[serde(rename = "session-group")]
+    SessionGroup,
     Run,
 }
 
@@ -64,6 +71,7 @@ impl Unit {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Session => "session",
+            Self::SessionGroup => "session group",
             Self::Run => "run",
         }
     }
@@ -76,21 +84,28 @@ pub enum Method {
     VanElteren,
     /// Means compared without a test (check runs).
     Descriptive,
+    /// Whole session groups permuted between the sides (agent sessions
+    /// with subagents).
+    ClusterPermutation,
 }
 
 /// One side of the adoption date.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Side {
+    /// Observations: session groups, sessions or check runs.
     pub n: usize,
+    /// The agent sessions in the `n` session groups; `None` for other units.
+    #[serde(default)]
+    pub sessions: Option<usize>,
     /// Sessions with at least one finding of the rule.
     pub positives: Option<u64>,
-    /// `positives / n`.
+    /// `positives` per session (per check run for check-run metrics).
     pub rate: Option<f64>,
     pub mean: Option<f64>,
     pub median: Option<f64>,
 }
 
-/// A stratum that contributes to the test: sessions before and after.
+/// A stratum that contributes to the test: observations before and after.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stratum {
     pub source: String,
@@ -117,9 +132,10 @@ pub struct Evaluation {
     pub p_lower: Option<f64>,
     pub p_upper: Option<f64>,
     pub strata: Vec<Stratum>,
-    /// Sessions left out because their stratum has none on the other side.
+    /// Observations left out because their stratum has none on the other side.
     pub excluded: usize,
-    /// Estimated clean after-sessions still needed to show a decrease.
+    /// Estimated clean observations after adoption still needed to show a
+    /// decrease, in the evaluation's unit.
     pub sessions_needed: Option<u64>,
     pub min_sessions: usize,
     pub alpha: f64,
@@ -181,7 +197,7 @@ impl Evaluation {
                     s.rate
                         .map_or_else(|| "-".into(), |r| format!("{:.1}%", r * 100.0))
                 };
-                let _ = write!(out, "{} → {} of {unit}s", pct(b), pct(a));
+                let _ = write!(out, "{} → {} of sessions", pct(b), pct(a));
             } else if self.method == Some(Method::VanElteren) {
                 let _ = write!(
                     out,
@@ -195,6 +211,9 @@ impl Evaluation {
                 let _ = write!(out, "{} → {} per {unit}", num(b.mean), num(a.mean));
             }
             let _ = write!(out, " (n {} → {}", b.n, a.n);
+            if let (Some(sb), Some(sa)) = (b.sessions, a.sessions) {
+                let _ = write!(out, " {unit}s from {sb} → {sa} sessions");
+            }
             if self.excluded > 0 {
                 let _ = write!(out, "; {} in unmatched strata left out", self.excluded);
             }
@@ -211,9 +230,10 @@ impl Evaluation {
         if let Some(m) = self.sessions_needed
             && matches!(self.verdict, Verdict::Collecting | Verdict::Inconclusive)
         {
+            let unit = self.unit.map_or("session", Unit::as_str);
             let _ = write!(
                 out,
-                "; about {m} more clean session(s) in the baseline's mix would show a decrease"
+                "; about {m} more clean {unit}(s) in the baseline's mix would show a decrease"
             );
         }
         if self.method == Some(Method::Descriptive)
@@ -405,6 +425,7 @@ fn describe(values: &[f64]) -> Side {
     let n = sorted.len();
     Side {
         n,
+        sessions: None,
         positives: None,
         rate: None,
         mean: (n > 0).then(|| sorted.iter().sum::<f64>() / n as f64),
@@ -422,6 +443,7 @@ fn indicator_side(values: &[f64]) -> Side {
     let positives = values.iter().filter(|&&v| v > 0.0).count() as u64;
     Side {
         n: values.len(),
+        sessions: None,
         positives: Some(positives),
         rate: (!values.is_empty()).then(|| positives as f64 / values.len() as f64),
         mean: None,
@@ -429,11 +451,53 @@ fn indicator_side(values: &[f64]) -> Side {
     }
 }
 
-/// One stratum's values before and after adoption.
-type Sides = (Vec<f64>, Vec<f64>);
+/// A session group within a stratum: the subagents below one root session
+/// (`Tree`, the root's id), or a root session on its own (`Own`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group<'a> {
+    Tree(&'a str),
+    Own(&'a str),
+}
 
-/// Per-session evaluation: a finding rule as a 0/1 indicator per session
-/// (`field` is `None`), or a numeric field of the session record.
+/// One session group: its side of adoption and its sessions' values.
+type Members = (bool, Vec<f64>);
+
+/// A stratum's session groups.
+type Groups<'a> = BTreeMap<Group<'a>, Members>;
+
+/// Rounds of the cluster permutation test; its smallest p-value is
+/// `1 / (ROUNDS + 1)`, far below any `alpha / 2` in use.
+const ROUNDS: u32 = 20_000;
+
+/// Fixed so that `lab evaluate` gives the same p-values on the same data.
+const SEED: u64 = 0x5EED_1E55_0000_0001;
+
+/// The root of a subagent's tree: its parent's parent and so on, up to a
+/// session without a parent or a parent that `by_id` does not have; `None`
+/// for a session without a parent. The bound stops a cycle.
+fn root_of<'a>(by_id: &BTreeMap<(&str, &str), &'a Session>, s: &'a Session) -> Option<&'a str> {
+    let mut id = s.parent_id.as_deref()?;
+    for _ in 0..by_id.len() {
+        match by_id
+            .get(&(s.source.as_str(), id))
+            .and_then(|p| p.parent_id.as_deref())
+        {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    Some(id)
+}
+
+/// Per-session evaluation in session groups: a finding rule as a 0/1
+/// indicator per session (`field` is `None`), or a numeric field of the
+/// session record.
+///
+/// The subagents below one root session share its task, so they form one
+/// group, on the side of adoption where the root started; any other session
+/// is a group of its own. Groups are the units counted against
+/// `min_sessions`. When every comparable group is a single session the exact
+/// tests apply; otherwise the cluster permutation test moves whole groups.
 fn sessions(
     mut e: Evaluation,
     metric: &Metric,
@@ -441,7 +505,7 @@ fn sessions(
     inputs: &Inputs,
     place: impl Fn(&str) -> Option<bool>,
 ) -> Evaluation {
-    e.unit = Some(Unit::Session);
+    e.unit = Some(Unit::SessionGroup);
     let sessions = match inputs.sessions {
         Ok(s) => s,
         Err(why) => return e.unmeasurable(format!("sessions file unreadable: {why}")),
@@ -452,11 +516,36 @@ fn sessions(
         .filter(|f| f.tool == metric.tool && f.rule == metric.rule)
         .map(|f| f.subject.as_str())
         .collect();
-    // (source, role) → (before values, after values)
-    let mut strata: BTreeMap<(&str, &str), Sides> = BTreeMap::new();
+    let by_id: BTreeMap<(&str, &str), &Session> = sessions
+        .iter()
+        .map(|s| ((s.source.as_str(), s.id.as_str()), s))
+        .collect();
+    let root = |s| root_of(&by_id, s);
+    // A tree's start: its root's, or its earliest member's when the file
+    // does not have the root.
+    let mut tree_start: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+    for s in sessions {
+        if let (Some(r), Some(start)) = (root(s), s.start.as_deref()) {
+            let key = (s.source.as_str(), r);
+            let known = by_id.get(&key).and_then(|r| r.start.as_deref());
+            let entry = tree_start.entry(key).or_insert(known.unwrap_or(start));
+            if known.is_none() && start < *entry {
+                *entry = start;
+            }
+        }
+    }
+    // (source, role) → group → (side, its sessions' values)
+    let mut strata: BTreeMap<(&str, &str), Groups> = BTreeMap::new();
     let mut dated = 0;
     for s in sessions {
-        let Some(after) = s.start.as_deref().and_then(&place) else {
+        let (group, start) = match root(s) {
+            Some(r) => (
+                Group::Tree(r),
+                tree_start.get(&(s.source.as_str(), r)).copied(),
+            ),
+            None => (Group::Own(s.id.as_str()), s.start.as_deref()),
+        };
+        let Some(after) = start.and_then(&place) else {
             continue;
         };
         dated += 1;
@@ -467,57 +556,74 @@ fn sessions(
                 None => continue,
             },
         };
-        let entry = strata.entry((s.source.as_str(), s.role())).or_default();
-        if after { &mut entry.1 } else { &mut entry.0 }.push(value);
+        strata
+            .entry((s.source.as_str(), s.role()))
+            .or_default()
+            .entry(group)
+            .or_insert((after, Vec::new()))
+            .1
+            .push(value);
     }
-    let all_before: Vec<f64> = strata.values().flat_map(|s| s.0.iter().copied()).collect();
-    let all_after: Vec<f64> = strata.values().flat_map(|s| s.1.iter().copied()).collect();
-    let contributing: Vec<(&(&str, &str), &Sides)> = strata
+    let count = |groups: &Groups, after: bool| groups.values().filter(|(a, _)| *a == after).count();
+    let contributing: Vec<(&(&str, &str), &Groups)> = strata
         .iter()
-        .filter(|(_, (b, a))| !b.is_empty() && !a.is_empty())
+        .filter(|(_, g)| count(g, false) > 0 && count(g, true) > 0)
         .collect();
-    // Only strata with sessions on both sides are compared; when none has,
+    // Only strata with groups on both sides are compared; when none has,
     // the lesson is still collecting.
-    e.excluded = all_before.len() + all_after.len()
-        - contributing
-            .iter()
-            .map(|(_, (b, a))| b.len() + a.len())
-            .sum::<usize>();
+    let groups_in = |after: bool| -> usize { strata.values().map(|g| count(g, after)).sum() };
+    let (groups_before, groups_after) = (groups_in(false), groups_in(true));
+    e.excluded =
+        groups_before + groups_after - contributing.iter().map(|(_, g)| g.len()).sum::<usize>();
     e.strata = contributing
         .iter()
-        .map(|((source, role), (b, a))| Stratum {
+        .map(|((source, role), g)| Stratum {
             source: (*source).into(),
             role: (*role).into(),
-            before: b.len(),
-            after: a.len(),
+            before: count(g, false),
+            after: count(g, true),
         })
         .collect();
-    let (before, after): (Vec<f64>, Vec<f64>) = (
+    // Every session's value on one side of the contributing strata.
+    let values = |after: bool| -> Vec<f64> {
         contributing
             .iter()
-            .flat_map(|(_, s)| s.0.iter().copied())
-            .collect(),
-        contributing
-            .iter()
-            .flat_map(|(_, s)| s.1.iter().copied())
-            .collect(),
-    );
-    let (e_before, e_after) = match field {
-        None => (indicator_side(&before), indicator_side(&after)),
-        Some(_) => (describe(&before), describe(&after)),
+            .flat_map(|(_, g)| g.values())
+            .filter(|(a, _)| *a == after)
+            .flat_map(|(_, v)| v.iter().copied())
+            .collect()
     };
-    e.before = e_before;
-    e.after = e_after;
-    e.method = Some(match field {
-        None => Method::StratifiedHypergeometric,
-        Some(_) => Method::VanElteren,
+    let (before, after) = (values(false), values(true));
+    let side = |v: &[f64], after: bool| -> Side {
+        let s = match field {
+            None => indicator_side(v),
+            Some(_) => describe(v),
+        };
+        Side {
+            n: contributing.iter().map(|(_, g)| count(g, after)).sum(),
+            sessions: Some(v.len()),
+            ..s
+        }
+    };
+    e.before = side(&before, false);
+    e.after = side(&after, true);
+    let clustered = contributing
+        .iter()
+        .any(|(_, g)| g.values().any(|(_, v)| v.len() > 1));
+    e.method = Some(match (clustered, field) {
+        (true, _) => Method::ClusterPermutation,
+        (false, None) => Method::StratifiedHypergeometric,
+        (false, Some(_)) => Method::VanElteren,
     });
     let min = inputs.settings.min_sessions;
     let half = inputs.settings.alpha / 2.0;
+    let any_value = strata
+        .values()
+        .flat_map(|g| g.values())
+        .any(|(_, v)| !v.is_empty());
 
     if let Some(path) = field
-        && all_before.is_empty()
-        && all_after.is_empty()
+        && !any_value
     {
         return e.unmeasurable(if dated == 0 {
             "no comparable baseline sessions".to_string()
@@ -527,28 +633,40 @@ fn sessions(
             )
         });
     }
-    if all_before.is_empty() {
+    if groups_before == 0 {
         return e.unmeasurable("no comparable baseline sessions");
     }
-    if all_before.len() < min {
+    if groups_before < min {
         return e.unmeasurable(format!(
-            "no comparable baseline: only {} session(s) before adoption, fewer than {min}",
-            all_before.len()
+            "no comparable baseline: only {groups_before} session group(s) before adoption, fewer than {min}"
         ));
     }
-    if field.is_none() && !all_before.iter().chain(&all_after).any(|&v| v > 0.0) {
+    let positive = |v: &[f64]| v.iter().any(|&x| x > 0.0);
+    if field.is_none()
+        && !strata
+            .values()
+            .flat_map(|g| g.values())
+            .any(|(_, v)| positive(v))
+    {
         return e.unmeasurable("metric never observed in comparable sessions");
     }
-    // Unstratified, over every dated session: the finding may so far occur
-    // only in strata that have no session after adoption yet.
-    let positives = |v: &[f64]| v.iter().filter(|&&x| x > 0.0).count() as u64;
-    let pooled = stats::Counts {
-        before: all_before.len() as u64,
-        before_positive: positives(&all_before),
-        after: all_after.len() as u64,
-        after_positive: positives(&all_after),
+    // Unstratified, over every dated group: the finding may so far occur
+    // only in strata that have no group after adoption yet. A group without
+    // the finding in any session is a clean group.
+    let positive_groups = |after: bool| -> u64 {
+        strata
+            .values()
+            .flat_map(|g| g.values())
+            .filter(|(a, v)| *a == after && positive(v))
+            .count() as u64
     };
-    // Rule metrics: how many more clean sessions would show a decrease, or
+    let pooled = stats::Counts {
+        before: groups_before as u64,
+        before_positive: positive_groups(false),
+        after: groups_after as u64,
+        after_positive: positive_groups(true),
+    };
+    // Rule metrics: how many more clean groups would show a decrease, or
     // why none can.
     let needed = |mut e: Evaluation| -> Evaluation {
         if field.is_some() {
@@ -571,44 +689,86 @@ fn sessions(
         }
         e
     };
-    if before.len() < min || after.len() < min {
+    if e.before.n < min || e.after.n < min {
         e.verdict = Verdict::Collecting;
         e.reason = Some(if contributing.is_empty() {
             "no (source, role) stratum has sessions both before and after adoption yet".into()
         } else {
             format!(
-                "{} of {min} sessions after adoption, {} of {min} before, in comparable strata",
-                after.len(),
-                before.len()
+                "{} of {min} session groups after adoption, {} of {min} before, in comparable strata",
+                e.after.n, e.before.n
             )
         });
         return needed(e);
     }
-    let (lo, up) = match field {
-        None => stats::stratified_hypergeometric(
-            &contributing
-                .iter()
-                .map(|(_, (b, a))| stats::Counts {
-                    before: b.len() as u64,
-                    before_positive: positives(b),
-                    after: a.len() as u64,
-                    after_positive: positives(a),
-                })
-                .collect::<Vec<_>>(),
-        ),
-        Some(_) => {
-            let samples: Vec<stats::Samples> = contributing
-                .iter()
-                .map(|(_, (b, a))| stats::Samples {
-                    before: b.clone(),
-                    after: a.clone(),
-                })
-                .collect();
-            match stats::van_elteren(&samples) {
-                Some((_, lo, up)) => (lo, up),
-                None => {
-                    return e
-                        .unmeasurable("the field has the same value in every comparable session");
+    let tied = "the field has the same value in every comparable session";
+    let (lo, up) = if clustered {
+        // Scores: the indicator, or a field's rank within its stratum
+        // scaled by `1/(N+1)` as in the van Elteren test.
+        let mut clusters = Vec::new();
+        let mut varies = field.is_none();
+        for (_, g) in &contributing {
+            let all: Vec<f64> = g.values().flat_map(|(_, v)| v.iter().copied()).collect();
+            let scores = match field {
+                None => all.clone(),
+                Some(_) => {
+                    varies |= all.iter().any(|&v| v != all[0]);
+                    let n = all.len() as f64;
+                    stats::midranks(&all)
+                        .into_iter()
+                        .map(|r| r / (n + 1.0))
+                        .collect()
+                }
+            };
+            let mut next = scores.into_iter();
+            clusters.push(
+                g.values()
+                    .map(|(after, v)| stats::Cluster {
+                        after: *after,
+                        sum: next.by_ref().take(v.len()).sum(),
+                        count: v.len(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        if !varies {
+            return e.unmeasurable(tied);
+        }
+        stats::cluster_permutation(&clusters, ROUNDS, SEED)
+    } else {
+        let sides = |g: &Groups, after: bool| -> Vec<f64> {
+            g.values()
+                .filter(|(a, _)| *a == after)
+                .flat_map(|(_, v)| v.iter().copied())
+                .collect()
+        };
+        match field {
+            None => stats::stratified_hypergeometric(
+                &contributing
+                    .iter()
+                    .map(|(_, g)| {
+                        let (b, a) = (sides(g, false), sides(g, true));
+                        let positives = |v: &[f64]| v.iter().filter(|&&x| x > 0.0).count() as u64;
+                        stats::Counts {
+                            before: b.len() as u64,
+                            before_positive: positives(&b),
+                            after: a.len() as u64,
+                            after_positive: positives(&a),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            Some(_) => {
+                let samples: Vec<stats::Samples> = contributing
+                    .iter()
+                    .map(|(_, g)| stats::Samples {
+                        before: sides(g, false),
+                        after: sides(g, true),
+                    })
+                    .collect();
+                match stats::van_elteren(&samples) {
+                    Some((_, lo, up)) => (lo, up),
+                    None => return e.unmeasurable(tied),
                 }
             }
         }
@@ -734,7 +894,7 @@ mod tests {
         assert!(e.sessions_needed.is_some());
         let json = serde_json::to_string(&e).unwrap();
         assert!(
-            json.contains(r#""schema":"rf.evaluation/1""#)
+            json.contains(r#""schema":"rf.evaluation/2""#)
                 && json.contains(r#""method":"stratified-hypergeometric""#),
             "{json}"
         );
@@ -757,12 +917,12 @@ mod tests {
             e.reason
                 .as_deref()
                 .unwrap()
-                .starts_with("12 of 20 sessions after"),
+                .starts_with("12 of 20 session groups after"),
             "{e:?}"
         );
         assert_eq!(e.sessions_needed, Some(433));
         assert!(
-            e.line().contains("about 433 more clean session(s)"),
+            e.line().contains("about 433 more clean session group(s)"),
             "{}",
             e.line()
         );
@@ -775,6 +935,287 @@ mod tests {
         let e = run_eval(&l, &s, &f, &EvaluateConfig::default());
         assert_eq!(e.verdict, Verdict::Improved, "{e:?}");
         assert_eq!(e.sessions_needed, None);
+    }
+
+    /// `n` subagents of `parent` on `date`, the first `positive` of them flagged.
+    fn children(
+        sessions: &mut Vec<Session>,
+        findings: &mut Vec<Finding>,
+        parent: &str,
+        date: &str,
+        n: usize,
+        positive: usize,
+    ) {
+        for i in 0..n {
+            let id = format!("{parent}-{date}-{i}");
+            let extra = format!(r#","parent_id":"{parent}""#);
+            sessions.push(session(
+                "claude",
+                "subagent",
+                &id,
+                &format!("{date}T12:00:00Z"),
+                &extra,
+            ));
+            if i < positive {
+                findings.push(agent_finding(&format!("claude:{id}")));
+            }
+        }
+    }
+
+    /// The same sessions with no parent: each one its own group, as before
+    /// session groups.
+    fn ungrouped(s: &[Session]) -> Vec<Session> {
+        s.iter()
+            .map(|x| {
+                let mut x = x.clone();
+                x.parent_id = None;
+                x
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_parents_subagents_count_as_one_session_group() {
+        // The masters case: every finding after adoption comes from one
+        // parent's subagents. 500 clean subagents of other parents form the
+        // baseline, and 6 of 12 children of one parent are positive after.
+        let (mut s, mut f) = (Vec::new(), Vec::new());
+        for i in 0..500 {
+            children(&mut s, &mut f, &format!("p{i}"), "2026-10-01", 1, 0);
+        }
+        children(&mut s, &mut f, "cluster", "2026-11-03", 12, 6);
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let e = run_eval(&l, &s, &f, &EvaluateConfig::default());
+        assert_eq!(e.unit, Some(Unit::SessionGroup));
+        assert_eq!((e.before.n, e.before.sessions), (500, Some(500)));
+        assert_eq!((e.after.n, e.after.sessions), (1, Some(12)));
+        assert_eq!((e.after.positives, e.after.rate), (Some(6), Some(0.5)));
+        assert_eq!(e.strata[0].after, 1);
+        // One group after adoption is too few to call anything; with a clean
+        // baseline no decrease can be shown either.
+        assert_eq!(e.verdict, Verdict::Unmeasurable, "{e:?}");
+        let line = e.line();
+        assert!(
+            line.contains(
+                "0.0% → 50.0% of sessions (n 500 → 1 session groups from 500 → 12 sessions"
+            ),
+            "{line}"
+        );
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(
+            json.contains(r#""schema":"rf.evaluation/2""#)
+                && json.contains(r#""unit":"session-group""#)
+                && json.contains(r#""sessions":12"#),
+            "{json}"
+        );
+        // Counted per session, as before session groups, the burst is `worse`.
+        let e = run_eval(&l, &ungrouped(&s), &f, &EvaluateConfig::default());
+        assert_eq!((e.after.n, e.after.positives), (12, Some(6)));
+        assert_eq!(e.verdict, Verdict::Worse, "{e:?}");
+    }
+
+    #[test]
+    fn a_burst_in_one_group_is_tested_by_moving_whole_groups() {
+        let (mut s, mut f) = (Vec::new(), Vec::new());
+        for i in 0..100 {
+            children(
+                &mut s,
+                &mut f,
+                &format!("p{i}"),
+                "2026-10-01",
+                1,
+                usize::from(i == 0),
+            );
+        }
+        for i in 0..9 {
+            children(&mut s, &mut f, &format!("q{i}"), "2026-11-02", 1, 0);
+        }
+        children(&mut s, &mut f, "burst", "2026-11-03", 12, 6);
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let e = run_eval(&l, &s, &f, &EvaluateConfig::default());
+        assert_eq!(e.method, Some(Method::ClusterPermutation));
+        assert_eq!((e.after.n, e.after.sessions), (10, Some(21)));
+        // The burst lands after adoption in about 10 of 110 random splits.
+        let up = e.p_upper.unwrap();
+        assert!((0.06..0.13).contains(&up), "{e:?}");
+        assert_eq!(e.verdict, Verdict::Inconclusive, "{e:?}");
+        // The same data give the same p-values.
+        assert_eq!(
+            run_eval(&l, &s, &f, &EvaluateConfig::default()).p_upper,
+            Some(up)
+        );
+        let e = run_eval(&l, &ungrouped(&s), &f, &EvaluateConfig::default());
+        assert_eq!(e.verdict, Verdict::Worse, "{e:?}");
+    }
+
+    /// Adds one side's sessions and findings on a date.
+    type Fill = fn(&mut Vec<Session>, &mut Vec<Finding>, &str);
+
+    #[test]
+    fn a_different_mix_of_group_sizes_alone_is_not_a_change() {
+        // 5% of sessions have the finding on both sides; only the group
+        // sizes differ (review of research-factory-45).
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let singles: Fill = |s, f, date| {
+            for i in 0..300 {
+                children(
+                    s,
+                    f,
+                    &format!("s{date}{i}"),
+                    date,
+                    1,
+                    usize::from(i % 20 == 0),
+                );
+            }
+        };
+        let bursts: Fill = |s, f, date| {
+            for i in 0..20 {
+                children(
+                    s,
+                    f,
+                    &format!("b{date}{i}"),
+                    date,
+                    10,
+                    usize::from(i % 2 == 0),
+                );
+            }
+        };
+        for (first, second) in [(singles, bursts), (bursts, singles)] {
+            let (mut s, mut f) = (Vec::new(), Vec::new());
+            first(&mut s, &mut f, "2026-10-01");
+            second(&mut s, &mut f, "2026-11-02");
+            let e = run_eval(&l, &s, &f, &EvaluateConfig::default());
+            assert_eq!(e.method, Some(Method::ClusterPermutation));
+            assert_eq!(e.before.rate, e.after.rate, "{e:?}");
+            assert_eq!(e.verdict, Verdict::Inconclusive, "{e:?}");
+        }
+
+        // A skewed field with the same distribution per session on both
+        // sides: nine 1s and one 100 in every ten sessions.
+        let value = |i: usize| if i % 10 == 9 { 100.0 } else { 1.0 };
+        let mut s = Vec::new();
+        for i in 0..100 {
+            s.push(session(
+                "claude",
+                "subagent",
+                &format!("b{i}"),
+                "2026-10-01T00:00:00Z",
+                &format!(r#","total":{{"tokens":{{"output":{}}}}}"#, value(i)),
+            ));
+        }
+        for g in 0..12 {
+            for i in 0..10 {
+                s.push(session(
+                    "claude",
+                    "subagent",
+                    &format!("a{g}-{i}"),
+                    "2026-11-02T00:00:00Z",
+                    &format!(
+                        r#","total":{{"tokens":{{"output":{}}}}},"parent_id":"g{g}""#,
+                        value(i)
+                    ),
+                ));
+            }
+        }
+        let l = lesson("agentprof:session.total.tokens.output", "2026-11-01");
+        let e = run_eval(&l, &s, &[], &EvaluateConfig::default());
+        assert_eq!(e.method, Some(Method::ClusterPermutation));
+        assert_eq!((e.after.n, e.after.sessions), (12, Some(120)));
+        assert_eq!(e.verdict, Verdict::Inconclusive, "{e:?}");
+    }
+
+    #[test]
+    fn a_tree_is_one_group_on_its_roots_side() {
+        let (mut s, mut f) = (Vec::new(), Vec::new());
+        // Root main session M started before adoption; its subagent A, and
+        // A's five subagents, started after it. All six are one group, before.
+        s.push(session("claude", "main", "M", "2026-10-31T23:00:00Z", ""));
+        children(&mut s, &mut f, "M", "2026-11-02", 1, 1);
+        children(&mut s, &mut f, "M-2026-11-02-0", "2026-11-02", 5, 5);
+        // Other subagents, whose parents the file does not have.
+        for i in 0..3 {
+            children(&mut s, &mut f, &format!("q{i}"), "2026-10-20", 1, 0);
+            children(&mut s, &mut f, &format!("r{i}"), "2026-11-03", 2, 0);
+        }
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let cfg = EvaluateConfig {
+            min_sessions: 1,
+            ..EvaluateConfig::default()
+        };
+        let e = run_eval(&l, &s, &f, &cfg);
+        let sub = e.strata.iter().find(|x| x.role == "subagent").unwrap();
+        assert_eq!((sub.before, sub.after), (4, 3), "{e:?}");
+        assert_eq!((e.before.sessions, e.before.positives), (Some(9), Some(6)));
+        assert_eq!((e.after.sessions, e.after.positives), (Some(6), Some(0)));
+        assert_eq!(
+            e.excluded, 1,
+            "M's main stratum has no group after adoption"
+        );
+    }
+
+    #[test]
+    fn a_root_is_a_group_apart_from_its_subagents_in_one_stratum() {
+        // Without roles, a parent and its children share the `unknown` stratum.
+        let line = |id: &str, parent: Option<&str>| {
+            let p = parent
+                .map(|p| format!(r#","parent_id":"{p}""#))
+                .unwrap_or_default();
+            Session::parse(&format!(
+                r#"{{"schema":"rf.session/1","source":"codex","id":"{id}","start":"2026-11-02T00:00:00Z"{p}}}"#
+            ))
+            .unwrap()
+        };
+        let mut s = vec![
+            line("P", None),
+            line("c1", Some("P")),
+            line("c2", Some("P")),
+        ];
+        s.push(line("x", None));
+        s[0].start = Some("2026-10-02T00:00:00Z".into());
+        s[3].start = Some("2026-10-03T00:00:00Z".into());
+        let f = vec![agent_finding("codex:c1")];
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let cfg = EvaluateConfig {
+            min_sessions: 1,
+            ..EvaluateConfig::default()
+        };
+        let e = run_eval(&l, &s, &f, &cfg);
+        // P and x before; P's subagents c1 and c2 form one group, on P's
+        // side: three groups, none after adoption.
+        assert!(e.strata.is_empty(), "{e:?}");
+        assert_eq!(e.excluded, 3, "{e:?}");
+    }
+
+    #[test]
+    fn version_1_records_still_parse() {
+        // A `last.json` written by lab 0.3.
+        let v1 = r#"{"schema":"rf.evaluation/1","lesson":"read-by-section","lesson_status":"adopted","metric":"agentprof:file-reread","unit":"session","method":"stratified-hypergeometric","verdict":"collecting","reason":"3 of 10 sessions after adoption, 540 of 10 before, in comparable strata","adopted":"2026-11-07","before":{"n":540,"positives":5,"rate":0.009259259259259259,"mean":null,"median":null},"after":{"n":3,"positives":0,"rate":0.0,"mean":null,"median":null},"p_lower":null,"p_upper":null,"strata":[{"source":"claude","role":"main","before":540,"after":3}],"excluded":12,"sessions_needed":295,"min_sessions":10,"alpha":0.05,"baseline_days":90}"#;
+        let e: Evaluation = serde_json::from_str(v1).unwrap();
+        assert_eq!((e.unit, e.before.sessions), (Some(Unit::Session), None));
+    }
+
+    #[test]
+    fn cluster_permutation_matches_the_exact_test_without_clusters() {
+        // Singletons in one stratum: the permutation distribution is the
+        // hypergeometric one, up to Monte Carlo error.
+        let cluster = |after, positive| stats::Cluster {
+            after,
+            sum: f64::from(u8::from(positive)),
+            count: 1,
+        };
+        let mut c: Vec<_> = (0..40).map(|i| cluster(false, i < 2)).collect();
+        c.extend((0..30).map(|i| cluster(true, i < 6)));
+        let (lo, up) = stats::cluster_permutation(&[c], ROUNDS, SEED);
+        let (elo, eup) = stats::stratified_hypergeometric(&[stats::Counts {
+            before: 40,
+            before_positive: 2,
+            after: 30,
+            after_positive: 6,
+        }]);
+        assert!(
+            (lo - elo).abs() < 0.01 && (up - eup).abs() < 0.01,
+            "{lo} {up} vs {elo} {eup}"
+        );
     }
 
     #[test]
