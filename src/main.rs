@@ -181,13 +181,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             if let Some(note) = &agent.note {
                 eprintln!("lab: {note}");
             }
+            let checks: Vec<String> = project.lab.checks.iter().map(|c| c.name.clone()).collect();
             print!(
                 "{}",
                 brief::render(
                     &project.name,
                     &project.today().to_string(),
                     &lessons,
-                    runs.last(),
+                    &runs,
+                    &checks,
                     &tags,
                     n
                 )

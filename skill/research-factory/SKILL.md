@@ -10,7 +10,7 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 ## Start of a session
 
 1. Run `lab brief` and follow every rule under "Rules from lessons". Each is an instruction to follow, whether it was learned from a failure or from a practice that worked.
-2. Note the errors the last check left open; fix those in the area you are working on.
+2. Note the errors the latest checks left open; fix those in the area you are working on.
 
 ## While working
 
