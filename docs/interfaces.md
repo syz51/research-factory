@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]` and `[[lab.archive.budget]]` (section 6).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]` and `[[lab.archive.budget]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -63,7 +63,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 ## 5. Agent-session records: `rf.session/1`
 
-`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id` and `start` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session. It matches a finding to its session by the finding's `subject`, `source:id`.
+`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id`, `role` and `start` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out.
 
 ## 6. Archive records and seals: front matter and `rf.archive-seal/1`
 
@@ -112,7 +112,70 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
 }
 ```
 
-## 7. Conventions every repository follows
+## 7. Lesson evaluations and loop signals: `rf.evaluation/1`, `rf.signal/1`, `rf.loop/1`
+
+`lab` owns these. [factory.md](factory.md#how-a-lesson-is-evaluated) explains the method.
+
+```toml
+[lab.evaluate]                 # all optional; these are the defaults
+min_sessions = 10              # observations (sessions or check runs) needed on each side
+alpha = 0.05                   # two-sided; each direction is tested at alpha/2
+baseline_days = 90             # baseline: observations this many days before adoption; 0 = all; at most 36500
+
+[lab.loop]
+measure = [["agentprof", "scan", "--out", ".research/agentprof", "--timezone", "Asia/Tokyo"]]
+notify = ["sh", "scripts/notify.sh"]   # optional
+renotify_hours = 24            # at most 87600
+```
+
+**`rf.evaluation/1`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`.
+
+```json
+{"schema":"rf.evaluation/1","lesson":"read-by-section","lesson_status":"adopted","metric":"agentprof:file-reread","unit":"session","method":"stratified-hypergeometric","verdict":"collecting","reason":"3 of 10 sessions after adoption, 540 of 10 before, in comparable strata","adopted":"2026-11-07","before":{"n":540,"positives":5,"rate":0.009259259259259259,"mean":null,"median":null},"after":{"n":3,"positives":0,"rate":0.0,"mean":null,"median":null},"p_lower":null,"p_upper":null,"strata":[{"source":"claude","role":"main","before":540,"after":3}],"excluded":12,"sessions_needed":295,"min_sessions":10,"alpha":0.05,"baseline_days":90}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `metric` | `tool:rule`, or `null` for a lesson without one |
+| `unit` | `session` or `run`; `null` when nothing measures the metric |
+| `method` | `stratified-hypergeometric` (a finding rule per session), `van-elteren` (a `session.` field), `descriptive` (check runs, means without a test) or `null` |
+| `verdict` | `collecting`, `improved`, `worse`, `inconclusive` or `unmeasurable` |
+| `reason` | Why the verdict is `collecting` or `unmeasurable`; otherwise `null` |
+| `before`, `after` | `n` observations, and `positives` and `rate` (rule per session) or `mean` and `median` (field or check run); over the contributing strata, or over every session when no stratum contributes yet |
+| `p_lower`, `p_upper` | One-sided p-values for a decrease and an increase after adoption; `null` without a test |
+| `strata` | Each contributing `(source, role)` with its `before` and `after` session counts |
+| `excluded` | Sessions in strata without sessions on both sides |
+| `sessions_needed` | For a rule that is collecting or inconclusive: about how many more sessions without the finding would show a decrease |
+
+**`rf.signal/1`**: something to act on, sent to the notify command.
+
+```json
+{"schema":"rf.signal/1","project":"my-thesis","id":"lesson-verifiable:read-by-section","kind":"lesson-verifiable","lesson":"read-by-section","title":"Verify lesson read-by-section: its metric improved","body":"**Lesson `read-by-section`: …**\n\n…\n```sh\nlab lesson set read-by-section verified --note \"…\"\n```\n","detail":"improved","repeat":false,"reopened":false,"ref":null,"first_seen":"2026-11-20T03:00:00Z","at":"2026-11-20T03:00:00Z"}
+```
+
+| `kind` | `id` | When |
+| --- | --- | --- |
+| `lesson-verifiable` | `lesson-verifiable:<lesson>` | An adopted lesson's verdict is `improved`: verify it |
+| `lesson-worse` | `lesson-worse:<lesson>` | An adopted or verified lesson's verdict is `worse`: revise the rule or retire it |
+| `lesson-unmeasurable` | `lesson-unmeasurable:<lesson>` | An adopted lesson's verdict is `unmeasurable` (a verified one stays verified on its other evidence): choose a metric that can show an effect, or decide on other evidence with `--force` and a note |
+| `uncovered-rules` | `uncovered-rules` | `lab retro` finds recurring rules without a lesson; one signal lists them all |
+| `measure-failed` | `measure-failed:<index>` | A `measure` command failed; the body has its command, status and last output lines |
+
+`title` is imperative and at most 72 characters; `body` is standalone Markdown with the numbers, the method and the `lab` commands to act. `id` is stable, and `detail` is a short summary whose change makes the signal worth sending again. `repeat` marks a changed signal sent again and `reopened` one that had been resolved; both carry the `ref` the notify command returned for the first send. A notify command should add to that ref while it is still open and file anew when it is closed or gone. `first_seen` is when `lab loop` first produced the id.
+
+**Notify protocol.** For each signal to send, `lab loop` runs the `notify` program once, from the project root, with the signal as one JSON object on stdin, and waits up to 60 seconds. Exit 0 means sent: the first non-empty line of stdout (trimmed, at most 200 characters), if any, becomes the signal's `ref`, such as a task id, and is passed back in later sends. Any other exit, or a timeout, leaves the signal unsent; the next loop retries it. A program with a directory part resolves against the project root, as for checks.
+
+**Dedupe.** `<state_dir>/lab/loop/signals.json` (`rf.loop-signals/1`) keeps, per id, `first_seen`, `last_notified`, `detail_hash`, `ref`, `resolved`, `error` and `pending`. A signal is sent when its id is new, when it was resolved and appears again at least `renotify_hours` after its last send (`reopened`; sooner it is flapping and stays quiet), when its detail changed and it was last sent at least `renotify_hours` ago (`repeat`), and on every loop until a send succeeds. An id missing from a loop is resolved. Without a `notify` command the state is still kept, and the signals stay `pending`.
+
+**`rf.loop/1`**: `<state_dir>/lab/loop/last.json`, written atomically at the end of each loop, also after a `lab` error (in `errors`).
+
+```json
+{"schema":"rf.loop/1","started":"2026-11-20T03:00:00Z","finished":"2026-11-20T03:00:41Z","measure":[{"argv":["agentprof","scan","--out",".research/agentprof"],"ok":true,"status":"exit 0"}],"evaluations":[],"signals":[{"id":"uncovered-rules","kind":"uncovered-rules","status":"unchanged"}],"errors":[]}
+```
+
+A measure's `status` is `exit N`, `killed by a signal`, `timed out after 600 s` or `could not start: …`; a signal's is `notified`, `pending` (no notify command), `failed` (retried next loop) or `unchanged`. The same directory holds `lock` (an exclusive OS file lock held while a loop runs and released when its process exits, so a loop that died never blocks the next; the file names the holder's pid) and `loop.log` (the measure commands' output and the background loop's own; moved to `loop.log.1` past 1 MiB). A measure or notify command that times out is killed with its whole process group. An error after the measure commands, such as an unreadable signal state, is recorded in `last.json`, so `--if-older` backs off and the brief shows it. `lab loop` exits 0, 1 when a measure or notify command failed, and 2 on a `lab` error.
+
+## 8. Conventions every repository follows
 
 - Rust edition 2024, `rust-version = "1.99"`, stable toolchain. MIT OR Apache-2.0 licence files.
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass, and a GitHub Actions workflow runs them.

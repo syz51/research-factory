@@ -1,5 +1,5 @@
-//! `lab retro` and `lab evaluate`: turn recurring findings into lesson
-//! candidates, and measure adopted lessons against their metric.
+//! `lab retro`: turn recurring findings into lesson candidates; and the
+//! agent-session records that `lab evaluate` measures lessons against.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -104,21 +104,67 @@ pub fn read_findings(path: &Path) -> Result<Vec<Finding>, String> {
         .collect()
 }
 
-/// The fields of an `rf.session/1` record that `lab evaluate` needs.
-#[derive(Debug, Clone, Deserialize)]
+/// An `rf.session/1` record: the fields `lab evaluate` stratifies and dates
+/// sessions by, and the record's text, parsed again only for `session.`
+/// field metrics.
+#[derive(Debug, Clone)]
 pub struct Session {
-    schema: String,
     pub source: String,
     pub id: String,
-    /// Time of the session's first record; `null` when unknown.
-    #[serde(default)]
+    /// `main` or `subagent`; `None` when the record does not say.
+    pub role: Option<String>,
+    /// Time of the session's first record; `None` when unknown.
     pub start: Option<String>,
+    record: Box<str>,
+}
+
+#[derive(Deserialize)]
+struct SessionHead {
+    schema: String,
+    source: String,
+    id: String,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    start: Option<String>,
 }
 
 impl Session {
+    /// Parses one JSON line, rejecting other schemas and other major versions.
+    pub fn parse(line: &str) -> Result<Self, String> {
+        let head: SessionHead = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let major = head
+            .schema
+            .strip_prefix("rf.session/")
+            .map(|v| v.split('.').next());
+        if major != Some(Some("1")) {
+            return Err(format!("unsupported schema `{}`", head.schema));
+        }
+        Ok(Self {
+            source: head.source,
+            id: head.id,
+            role: head.role,
+            start: head.start,
+            record: line.into(),
+        })
+    }
+
     /// The `subject` agentprof gives this session's findings.
     pub fn subject(&self) -> String {
         format!("{}:{}", self.source, self.id)
+    }
+
+    pub fn role(&self) -> &str {
+        self.role.as_deref().unwrap_or("unknown")
+    }
+
+    /// The number at a dotted path such as `total.tokens.output`; `None` when
+    /// a part is missing, `null` or not a number.
+    pub fn field(&self, path: &str) -> Option<f64> {
+        let record: serde_json::Value = serde_json::from_str(&self.record).ok()?;
+        path.split('.')
+            .try_fold(&record, |v, key| v.get(key))?
+            .as_f64()
     }
 }
 
@@ -127,141 +173,8 @@ pub fn read_sessions(path: &Path) -> Result<Vec<Session>, String> {
     text.lines()
         .enumerate()
         .filter(|(_, l)| !l.trim().is_empty())
-        .map(|(i, l)| {
-            let at = || format!("{}:{}", path.display(), i + 1);
-            let s: Session = serde_json::from_str(l).map_err(|e| format!("{}: {e}", at()))?;
-            let major = s
-                .schema
-                .strip_prefix("rf.session/")
-                .map(|v| v.split('.').next());
-            if major != Some(Some("1")) {
-                return Err(format!("{}: unsupported schema `{}`", at(), s.schema));
-            }
-            Ok(s)
-        })
+        .map(|(i, l)| Session::parse(l).map_err(|e| format!("{}:{}: {e}", path.display(), i + 1)))
         .collect()
-}
-
-/// Agent-session data for measuring lessons whose metric `agentprof` reports.
-pub struct Agent<'a> {
-    pub findings: &'a [Finding],
-    /// `Err` holds why the sessions file could not be read.
-    pub sessions: Result<&'a [Session], &'a str>,
-}
-
-/// The outcome of measuring one lesson against its metric.
-#[derive(Debug, PartialEq)]
-pub struct Evaluation {
-    /// What one observation is: a check `run` or an agent `session`.
-    pub unit: &'static str,
-    pub before_runs: usize,
-    pub after_runs: usize,
-    pub before_mean: Option<f64>,
-    pub after_mean: Option<f64>,
-    pub verdict: String,
-}
-
-/// The verdict that allows `lab lesson set <id> verified`.
-pub const IMPROVED: &str = "fewer findings since adoption";
-
-/// Minimum observations on each side of the adoption date for a verdict.
-pub const MIN_RUNS: usize = 2;
-
-/// Mean findings of the lesson's metric per observation before and after its
-/// adoption date. Observational: other changes in the same period can explain
-/// a difference.
-///
-/// When a configured check has reported the metric's tool, an observation is
-/// a stored check run in which every such configured check ran to completion,
-/// so a failed or partial (`--only`) run is not mistaken for a clean one.
-/// Otherwise, when the agent findings contain the tool, an observation is an
-/// agent session, dated by its start; sessions without findings count as zero.
-pub fn evaluate(
-    lesson: &Lesson,
-    runs: &[Run],
-    configured: &[&str],
-    agent: &Agent,
-    date_of: impl Fn(&str) -> Option<jiff::civil::Date>,
-) -> Option<Evaluation> {
-    let metric = lesson.meta.metric.as_ref()?;
-    let adopted: jiff::civil::Date = lesson.meta.adopted.as_deref()?.parse().ok()?;
-    let matches = |f: &Finding| f.tool == metric.tool && f.rule == metric.rule;
-    let required: BTreeSet<&str> = runs
-        .iter()
-        .flat_map(|r| r.items.iter())
-        .filter(|i| i.finding.tool == metric.tool && configured.contains(&i.check.as_str()))
-        .map(|i| i.check.as_str())
-        .collect();
-    let (mut before, mut after) = (Vec::new(), Vec::new());
-    // The adoption date is a calendar date in the project's zone; an
-    // observation on that day counts as after adoption. One without a readable
-    // time is skipped.
-    let mut place = |at: &str, count: usize| match date_of(at) {
-        Some(d) if d < adopted => before.push(count as f64),
-        Some(_) => after.push(count as f64),
-        None => {}
-    };
-    let unit = if !required.is_empty() {
-        for run in runs {
-            let complete = required
-                .iter()
-                .all(|name| run.header.checks.iter().any(|c| c.name == *name && c.ran()));
-            if complete {
-                let count = run
-                    .items
-                    .iter()
-                    .filter(|i| required.contains(i.check.as_str()) && matches(&i.finding))
-                    .count();
-                place(&run.header.at, count);
-            }
-        }
-        "run"
-    } else if agent.findings.iter().any(|f| f.tool == metric.tool) {
-        let sessions = match agent.sessions {
-            Ok(s) => s,
-            Err(why) => {
-                return Some(Evaluation {
-                    unit: "session",
-                    before_runs: 0,
-                    after_runs: 0,
-                    before_mean: None,
-                    after_mean: None,
-                    verdict: format!("not measurable: {why}"),
-                });
-            }
-        };
-        let mut per_session: BTreeMap<&str, usize> = BTreeMap::new();
-        for f in agent.findings.iter().filter(|f| matches(f)) {
-            *per_session.entry(f.subject.as_str()).or_default() += 1;
-        }
-        for s in sessions {
-            if let Some(start) = &s.start {
-                place(
-                    start,
-                    per_session.get(s.subject().as_str()).copied().unwrap_or(0),
-                );
-            }
-        }
-        "session"
-    } else {
-        "run"
-    };
-    let mean = |v: &[f64]| (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64);
-    let (bm, am) = (mean(&before), mean(&after));
-    let verdict = match (bm, am) {
-        _ if before.len() < MIN_RUNS || after.len() < MIN_RUNS => "insufficient data",
-        (Some(b), Some(a)) if a < b => IMPROVED,
-        (Some(b), Some(a)) if a > b => "more findings since adoption",
-        _ => "no change",
-    };
-    Some(Evaluation {
-        unit,
-        before_runs: before.len(),
-        after_runs: after.len(),
-        before_mean: bm,
-        after_mean: am,
-        verdict: verdict.into(),
-    })
 }
 
 #[cfg(test)]
@@ -317,11 +230,6 @@ mod tests {
             items,
         }
     }
-
-    const NO_AGENT: Agent = Agent {
-        findings: &[],
-        sessions: Err("none"),
-    };
 
     fn lesson(adopted: &str) -> Lesson {
         Lesson {
@@ -398,131 +306,19 @@ mod tests {
         assert!(candidates(&rec, &[], 3).is_empty());
     }
 
-    fn utc_date(s: &str) -> Option<jiff::civil::Date> {
-        s.parse::<jiff::Timestamp>()
-            .ok()
-            .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date())
-    }
-
     #[test]
-    fn evaluation_needs_runs_on_both_sides_and_skips_failed_runs() {
-        let mut runs = vec![
-            run(
-                "2026-11-01T00:00:00Z",
-                &["quote-not-found", "quote-not-found"],
-                true,
-            ),
-            run(
-                "2026-11-02T00:00:00Z",
-                &["quote-not-found", "quote-not-found"],
-                true,
-            ),
-            run("2026-11-03T00:00:00Z", &["quote-not-found"], true),
-        ];
-        let e = evaluate(
-            &lesson("2026-11-03"),
-            &runs,
-            &["claims"],
-            &NO_AGENT,
-            utc_date,
+    fn sessions_expose_strata_and_numeric_fields() {
+        let s = Session::parse(
+            r#"{"schema":"rf.session/1.2","source":"codex","id":"x","role":"subagent","start":null,"total":{"tokens":{"output":12,"note":"n"}},"compactions":{"count":null}}"#,
         )
         .unwrap();
-        assert_eq!(
-            (e.before_runs, e.after_runs, e.verdict.as_str()),
-            (2, 1, "insufficient data")
-        );
-        runs.push(run("2026-11-04T00:00:00Z", &[], false)); // checker failed: not a clean run
-        runs.push(run("2026-11-05T00:00:00Z", &[], true));
-        let e = evaluate(
-            &lesson("2026-11-03"),
-            &runs,
-            &["claims"],
-            &NO_AGENT,
-            utc_date,
-        )
-        .unwrap();
-        assert_eq!((e.before_runs, e.after_runs), (2, 2));
-        assert_eq!(e.before_mean, Some(2.0));
-        assert_eq!(e.after_mean, Some(0.5));
-        assert_eq!(e.verdict, IMPROVED);
-    }
-
-    #[test]
-    fn partial_runs_are_not_counted() {
-        let both = |at: &str| {
-            run_checks(
-                at,
-                &[
-                    ("docs", &["quote-not-found", "quote-not-found"], true),
-                    ("thesis", &["quote-not-found", "quote-not-found"], true),
-                ],
-            )
-        };
-        let docs_only = |at: &str| {
-            run_checks(
-                at,
-                &[("docs", &["quote-not-found", "quote-not-found"], true)],
-            )
-        };
-        let runs = vec![
-            both("2026-11-01T00:00:00Z"),
-            both("2026-11-02T00:00:00Z"),
-            docs_only("2026-11-04T00:00:00Z"),
-            docs_only("2026-11-05T00:00:00Z"),
-        ];
-        let e = evaluate(
-            &lesson("2026-11-03"),
-            &runs,
-            &["docs", "thesis"],
-            &NO_AGENT,
-            utc_date,
-        )
-        .unwrap();
-        assert_eq!((e.before_runs, e.after_runs), (2, 0));
-        assert_eq!(e.verdict, "insufficient data");
-        // A check that is no longer configured is not required.
-        let e = evaluate(&lesson("2026-11-03"), &runs, &["docs"], &NO_AGENT, utc_date).unwrap();
-        assert_eq!((e.before_runs, e.after_runs), (2, 2));
-        assert_eq!(e.verdict, "no change");
-    }
-
-    #[test]
-    fn agent_rules_are_measured_per_session() {
-        let mut l = lesson("2026-11-03");
-        l.meta.metric = Some("agentprof:reread-file".parse().unwrap());
-        let f = |subject: &str| {
-            let mut f = Finding::lab("reread-file", Severity::Warn, subject, "m".into());
-            f.tool = "agentprof".into();
-            f
-        };
-        let findings = vec![f("claude:a"), f("claude:b"), f("codex:c")];
-        let session = |source: &str, id: &str, start: &str| Session {
-            schema: "rf.session/1".into(),
-            source: source.into(),
-            id: id.into(),
-            start: Some(start.into()),
-        };
-        let sessions = vec![
-            session("claude", "a", "2026-11-01T00:00:00Z"),
-            session("claude", "b", "2026-11-02T00:00:00Z"),
-            session("codex", "c", "2026-11-04T00:00:00Z"),
-            session("codex", "d", "2026-11-05T00:00:00Z"),
-            session("codex", "e", "2026-11-06T00:00:00Z"),
-        ];
-        let agent = Agent {
-            findings: &findings,
-            sessions: Ok(&sessions),
-        };
-        let e = evaluate(&l, &[], &[], &agent, utc_date).unwrap();
-        assert_eq!(e.unit, "session");
-        assert_eq!((e.before_runs, e.after_runs), (2, 3));
-        assert_eq!((e.before_mean, e.after_mean), (Some(1.0), Some(1.0 / 3.0)));
-        assert_eq!(e.verdict, IMPROVED);
-        let missing = Agent {
-            findings: &findings,
-            sessions: Err("sessions.jsonl: not found"),
-        };
-        let e = evaluate(&l, &[], &[], &missing, utc_date).unwrap();
-        assert_eq!(e.verdict, "not measurable: sessions.jsonl: not found");
+        assert_eq!((s.subject().as_str(), s.role()), ("codex:x", "subagent"));
+        assert_eq!(s.field("total.tokens.output"), Some(12.0));
+        assert_eq!(s.field("total.tokens.note"), None);
+        assert_eq!(s.field("compactions.count"), None);
+        assert_eq!(s.field("missing.path"), None);
+        assert!(Session::parse(r#"{"schema":"rf.session/2","source":"a","id":"b"}"#).is_err());
+        let bare = Session::parse(r#"{"schema":"rf.session/1","source":"a","id":"b"}"#).unwrap();
+        assert_eq!((bare.role(), bare.start.as_deref()), ("unknown", None));
     }
 }

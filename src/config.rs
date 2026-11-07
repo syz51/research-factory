@@ -58,6 +58,12 @@ pub struct LabConfig {
     /// The research archive that `lab archive` indexes and checks.
     #[serde(default)]
     pub archive: Option<ArchiveConfig>,
+    /// How `lab evaluate` decides whether a lesson helped.
+    #[serde(default)]
+    pub evaluate: EvaluateConfig,
+    /// What `lab loop` runs and whom it tells.
+    #[serde(default, rename = "loop")]
+    pub lesson_loop: Option<LoopConfig>,
 }
 
 impl Default for LabConfig {
@@ -69,9 +75,85 @@ impl Default for LabConfig {
             agent_sessions: None,
             recurrence: default_recurrence(),
             archive: None,
+            evaluate: EvaluateConfig::default(),
+            lesson_loop: None,
         }
     }
 }
+
+/// `[lab.evaluate]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluateConfig {
+    /// Observations (sessions or check runs) needed on each side of the
+    /// adoption date before a verdict.
+    #[serde(default = "default_min_sessions")]
+    pub min_sessions: usize,
+    /// Two-sided significance level; each direction is tested at `alpha / 2`.
+    #[serde(default = "default_alpha")]
+    pub alpha: f64,
+    /// The before-window: observations within this many days before adoption
+    /// (0: all of them).
+    #[serde(default = "default_baseline_days")]
+    pub baseline_days: u32,
+}
+
+impl Default for EvaluateConfig {
+    fn default() -> Self {
+        Self {
+            min_sessions: default_min_sessions(),
+            alpha: default_alpha(),
+            baseline_days: default_baseline_days(),
+        }
+    }
+}
+
+fn default_min_sessions() -> usize {
+    10
+}
+
+fn default_alpha() -> f64 {
+    0.05
+}
+
+fn default_baseline_days() -> u32 {
+    90
+}
+
+/// `[lab.loop]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopConfig {
+    /// Commands (program and arguments) run in order from the project root
+    /// before evaluating, such as `agentprof scan`.
+    #[serde(default)]
+    pub measure: Vec<Vec<String>>,
+    /// Command that receives each new or changed `rf.signal/1` on stdin.
+    #[serde(default)]
+    pub notify: Option<Vec<String>>,
+    /// A signal whose detail changed is sent again only once this many hours
+    /// have passed since it was last sent.
+    #[serde(default = "default_renotify_hours")]
+    pub renotify_hours: u64,
+}
+
+fn default_renotify_hours() -> u64 {
+    24
+}
+
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            measure: Vec::new(),
+            notify: None,
+            renotify_hours: default_renotify_hours(),
+        }
+    }
+}
+
+/// Upper bounds that keep the date and duration arithmetic in range.
+const MAX_BASELINE_DAYS: u32 = 36_500;
+const MAX_RENOTIFY_HOURS: u64 = 87_600;
 
 /// `[lab.archive]`. Paths and globs are relative to the project root.
 #[derive(Debug, Clone, Deserialize)]
@@ -290,6 +372,36 @@ impl Project {
                 return Err(format!("[lab] check `{}` needs a non-empty `run`", c.name));
             }
         }
+        let e = &raw.lab.evaluate;
+        if e.min_sessions == 0 {
+            return Err("[lab.evaluate] min_sessions must be at least 1".into());
+        }
+        if !(e.alpha > 0.0 && e.alpha < 1.0) {
+            return Err(format!(
+                "[lab.evaluate] alpha must be between 0 and 1, got {}",
+                e.alpha
+            ));
+        }
+        if e.baseline_days > MAX_BASELINE_DAYS {
+            return Err(format!(
+                "[lab.evaluate] baseline_days must be at most {MAX_BASELINE_DAYS}, got {}",
+                e.baseline_days
+            ));
+        }
+        if let Some(l) = &raw.lab.lesson_loop {
+            if l.renotify_hours > MAX_RENOTIFY_HOURS {
+                return Err(format!(
+                    "[lab.loop] renotify_hours must be at most {MAX_RENOTIFY_HOURS}, got {}",
+                    l.renotify_hours
+                ));
+            }
+            if l.measure.iter().any(Vec::is_empty) {
+                return Err("[lab.loop] every `measure` command needs a program".into());
+            }
+            if l.notify.as_ref().is_some_and(Vec::is_empty) {
+                return Err("[lab.loop] `notify` needs a program".into());
+            }
+        }
         Ok(Self {
             root,
             name,
@@ -310,7 +422,12 @@ impl Project {
     /// A check's program: a relative path with a directory part (`scripts/x`)
     /// resolves against the project root; a bare name is looked up on `PATH`.
     pub fn program(&self, spec: &CheckSpec) -> PathBuf {
-        let program = Path::new(&spec.run[0]);
+        self.resolve_program(&spec.run[0])
+    }
+
+    /// A command's program, resolved as for a check.
+    pub fn resolve_program(&self, program: &str) -> PathBuf {
+        let program = Path::new(program);
         if program.is_relative() && program.components().count() > 1 {
             self.root.join(program)
         } else {
@@ -324,6 +441,11 @@ impl Project {
 
     pub fn checks_dir(&self) -> PathBuf {
         self.state_dir.join("lab").join("checks")
+    }
+
+    /// `lab loop`'s lock, last run record, signal state and log.
+    pub fn loop_dir(&self) -> PathBuf {
+        self.state_dir.join("lab").join("loop")
     }
 
     pub fn default_seal_manifest(&self) -> PathBuf {
@@ -397,6 +519,37 @@ mod tests {
         .unwrap();
         let err = Project::discover(dir.path(), None).unwrap_err();
         assert!(err.contains("two checks are named `x`"), "{err}");
+        for bad in [
+            "[lab.evaluate]\nmin_session = 3\n",
+            "[lab.evaluate]\nalpha = 1.5\n",
+            "[lab.loop]\nmeasure = [[]]\n",
+            "[lab.loop]\nnotfy = [\"x\"]\n",
+            "[lab.evaluate]\nbaseline_days = 10000000\n",
+            "[lab.loop]\nrenotify_hours = 18446744073709551615\n",
+        ] {
+            std::fs::write(&cfg, bad).unwrap();
+            assert!(Project::discover(dir.path(), None).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn evaluate_and_loop_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(CONFIG_FILE),
+            "[lab.evaluate]\nmin_sessions = 5\nbaseline_days = 0\n\
+             [lab.loop]\nmeasure = [[\"agentprof\", \"scan\"]]\nnotify = [\"sh\", \"n.sh\"]\n",
+        )
+        .unwrap();
+        let p = Project::discover(dir.path(), None).unwrap();
+        let e = &p.lab.evaluate;
+        assert_eq!((e.min_sessions, e.alpha, e.baseline_days), (5, 0.05, 0));
+        let l = p.lab.lesson_loop.unwrap();
+        assert_eq!((l.measure.len(), l.renotify_hours), (1, 24));
+        let empty = tempfile::tempdir().unwrap();
+        let defaults = Project::discover(empty.path(), None).unwrap();
+        assert!(defaults.lab.lesson_loop.is_none());
+        assert_eq!(defaults.lab.evaluate.min_sessions, 10);
     }
 
     #[test]
