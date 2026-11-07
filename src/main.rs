@@ -3,15 +3,21 @@
 //! `lab check` runs the project's checkers and keeps their findings;
 //! `lab retro` turns recurring findings into lesson candidates; lessons are
 //! adopted by a person or agent with a note; `lab brief` hands the adopted
-//! rules to every new session; `lab evaluate` measures whether they helped.
+//! rules to every new session; `lab evaluate` measures whether they helped;
+//! `lab loop` runs the measuring and evaluating unattended and reports what
+//! needs a decision.
 
 mod archive;
 mod brief;
 mod check;
 mod config;
+mod evaluate;
 mod finding;
+mod lesson_loop;
 mod lessons;
 mod retro;
+mod signals;
+mod stats;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -77,8 +83,22 @@ enum Command {
         #[arg(long)]
         write: bool,
     },
-    /// Compare each measured lesson's finding rate before and after adoption.
-    Evaluate,
+    /// Test whether each active lesson's metric changed after adoption.
+    Evaluate {
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Run the [lab.loop] measure commands, evaluate, and send new or changed signals to notify.
+    Loop {
+        /// Do nothing when the last loop finished less than this many minutes ago.
+        #[arg(long, value_name = "MINUTES")]
+        if_older: Option<u64>,
+        /// Start the loop detached, with its output in <state_dir>/lab/loop/loop.log, and return at once.
+        #[arg(long)]
+        background: bool,
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
     /// Manage lessons.
     #[command(subcommand)]
     Lesson(LessonCommand),
@@ -161,7 +181,8 @@ enum LessonCommand {
         scope: String,
         #[arg(long = "tag")]
         tags: Vec<String>,
-        /// Finding rule that measures the lesson, as `tool:rule`.
+        /// What measures the lesson: a finding rule as `tool:rule`, or a numeric
+        /// agent-session field as `agentprof:session.<field.path>`.
         #[arg(long)]
         metric: Option<Metric>,
         /// Evidence pointer: path:line, session id, finding fingerprint or URL (repeatable).
@@ -187,7 +208,7 @@ enum LessonCommand {
         status: Status,
         #[arg(long)]
         note: String,
-        /// Allow `verified` without an improved metric (the note must cite the evidence).
+        /// Allow `verified` without an `improved` verdict (the note must cite the evidence).
         #[arg(long)]
         force: bool,
     },
@@ -251,6 +272,17 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     })
                 }
             };
+            // With [lab.loop], the loop's last results replace the reminder to evaluate.
+            let measurements = match &project.lab.lesson_loop {
+                None => None,
+                Some(_) => Some(brief::measurements(
+                    lesson_loop::read_record(&project),
+                    jiff::Timestamp::now(),
+                    &project.tz,
+                    &lessons,
+                    &tags,
+                )),
+            };
             print!(
                 "{}{}",
                 brief::render(
@@ -260,7 +292,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     &runs,
                     &checks,
                     &tags,
-                    n
+                    n,
+                    measurements.as_deref()
                 ),
                 archive.as_ref().map(brief::archive).unwrap_or_default()
             );
@@ -281,7 +314,19 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             since,
             write,
         } => retro_cmd(&project, path.as_deref(), since.as_deref(), write),
-        Command::Evaluate => evaluate(&project),
+        Command::Evaluate { format } => evaluate(&project, format == Format::Jsonl),
+        Command::Loop {
+            if_older,
+            background,
+            format,
+        } => {
+            if background {
+                return lesson_loop::background(&project);
+            }
+            lesson_loop::run(&project, if_older, format == Format::Jsonl, || {
+                analyse(&project)
+            })
+        }
         Command::Lesson(cmd) => lesson(&project, cmd),
     }
 }
@@ -301,6 +346,19 @@ recurrence = 3
 # Do not also list agentprof under [[lab.checks]]. `lab evaluate` measures agentprof lessons per
 # session from the sessions.jsonl next to this file (override with agent_sessions).
 # agent_findings = ".research/agentprof/findings.jsonl"
+
+# How `lab evaluate` decides whether a lesson helped (these are the defaults).
+# [lab.evaluate]
+# min_sessions = 10     # sessions (or check runs) needed on each side of the adoption date
+# alpha = 0.05          # two-sided; each direction is tested at alpha/2
+# baseline_days = 90    # compare with this many days before adoption; 0 = all earlier sessions
+
+# `lab loop` runs these commands, evaluates every lesson, and sends each new or changed signal
+# (rf.signal/1 JSON on stdin) to `notify`. Hooks start it with `lab loop --background --if-older 15`.
+# [lab.loop]
+# measure = [["agentprof", "scan", "--out", ".research/agentprof", "--timezone", "Asia/Tokyo"]]
+# notify = ["sh", "scripts/notify.sh"]
+# renotify_hours = 24
 
 # Each check prints rf.finding/1 JSON Lines and exits 0 (no errors), 1 (errors) or 2 (failed).
 # Names must be unique. After the first `lab check`, accept the existing backlog with
@@ -674,7 +732,7 @@ impl<'p> Evidence<'p> {
         })
     }
 
-    fn measure(&self, lesson: &lessons::Lesson) -> Option<retro::Evaluation> {
+    fn measure(&self, lesson: &lessons::Lesson) -> evaluate::Evaluation {
         let configured: Vec<&str> = self
             .project
             .lab
@@ -682,50 +740,78 @@ impl<'p> Evidence<'p> {
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        let agent = retro::Agent {
+        let inputs = evaluate::Inputs {
+            runs: &self.runs,
+            configured: &configured,
             findings: &self.agent.findings,
             sessions: self.sessions.as_deref().map_err(String::as_str),
+            settings: &self.project.lab.evaluate,
         };
-        retro::evaluate(lesson, &self.runs, &configured, &agent, |t| {
-            self.project.date_of(t).ok()
-        })
+        evaluate::evaluate(lesson, &inputs, |t| self.project.date_of(t).ok())
+    }
+
+    /// Every active lesson, measured.
+    fn active(&self, lessons: &[lessons::Lesson]) -> Vec<evaluate::Evaluation> {
+        lessons
+            .iter()
+            .filter(|l| l.meta.status.active())
+            .map(|l| self.measure(l))
+            .collect()
     }
 }
 
-fn evaluate(project: &Project) -> Result<ExitCode, String> {
+/// What `lab loop` evaluates and signals, after its measure commands ran.
+fn analyse(project: &Project) -> Result<lesson_loop::Analysis, String> {
     let lessons = lessons::load(&project.lessons_dir())?;
     let evidence = Evidence::load(project)?;
-    let mut any = false;
-    for l in lessons.iter().filter(|l| l.meta.status.active()) {
-        let Some(e) = evidence.measure(l) else {
-            continue;
-        };
-        any = true;
-        let fmt = |m: Option<f64>| m.map_or_else(|| "-".into(), |v| format!("{v:.2}"));
-        let metric = l
-            .meta
-            .metric
-            .as_ref()
-            .map(|m| format!("{}:{}", m.tool, m.rule))
-            .unwrap_or_default();
-        println!(
-            "{} ({metric}): {} per {unit} before ({} {unit}s), {} after ({} {unit}s): {}",
-            l.meta.id,
-            fmt(e.before_mean),
-            e.before_runs,
-            fmt(e.after_mean),
-            e.after_runs,
-            e.verdict,
-            unit = e.unit
-        );
+    let evaluations = evidence.active(&lessons);
+    let rec = retro::recurrences(&evidence.runs, &evidence.agent.findings);
+    let candidates = retro::candidates(&rec, &lessons, project.lab.recurrence)
+        .into_iter()
+        .map(|((tool, rule), r)| signals::Candidate {
+            tool: tool.clone(),
+            rule: rule.clone(),
+            severity: r.severity.map_or("?", Severity::as_str).into(),
+            findings: r.findings(),
+            sample: r.subjects.iter().take(3).cloned().collect(),
+        })
+        .collect();
+    Ok(lesson_loop::Analysis {
+        lessons,
+        evaluations,
+        candidates,
+    })
+}
+
+fn evaluate(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
+    let lessons = lessons::load(&project.lessons_dir())?;
+    let evidence = Evidence::load(project)?;
+    let evaluations = evidence.active(&lessons);
+    if jsonl {
+        for e in &evaluations {
+            println!("{}", serde_json::to_string(e).map_err(|e| e.to_string())?);
+        }
+        return Ok(ExitCode::SUCCESS);
     }
-    if any {
-        println!(
-            "These counts are observational: other changes in the same period can explain a difference."
-        );
-    } else {
-        println!("No adopted lesson has both a metric and an adoption date.");
+    if evaluations.is_empty() {
+        println!("No adopted or verified lesson.");
+        return Ok(ExitCode::SUCCESS);
     }
+    for e in &evaluations {
+        println!("{}", e.line());
+    }
+    let s = &project.lab.evaluate;
+    println!(
+        "\nVerdicts need {} sessions (or check runs) on each side and p below {} in one direction \
+         (alpha {} two-sided); p↓ tests for fewer findings since adoption, p↑ for more. \
+         The comparison is observational: other changes since adoption can explain a difference, \
+         and with {} lessons measured some will cross the threshold by chance. \
+         Check-run verdicts are descriptive, without a test.",
+        s.min_sessions,
+        s.alpha / 2.0,
+        s.alpha,
+        evaluations.len()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -803,13 +889,13 @@ fn lesson(project: &Project, cmd: LessonCommand) -> Result<ExitCode, String> {
                         "`{id}` has no metric to measure; pass --force with a note citing the evidence"
                     ));
                 }
-                let verdict = Evidence::load(project)?
-                    .measure(lesson)
-                    .map_or_else(|| "not measurable".to_string(), |e| e.verdict);
-                if verdict != retro::IMPROVED {
+                let e = Evidence::load(project)?.measure(lesson);
+                if e.verdict != evaluate::Verdict::Improved {
                     return Err(format!(
-                        "`{id}` cannot be verified: its metric shows {verdict}; \
-                         pass --force with a note citing other evidence"
+                        "`{id}` cannot be verified: `lab evaluate` says {}{}; \
+                         pass --force with a note citing other evidence",
+                        e.verdict.as_str(),
+                        e.reason.map(|r| format!(" ({r})")).unwrap_or_default()
                     ));
                 }
             }

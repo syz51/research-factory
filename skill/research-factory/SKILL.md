@@ -10,7 +10,7 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 ## Start of a session
 
 1. Run `lab brief` and follow every rule under "Rules from lessons". Each is an instruction to follow, whether it was learned from a failure or from a practice that worked.
-2. Note the errors the latest checks left open; fix those in the area you are working on.
+2. Note the errors the latest checks left open; fix those in the area you are working on. If the brief has a "Lesson measurements" section, it shows each lesson's verdict from the last `lab loop`; act on `→ verify` and `→ revise or retire` lines as in step 3 of "Before reporting done", and if it says the loop has not run for over a day, tell the user the hooks may not be running.
 3. If the brief has an Archive section, read the start page it names. Look records up by id or a few words with `lab archive find` rather than reading indexes or notes whole, and read a large file by section (search for the heading, then read that range).
 
 ## While working on the archive
@@ -30,7 +30,22 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 
 1. If the project has an archive, run `lab archive update` first. Then run `lab check --new-only`. It lists the errors that are not in the baseline. Fix every one, or show that the finding is wrong and correct the checker or its configuration. Re-running the check does not clear it. Never delete or edit stored findings, and never run `lab baseline set` to make the gate pass; accepting findings into the baseline is a person's decision.
 2. If something went wrong or worked unusually well in this session, record it: `lab lesson add --id <kebab-id> --title "<short title>" --kind bad|good --rule "<one imperative sentence>" --evidence <path:line or finding fingerprint>`. Add `--metric tool:rule` when a checker or `agentprof` rule measures it.
-3. Periodically, run `lab retro` and `lab evaluate`. Propose lessons for recurring rules. Adopt a lesson only after reading its evidence, and mark it `verified` only when `lab evaluate` shows it helped.
+3. Periodically, or when the brief or a signal asks, run `lab retro` and `lab evaluate`. Propose lessons for recurring rules. Adopt a lesson only after reading its evidence. Mark it `verified` only when `lab evaluate` says `improved`, citing its numbers in the note; `collecting` and `inconclusive` mean wait, not success. Revise or retire a lesson whose verdict is `worse`, and give an `unmeasurable` one a metric that can show an effect (a finding rule, or a numeric session field such as `agentprof:session.max_prompt_tokens`) or decide on other evidence with `--force` and a note.
+
+## Running the loop from hooks
+
+`lab loop` runs the `[lab.loop] measure` commands (such as `agentprof scan`), evaluates every lesson and sends each new or changed signal to the `notify` command; `lab brief` shows its results. To keep it running, add Claude Code hooks that start it at the start of each session and at the end of each turn (in `.claude/settings.json`):
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "cd \"$CLAUDE_PROJECT_DIR\" && lab loop --background --if-older 15" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "cd \"$CLAUDE_PROJECT_DIR\" && lab loop --background --if-older 15" }] }]
+  }
+}
+```
+
+`--background` returns at once; the detached loop does nothing when the last one finished less than 15 minutes ago or another is running, and writes its output to `.research/lab/loop/loop.log`. To file signals as tasks on a work board, set `notify` to the script `scripts/board-notify.sh` in this skill: it reads one `rf.signal/1` object on stdin and prints the task's reference.
 
 ## Reporting
 

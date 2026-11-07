@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::check::{CheckOutcome, Run};
+use crate::evaluate::{Evaluation, Verdict, p_label};
 use crate::finding::Severity;
+use crate::lesson_loop::{Record, SendStatus};
 use crate::lessons::{Kind, Lesson, Status};
 
 /// Adopted lessons older than this without a `verified` decision are listed
@@ -13,7 +15,9 @@ pub const EVALUATE_AFTER_DAYS: i32 = 14;
 
 /// `runs` are the stored check runs, oldest first, and `checks` the configured
 /// check names; `candidates` counts recurring rules without a lesson across
-/// the whole project.
+/// the whole project. `measurements` is the lesson-measurement section of a
+/// project with `[lab.loop]`, which replaces the reminder to evaluate.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     project: &str,
     today: &str,
@@ -22,6 +26,7 @@ pub fn render(
     checks: &[String],
     tags: &[String],
     candidates: usize,
+    measurements: Option<&str>,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# {project}: research brief ({today})\n");
@@ -126,8 +131,12 @@ pub fn render(
         }
     }
 
+    if let Some(m) = measurements {
+        out.push_str(m);
+    }
     let due: Vec<&Lesson> = lessons
         .iter()
+        .filter(|_| measurements.is_none())
         .filter(|l| l.meta.status == Status::Adopted)
         .filter(|l| tags.is_empty() || l.meta.tags.iter().any(|t| tags.contains(t)))
         .filter(|l| {
@@ -159,6 +168,156 @@ pub fn render(
                     " across the project, whatever their tags"
                 }
             );
+        }
+    }
+    out
+}
+
+/// Hours after which the brief says the loop may not be running.
+const LOOP_STALE_HOURS: i64 = 24;
+
+fn age(d: jiff::SignedDuration) -> String {
+    let mins = d.as_mins().max(0);
+    if mins < 60 {
+        format!("{mins} min ago")
+    } else if mins < 48 * 60 {
+        format!("{} h ago", mins / 60)
+    } else {
+        format!("{} days ago", mins / (24 * 60))
+    }
+}
+
+/// One lesson's verdict, as short as the brief needs.
+fn verdict_line(e: &Evaluation) -> String {
+    let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
+    match e.verdict {
+        Verdict::Collecting => {
+            let mut s = format!("collecting {}/{}", e.after.n, e.min_sessions);
+            if e.before.n < e.min_sessions {
+                let _ = write!(s, " after, {}/{} before", e.before.n, e.min_sessions);
+            }
+            if let Some(m) = e.sessions_needed {
+                let _ = write!(s, ", about {m} more sessions");
+            }
+            s
+        }
+        Verdict::Inconclusive => match e.sessions_needed {
+            Some(m) => format!("inconclusive, about {m} more sessions"),
+            None => format!("inconclusive{}", p(e.p_lower)),
+        },
+        Verdict::Improved if e.lesson_status == Status::Adopted => {
+            format!("improved{} → verify", p(e.p_lower))
+        }
+        Verdict::Improved => format!("improved{}", p(e.p_lower)),
+        Verdict::Worse => format!("worse{} → revise or retire", p(e.p_upper)),
+        Verdict::Unmeasurable => format!(
+            "unmeasurable: {}",
+            e.reason.as_deref().unwrap_or("no reason recorded")
+        ),
+    }
+}
+
+/// The `## Lesson measurements` section of a project with `[lab.loop]`:
+/// when the loop last ran, each active lesson's verdict from that run, and
+/// what failed or waits to be sent.
+pub fn measurements(
+    record: Result<Option<Record>, String>,
+    now: jiff::Timestamp,
+    tz: &jiff::tz::TimeZone,
+    lessons: &[Lesson],
+    tags: &[String],
+) -> String {
+    let mut out = String::from("\n## Lesson measurements\n\n");
+    let r = match record {
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "The loop's last record is unreadable: {e}. Run `lab loop`."
+            );
+            return out;
+        }
+        Ok(None) => {
+            out.push_str("The loop has never run: run `lab loop`.\n");
+            return out;
+        }
+        Ok(Some(r)) => r,
+    };
+    match r.finished.parse::<jiff::Timestamp>() {
+        Ok(t) => {
+            let since = now.duration_since(t);
+            let _ = write!(
+                out,
+                "Last measured {} ({}).",
+                t.to_zoned(tz.clone()).strftime("%Y-%m-%d %H:%M"),
+                age(since)
+            );
+            if since.as_hours() >= LOOP_STALE_HOURS {
+                out.push_str(
+                    " That is over a day: the hooks that run `lab loop --background` may not be running.",
+                );
+            }
+            out.push('\n');
+        }
+        Err(_) => {
+            let _ = writeln!(out, "Last measured at an unreadable time `{}`.", r.finished);
+        }
+    }
+    let shown: Vec<&Lesson> = lessons
+        .iter()
+        .filter(|l| l.meta.status.active())
+        .filter(|l| tags.is_empty() || l.meta.tags.iter().any(|t| tags.contains(t)))
+        .collect();
+    let mut lines = Vec::new();
+    for l in &shown {
+        match r.evaluations.iter().find(|e| e.lesson == l.meta.id) {
+            Some(e) => lines.push(format!("- `{}`: {}", l.meta.id, verdict_line(e))),
+            None => lines.push(format!("- `{}`: not measured yet", l.meta.id)),
+        }
+    }
+    if !lines.is_empty() {
+        out.push('\n');
+        for line in lines {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+    let failed: Vec<String> = r
+        .measure
+        .iter()
+        .filter(|m| !m.ok)
+        .map(|m| format!("`{}` ({})", m.argv.join(" "), m.status))
+        .collect();
+    let count = |s: SendStatus| r.signals.iter().filter(|x| x.status == s).count();
+    let mut notes = Vec::new();
+    if !failed.is_empty() {
+        notes.push(format!("Measure commands failed: {}.", failed.join(", ")));
+    }
+    if count(SendStatus::Failed) > 0 {
+        notes.push(format!(
+            "{} signal(s) could not be sent and will be retried; the notify errors are in <state_dir>/lab/loop/loop.log.",
+            count(SendStatus::Failed)
+        ));
+    }
+    if count(SendStatus::Pending) > 0 {
+        notes.push(format!(
+            "{} signal(s) pending: no `[lab.loop] notify` command is set (`lab loop --format jsonl` prints them).",
+            count(SendStatus::Pending)
+        ));
+    }
+    if r.errors.iter().any(|e| !e.starts_with("notify ")) {
+        notes.push(format!(
+            "The loop failed: {}.",
+            r.errors
+                .iter()
+                .filter(|e| !e.starts_with("notify "))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    if !notes.is_empty() {
+        out.push('\n');
+        for n in notes {
+            let _ = writeln!(out, "{n}");
         }
     }
     out
@@ -252,7 +411,7 @@ mod tests {
             ),
             lesson("c", Kind::Bad, Status::Observed, None, &["lit"]),
         ];
-        let text = render("demo", "2026-11-07", &lessons, &[], &[], &[], 2);
+        let text = render("demo", "2026-11-07", &lessons, &[], &[], &[], 2, None);
         let failures = text
             .find("Learned from failures:\n\n- rule b (`b`)")
             .unwrap();
@@ -271,7 +430,16 @@ mod tests {
         assert!(!text.contains("rule c"));
         assert!(text.contains("not yet verified: b"));
         assert!(text.contains("2 recurring finding rule(s)"));
-        let lit = render("demo", "2026-11-07", &lessons, &[], &[], &["lit".into()], 0);
+        let lit = render(
+            "demo",
+            "2026-11-07",
+            &lessons,
+            &[],
+            &[],
+            &["lit".into()],
+            0,
+            None,
+        );
         assert!(lit.contains("rule a") && !lit.contains("(`b`)") && !lit.contains("Maintenance"));
         assert!(
             !lit.contains("Learned from failures"),
@@ -325,7 +493,7 @@ mod tests {
             // `lab check --only claims` found nothing.
             run("2026-11-07T00:00:00Z", &[("claims", "ok")], &[]),
         ];
-        let text = render("demo", "2026-11-07", &[], &runs, &checks, &[], 0);
+        let text = render("demo", "2026-11-07", &[], &runs, &checks, &[], 0, None);
         assert!(
             text.contains("2026-11-06T00:00:00Z to 2026-11-07T00:00:00Z (each check's latest run): 1 errors, 0 warnings, 0 info across 2 checks."),
             "{text}"
@@ -344,15 +512,136 @@ mod tests {
             Some("2026-11-06"),
             &["lit"],
         )];
-        let exp = render("demo", "2026-11-07", &lessons, &[], &[], &["exp".into()], 3);
+        let exp = render(
+            "demo",
+            "2026-11-07",
+            &lessons,
+            &[],
+            &[],
+            &["exp".into()],
+            3,
+            None,
+        );
         assert!(exp.contains("None adopted with tag exp."), "{exp}");
         assert!(!exp.contains("None adopted yet."), "{exp}");
         assert!(
             exp.contains("have no lesson across the project, whatever their tags"),
             "{exp}"
         );
-        let all = render("demo", "2026-11-07", &lessons, &[], &[], &[], 3);
+        let all = render("demo", "2026-11-07", &lessons, &[], &[], &[], 3, None);
         assert!(all.contains("- 3 recurring finding rule(s) have no lesson (run `lab retro`)."));
+    }
+
+    fn evaluation(id: &str, verdict: Verdict) -> Evaluation {
+        let mut l = lesson(id, Kind::Bad, Status::Adopted, Some("2026-11-01"), &[]);
+        l.meta.metric = Some("agentprof:file-reread".parse().unwrap());
+        Evaluation {
+            schema: crate::evaluate::SCHEMA.into(),
+            lesson: id.into(),
+            lesson_status: Status::Adopted,
+            metric: Some("agentprof:file-reread".into()),
+            unit: None,
+            method: None,
+            verdict,
+            reason: None,
+            adopted: l.meta.adopted.clone(),
+            before: crate::evaluate::Side {
+                n: 1022,
+                ..Default::default()
+            },
+            after: crate::evaluate::Side {
+                n: 3,
+                ..Default::default()
+            },
+            p_lower: Some(0.004),
+            p_upper: Some(0.9),
+            strata: vec![],
+            excluded: 0,
+            sessions_needed: None,
+            min_sessions: 10,
+            alpha: 0.05,
+            baseline_days: 90,
+        }
+    }
+
+    #[test]
+    fn measurements_show_each_verdict_and_the_loops_health() {
+        use crate::lesson_loop::{MeasureResult, SignalStatus};
+        let lessons: Vec<Lesson> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|id| lesson(id, Kind::Bad, Status::Adopted, Some("2026-11-01"), &[]))
+            .collect();
+        let mut inconclusive = evaluation("b", Verdict::Inconclusive);
+        inconclusive.sessions_needed = Some(340);
+        let mut unmeasurable = evaluation("d", Verdict::Unmeasurable);
+        unmeasurable.reason = Some("no metric".into());
+        let record = Record {
+            schema: crate::lesson_loop::SCHEMA.into(),
+            started: "2026-11-07T00:00:00Z".into(),
+            finished: "2026-11-07T00:00:10Z".into(),
+            measure: vec![MeasureResult {
+                argv: vec!["agentprof".into(), "scan".into()],
+                ok: false,
+                status: "exit 2".into(),
+            }],
+            evaluations: vec![
+                evaluation("a", Verdict::Collecting),
+                inconclusive,
+                evaluation("c", Verdict::Improved),
+                unmeasurable,
+            ],
+            signals: vec![SignalStatus {
+                id: "x".into(),
+                kind: "k".into(),
+                status: SendStatus::Pending,
+            }],
+            errors: vec![],
+        };
+        let tz = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+        let now: jiff::Timestamp = "2026-11-07T02:00:10Z".parse().unwrap();
+        let text = measurements(Ok(Some(record.clone())), now, &tz, &lessons, &[]);
+        assert!(
+            text.starts_with(
+                "\n## Lesson measurements\n\nLast measured 2026-11-07 09:00 (2 h ago).\n\n"
+            ),
+            "{text}"
+        );
+        for line in [
+            "- `a`: collecting 3/10\n",
+            "- `b`: inconclusive, about 340 more sessions\n",
+            "- `c`: improved p=0.004 → verify\n",
+            "- `d`: unmeasurable: no metric\n",
+            "- `e`: not measured yet\n",
+            "Measure commands failed: `agentprof scan` (exit 2).\n",
+            "1 signal(s) pending",
+        ] {
+            assert!(text.contains(line), "{line:?} in\n{text}");
+        }
+        assert!(!text.contains("hooks"), "{text}");
+        let later: jiff::Timestamp = "2026-11-09T00:00:10Z".parse().unwrap();
+        let stale = measurements(Ok(Some(record)), later, &tz, &lessons, &[]);
+        assert!(
+            stale.contains("(2 days ago). That is over a day: the hooks"),
+            "{stale}"
+        );
+        let never = measurements(Ok(None), now, &tz, &lessons, &[]);
+        assert!(never.ends_with("The loop has never run: run `lab loop`.\n"));
+        let with = render(
+            "demo",
+            "2026-11-30",
+            &lessons,
+            &[],
+            &[],
+            &[],
+            0,
+            Some(&never),
+        );
+        assert!(with.contains("## Last check") && with.contains("## Lesson measurements"));
+        assert!(!with.contains("not yet verified"), "{with}");
+        assert!(
+            render("demo", "2026-11-30", &lessons, &[], &[], &[], 0, None)
+                .contains("not yet verified")
+        );
     }
 
     #[test]
