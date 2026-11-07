@@ -85,8 +85,8 @@ impl Default for LabConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvaluateConfig {
-    /// Observations (sessions or check runs) needed on each side of the
-    /// adoption date before a verdict.
+    /// Session groups needed on each side of the adoption date before a
+    /// verdict; for check runs, the commits an `improved` verdict would need.
     #[serde(default = "default_min_sessions")]
     pub min_sessions: usize,
     /// Two-sided significance level; each direction is tested at `alpha / 2`.

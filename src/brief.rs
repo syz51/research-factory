@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::check::{CheckOutcome, Run};
-use crate::evaluate::{Evaluation, Verdict, p_label};
+use crate::evaluate::{Evaluation, Method, Verdict, p_label};
 use crate::finding::Severity;
 use crate::lesson_loop::{Record, SendStatus};
 use crate::lessons::{Kind, Lesson, Status};
@@ -193,6 +193,21 @@ fn age(d: jiff::SignedDuration) -> String {
 fn verdict_line(e: &Evaluation, status: Status) -> String {
     let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     let unit = e.unit.map_or("session", |u| u.as_str());
+    // Check runs get no verdict; their introduced findings are the news.
+    if e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting {
+        return match &e.introduced {
+            Some(i) if i.count > 0 => format!(
+                "{} introduced since {} → review (`lab evaluate`)",
+                i.count,
+                i.since_text(e.adopted.as_deref())
+            ),
+            Some(i) => format!(
+                "none introduced since {}",
+                i.since_text(e.adopted.as_deref())
+            ),
+            None => "no complete check run since adoption".into(),
+        };
+    }
     match e.verdict {
         Verdict::Collecting => {
             let mut s = format!("collecting {}/{}", e.after.n, e.min_sessions);
@@ -568,6 +583,7 @@ mod tests {
             min_sessions: 10,
             alpha: 0.05,
             baseline_days: 90,
+            introduced: None,
         }
     }
 

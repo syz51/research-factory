@@ -6,15 +6,16 @@
 //! session group, the unit counted and moved by the test. Without such
 //! groups, a finding rule is tested by the exact stratified hypergeometric
 //! test on per-session indicators and a numeric session field by the van
-//! Elteren test; with them, both by a stratified cluster permutation test. Check runs repeat the same backlog and are not
-//! independent observations, so they are only described.
+//! Elteren test; with them, both by a stratified cluster permutation test.
+//! Check runs repeat the same backlog and are not independent observations,
+//! so they are only described: the findings introduced since adoption.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::check::Run;
+use crate::check::{Item, Run};
 use crate::config::EvaluateConfig;
 use crate::finding::Finding;
 use crate::lessons::{Lesson, Metric, Status};
@@ -32,9 +33,11 @@ const NEEDED_LIMIT: u64 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Fewer than `min_sessions` observations on a side.
+    /// Fewer than `min_sessions` observations on a side. For check runs
+    /// (`Method::Descriptive`) it is permanent: they are described by
+    /// `introduced`, never judged.
     Collecting,
-    /// Lower after adoption: `p_lower < alpha/2`, or a lower mean for check runs.
+    /// Lower after adoption: `p_lower < alpha/2`. Never for check runs.
     Improved,
     /// Higher after adoption.
     Worse,
@@ -82,7 +85,7 @@ impl Unit {
 pub enum Method {
     StratifiedHypergeometric,
     VanElteren,
-    /// Means compared without a test (check runs).
+    /// Check runs: introduced findings, without a test or verdict.
     Descriptive,
     /// Whole session groups permuted between the sides (agent sessions
     /// with subagents).
@@ -92,7 +95,7 @@ pub enum Method {
 /// One side of the adoption date.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Side {
-    /// Observations: session groups, sessions or check runs.
+    /// Observations: session groups, sessions (version 1) or check runs.
     pub n: usize,
     /// The agent sessions in the `n` session groups; `None` for other units.
     #[serde(default)]
@@ -114,7 +117,7 @@ pub struct Stratum {
     pub after: usize,
 }
 
-/// An `rf.evaluation/1` record.
+/// An `rf.evaluation/2` record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evaluation {
     pub schema: String,
@@ -140,6 +143,57 @@ pub struct Evaluation {
     pub min_sessions: usize,
     pub alpha: f64,
     pub baseline_days: u32,
+    /// Check-run metrics: findings introduced since adoption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introduced: Option<Introduced>,
+}
+
+/// Findings of the metric's rule in the latest complete check run beyond
+/// their message and data's count in the first complete run on or after
+/// adoption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Introduced {
+    /// The first complete run on or after adoption (its `at`, UTC).
+    pub since: String,
+    /// That run's date in the project's time zone.
+    #[serde(default)]
+    pub since_date: Option<String>,
+    /// The latest complete run.
+    pub latest: String,
+    /// The sum of `added`.
+    pub count: usize,
+    pub findings: Vec<IntroducedFinding>,
+}
+
+impl Introduced {
+    /// "the first complete run after adoption, on 2026-11-10 (adopted
+    /// 2026-11-03)": the run's local date, and the adoption date when the
+    /// run came later, since violations written in between count as backlog.
+    pub fn since_text(&self, adopted: Option<&str>) -> String {
+        let date = self.since_date.as_deref().unwrap_or(&self.since);
+        match adopted {
+            Some(a) if a != date => {
+                format!("the first complete run after adoption, on {date} (adopted {a})")
+            }
+            _ => format!("the first complete run after adoption, on {date}"),
+        }
+    }
+}
+
+/// A message and data with more findings in the latest run than in the
+/// `since` run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntroducedFinding {
+    pub message: String,
+    /// Findings beyond the `since` run's count of this message and data.
+    pub added: usize,
+    /// Where the new findings are: the latest run's subjects for this key
+    /// whose fingerprint the `since` run lacks (or all, when none does),
+    /// at most ten.
+    pub subjects: Vec<String>,
+    /// Subjects left out of `subjects`.
+    #[serde(default)]
+    pub more: usize,
 }
 
 impl Evaluation {
@@ -168,6 +222,7 @@ impl Evaluation {
             min_sessions: settings.min_sessions,
             alpha: settings.alpha,
             baseline_days: settings.baseline_days,
+            introduced: None,
         }
     }
 
@@ -217,6 +272,14 @@ impl Evaluation {
             if self.excluded > 0 {
                 let _ = write!(out, "; {} in unmatched strata left out", self.excluded);
             }
+            if let Some(i) = &self.introduced {
+                let _ = write!(
+                    out,
+                    "; {} introduced since {}",
+                    i.count,
+                    i.since_text(self.adopted.as_deref())
+                );
+            }
             out.push(')');
             if let (Some(lo), Some(up)) = (self.p_lower, self.p_upper) {
                 let _ = write!(out, ", p↓ {} p↑ {}", p_value(lo), p_value(up));
@@ -236,12 +299,24 @@ impl Evaluation {
                 "; about {m} more clean {unit}(s) in the baseline's mix would show a decrease"
             );
         }
-        if self.method == Some(Method::Descriptive)
-            && matches!(self.verdict, Verdict::Improved | Verdict::Worse)
-        {
-            out.push_str(" (descriptive: no significance test)");
-        }
         out
+    }
+
+    /// The introduced findings, one indented line each, for manual review.
+    pub fn introduced_lines(&self) -> Vec<String> {
+        let Some(i) = &self.introduced else {
+            return Vec::new();
+        };
+        i.findings
+            .iter()
+            .map(|f| {
+                let mut at = f.subjects.join(", ");
+                if f.more > 0 {
+                    let _ = write!(at, ", {} more", f.more);
+                }
+                format!("  +{} {} [{at}]", f.added, f.message)
+            })
+            .collect()
     }
 }
 
@@ -343,7 +418,7 @@ pub fn evaluate(
         .map(|i| i.check.as_str())
         .collect();
     if !required.is_empty() {
-        return check_runs(e, metric, &required, inputs, place);
+        return check_runs(e, metric, &required, inputs, place, &date_of);
     }
     if inputs.findings.iter().any(|f| f.tool == metric.tool) {
         return sessions(e, metric, None, inputs, place);
@@ -354,21 +429,40 @@ pub fn evaluate(
     ))
 }
 
-/// Means per complete check run, without a test.
+/// Check-run findings introduced since adoption, described without a verdict.
 ///
 /// A run counts when every configured check that has reported the metric's
 /// tool ran to completion in it, so a failed or partial (`--only`) run is
-/// not mistaken for a clean one.
+/// not mistaken for a clean one. The means per run before and after adoption
+/// are kept as context only: they move with checker scope and with backlog
+/// work, and runs repeat the same backlog, so they are not compared.
+///
+/// Findings are keyed by message and data (the rule is the metric's), not by
+/// fingerprint, whose file path makes moved text look new; a checker's data
+/// usually holds the sentence, which tells two violations with one message
+/// apart. A finding is introduced when the latest complete run has more
+/// findings with its key than the first complete run on or after adoption,
+/// which holds the violations written before that run. The baseline plays no
+/// part, so a finding stays introduced after `lab baseline set` accepts it.
+///
+/// `improved` would need a denominator (such as new citing sentences) and
+/// runs on enough distinct commits; lab records neither, so the verdict
+/// stays `collecting`. Consumers tell this apart by `Method::Descriptive`.
 fn check_runs(
     mut e: Evaluation,
     metric: &Metric,
     required: &BTreeSet<&str>,
     inputs: &Inputs,
     place: impl Fn(&str) -> Option<bool>,
+    date_of: impl Fn(&str) -> Option<jiff::civil::Date>,
 ) -> Evaluation {
     e.unit = Some(Unit::Run);
     e.method = Some(Method::Descriptive);
     let (mut before, mut after) = (Vec::new(), Vec::new());
+    // The first and the latest complete run since adoption.
+    let mut first: Option<&Run> = None;
+    let mut last: Option<&Run> = None;
+    let mut observed = false;
     for run in inputs.runs {
         let complete = required
             .iter()
@@ -376,47 +470,121 @@ fn check_runs(
         if !complete {
             continue;
         }
-        let count = run
-            .items
-            .iter()
-            .filter(|i| {
-                required.contains(i.check.as_str())
-                    && i.finding.tool == metric.tool
-                    && i.finding.rule == metric.rule
-            })
-            .count() as f64;
+        let count = metric_items(run, metric, required).len();
+        observed |= count > 0;
         match place(&run.header.at) {
-            Some(true) => after.push(count),
-            Some(false) => before.push(count),
+            Some(true) => {
+                after.push(count as f64);
+                first.get_or_insert(run);
+                last = Some(run);
+            }
+            Some(false) => before.push(count as f64),
             None => {}
         }
     }
     e.before = describe(&before);
     e.after = describe(&after);
-    let min = inputs.settings.min_sessions;
-    if before.is_empty() {
-        return e.unmeasurable("no complete check run before adoption");
-    }
-    if before.len() < min {
+    if !observed {
         return e.unmeasurable(format!(
-            "only {} complete check run(s) before adoption, fewer than {min}",
-            before.len()
+            "no complete check run has reported `{}:{}`",
+            metric.tool, metric.rule
         ));
     }
-    if after.len() < min {
-        e.verdict = Verdict::Collecting;
-        e.reason = Some(format!("{} of {min} runs after adoption", after.len()));
+    e.verdict = Verdict::Collecting;
+    let (Some(first), Some(last)) = (first, last) else {
+        e.reason = Some("no complete check run since adoption".into());
         return e;
-    }
-    let (b, a) = (e.before.mean.unwrap_or(0.0), e.after.mean.unwrap_or(0.0));
-    e.verdict = if a < b {
-        Verdict::Improved
-    } else if a > b {
-        Verdict::Worse
-    } else {
-        Verdict::Inconclusive
     };
+    let mut found = introduced(
+        &metric_items(first, metric, required),
+        &metric_items(last, metric, required),
+    );
+    found.since = first.header.at.clone();
+    found.since_date = date_of(&first.header.at).map(|d| d.to_string());
+    found.latest = last.header.at.clone();
+    e.introduced = Some(found);
+    e.reason = Some(format!(
+        "descriptive: a verdict needs a denominator, such as new citing sentences, \
+         and runs on {} or more commits; lab records neither",
+        inputs.settings.min_sessions
+    ));
     e
+}
+
+/// A run's findings of the metric's rule from the required checks.
+fn metric_items<'r>(run: &'r Run, metric: &Metric, required: &BTreeSet<&str>) -> Vec<&'r Item> {
+    run.items
+        .iter()
+        .filter(|i| {
+            required.contains(i.check.as_str())
+                && i.finding.tool == metric.tool
+                && i.finding.rule == metric.rule
+        })
+        .collect()
+}
+
+/// Subjects kept per introduced key.
+const INTRODUCED_SUBJECTS: usize = 10;
+
+/// The findings of `last` beyond their key's count in `first`, keyed by
+/// message and data.
+fn introduced(first: &[&Item], last: &[&Item]) -> Introduced {
+    let key = |i: &Item| {
+        (
+            i.finding.message.clone(),
+            i.finding
+                .data
+                .as_ref()
+                .map(|d| d.to_string())
+                .unwrap_or_default(),
+        )
+    };
+    let mut base: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for i in first {
+        *base.entry(key(i)).or_default() += 1;
+    }
+    let old: BTreeSet<&str> = first.iter().map(|i| i.fingerprint.as_str()).collect();
+    let mut now: BTreeMap<(String, String), Vec<&Item>> = BTreeMap::new();
+    for i in last {
+        now.entry(key(i)).or_default().push(i);
+    }
+    let mut findings: Vec<IntroducedFinding> = now
+        .into_iter()
+        .filter_map(|(k, items)| {
+            let added = items
+                .len()
+                .saturating_sub(base.get(&k).copied().unwrap_or(0));
+            if added == 0 {
+                return None;
+            }
+            // Where the new ones are: subjects with a fingerprint the first
+            // run lacks (a moved copy also has one), else every subject.
+            let new: Vec<&Item> = items
+                .iter()
+                .copied()
+                .filter(|i| !old.contains(i.fingerprint.as_str()))
+                .collect();
+            let shown = if new.is_empty() { &items } else { &new };
+            Some(IntroducedFinding {
+                message: k.0,
+                added,
+                subjects: shown
+                    .iter()
+                    .take(INTRODUCED_SUBJECTS)
+                    .map(|i| i.finding.subject.clone())
+                    .collect(),
+                more: shown.len().saturating_sub(INTRODUCED_SUBJECTS),
+            })
+        })
+        .collect();
+    findings.sort_by(|a, b| b.added.cmp(&a.added).then(a.message.cmp(&b.message)));
+    Introduced {
+        since: String::new(),
+        since_date: None,
+        latest: String::new(),
+        count: findings.iter().map(|f| f.added).sum(),
+        findings,
+    }
 }
 
 fn describe(values: &[f64]) -> Side {
@@ -1445,61 +1613,247 @@ mod tests {
             (e.before.n, e.after.n, e.verdict),
             (2, 0, Verdict::Collecting)
         );
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("no complete check run since adoption")
+        );
+        assert_eq!(e.introduced, None);
         // Once `thesis` is no longer configured, it is not required.
         let e = eval(&["docs"]);
         assert_eq!((e.before.n, e.after.n), (2, 2));
         assert_eq!((e.before.mean, e.after.mean), (Some(2.0), Some(0.0)));
-        assert_eq!(e.verdict, Verdict::Improved);
+        // Fewer findings per run is not a verdict: runs repeat the backlog.
+        assert_eq!(e.verdict, Verdict::Collecting);
+        assert_eq!(e.introduced.as_ref().map(|i| i.count), Some(0));
     }
 
-    #[test]
-    fn check_runs_are_descriptive_and_gated_by_min_sessions() {
-        let l = lesson("claimcheck:quote-not-found", "2026-11-03");
+    /// A complete `claims` run with source-text-missing findings at
+    /// (subject, message, sentence); the sentence goes in the data, as
+    /// claimcheck's does.
+    fn run_with(at: &str, findings: &[(&str, &str, &str)]) -> Run {
+        let findings: Vec<Finding> = findings
+            .iter()
+            .map(|&(subject, message, sentence)| {
+                let mut f = Finding::lab(
+                    "source-text-missing",
+                    Severity::Warn,
+                    subject,
+                    message.into(),
+                );
+                f.tool = "claimcheck".into();
+                f.data = Some(serde_json::json!({ "sentence": sentence }));
+                f
+            })
+            .collect();
+        let fps = finding::fingerprints(&findings);
+        let mut run = run("x", 0, true);
+        run.header.at = at.into();
+        run.items = findings
+            .into_iter()
+            .zip(fps)
+            .map(|(finding, fingerprint)| Item {
+                schema: ITEM_SCHEMA.into(),
+                check: "claims".into(),
+                fingerprint,
+                finding,
+            })
+            .collect();
+        run
+    }
+
+    fn eval_runs(runs: &[Run]) -> Evaluation {
         let cfg = EvaluateConfig {
             min_sessions: 2,
             ..EvaluateConfig::default()
         };
-        let eval = |runs: &[Run]| {
-            evaluate(
-                &l,
-                &Inputs {
-                    runs,
-                    configured: &["claims"],
-                    findings: &[],
-                    sessions: Err("none"),
-                    settings: &cfg,
-                },
-                utc_date,
-            )
-        };
-        let mut runs = vec![
-            run("2026-11-01T00:00:00Z", 2, true),
-            run("2026-11-02T00:00:00Z", 2, true),
-            run("2026-11-03T00:00:00Z", 1, true),
+        evaluate(
+            &lesson("claimcheck:source-text-missing", "2026-11-03"),
+            &Inputs {
+                runs,
+                configured: &["claims"],
+                findings: &[],
+                sessions: Err("none"),
+                settings: &cfg,
+            },
+            utc_date,
+        )
+    }
+
+    const OLD: &str = "references 1, 484 have no source text";
+    const NEW: &str = "reference 786 has no source text";
+
+    #[test]
+    fn check_runs_count_findings_introduced_since_adoption_by_message_and_data() {
+        let runs = vec![
+            // Before adoption: no part in the count.
+            run_with("2026-11-01T00:00:00Z", &[("a.md:1", NEW, "n")]),
+            // The first run since adoption holds the earlier violations.
+            run_with(
+                "2026-11-03T00:00:00Z",
+                &[("a.md:3", OLD, "s3"), ("a.md:9", OLD, "s9")],
+            ),
+            // A finding added and fixed between runs is not in the latest run.
+            run_with(
+                "2026-11-04T00:00:00Z",
+                &[
+                    ("a.md:3", OLD, "s3"),
+                    ("a.md:9", OLD, "s9"),
+                    ("c.md:1", "gone", "g"),
+                ],
+            ),
+            // Both OLD sentences moved to a new file; NEW appears in two
+            // sentences; OLD in a new sentence.
+            run_with(
+                "2026-11-05T00:00:00Z",
+                &[
+                    ("moved/a.md:3", OLD, "s3"),
+                    ("moved/a.md:9", OLD, "s9"),
+                    ("b.md:2", OLD, "s2"),
+                    ("b.md:5", NEW, "n5"),
+                    ("d.md:1", NEW, "n1"),
+                ],
+            ),
         ];
-        let e = eval(&runs);
-        assert_eq!(
-            (e.before.n, e.after.n, e.verdict),
-            (2, 1, Verdict::Collecting)
-        );
-        runs.push(run("2026-11-04T00:00:00Z", 0, false)); // a failed run is not a clean one
-        runs.push(run("2026-11-05T00:00:00Z", 0, true));
-        let e = eval(&runs);
-        assert_eq!((e.before.n, e.after.n), (2, 2));
-        assert_eq!((e.before.mean, e.after.mean), (Some(2.0), Some(0.5)));
+        let e = eval_runs(&runs);
         assert_eq!(
             (e.verdict, e.method, e.unit),
             (
-                Verdict::Improved,
+                Verdict::Collecting,
                 Some(Method::Descriptive),
                 Some(Unit::Run)
             )
         );
-        assert!(e.line().contains("descriptive"), "{}", e.line());
-        let e = eval(&runs[2..]);
+        assert_eq!((e.before.n, e.after.n), (1, 3));
+        let i = e.introduced.clone().unwrap();
+        assert_eq!(
+            (
+                i.since.as_str(),
+                i.since_date.as_deref(),
+                i.latest.as_str(),
+                i.count
+            ),
+            (
+                "2026-11-03T00:00:00Z",
+                Some("2026-11-03"),
+                "2026-11-05T00:00:00Z",
+                3
+            )
+        );
+        let subjects: Vec<(&str, usize, Vec<&str>)> = i
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    f.message.as_str(),
+                    f.added,
+                    f.subjects.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            subjects,
+            [
+                (NEW, 1, vec!["d.md:1"]),
+                (NEW, 1, vec!["b.md:5"]),
+                (OLD, 1, vec!["b.md:2"]),
+            ]
+        );
+        let line = e.line();
+        assert!(
+            line.contains(
+                "3 introduced since the first complete run after adoption, on 2026-11-03)"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains("collecting (descriptive: a verdict needs a denominator"),
+            "{line}"
+        );
+        assert_eq!(
+            e.introduced_lines(),
+            vec![
+                format!("  +1 {NEW} [d.md:1]"),
+                format!("  +1 {NEW} [b.md:5]"),
+                format!("  +1 {OLD} [b.md:2]"),
+            ]
+        );
+        let json = serde_json::to_string(&e).unwrap();
+        let back: Evaluation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn a_moved_finding_adds_nothing_but_a_fix_plus_a_new_one_counts() {
+        let first = run_with("2026-11-03T00:00:00Z", &[("a.md:1", OLD, "s1")]);
+        // The same sentence moved to a new file: a new fingerprint, the same key.
+        let moved = run_with("2026-11-04T00:00:00Z", &[("new/a.md:1", OLD, "s1")]);
+        assert_ne!(first.items[0].fingerprint, moved.items[0].fingerprint);
+        let e = eval_runs(&[first, moved]);
+        assert_eq!(e.introduced.as_ref().unwrap().count, 0);
+        assert!(e.introduced_lines().is_empty());
+        assert!(e.line().contains("0 introduced since"), "{}", e.line());
+        // One violation fixed and another with the same message written:
+        // the net count is unchanged, but the new sentence is introduced.
+        let e = eval_runs(&[
+            run_with("2026-11-03T00:00:00Z", &[("a.md:1", OLD, "s1")]),
+            run_with("2026-11-04T00:00:00Z", &[("b.md:7", OLD, "s7")]),
+        ]);
+        assert_eq!(e.introduced_lines(), vec![format!("  +1 {OLD} [b.md:7]")]);
+    }
+
+    #[test]
+    fn introduced_subjects_name_the_new_findings_and_are_capped() {
+        let mut first = Vec::new();
+        let mut last = Vec::new();
+        let subjects: Vec<String> = (0..30).map(|i| format!("doc.md:{i}")).collect();
+        for (i, s) in subjects.iter().enumerate() {
+            // One sentence repeated: the same key 30 times in the backlog.
+            if i < 7 {
+                first.push((s.as_str(), OLD, "same"));
+            }
+            last.push((s.as_str(), OLD, "same"));
+        }
+        last.push(("new.md:99", OLD, "same"));
+        let e = eval_runs(&[
+            run_with("2026-11-03T00:00:00Z", &first),
+            run_with("2026-11-04T00:00:00Z", &last),
+        ]);
+        let f = &e.introduced.as_ref().unwrap().findings[0];
+        assert_eq!(f.added, 24);
+        // The 23 duplicates in doc.md and new.md all have new fingerprints;
+        // ten are kept and the rest counted.
+        assert_eq!((f.subjects.len(), f.more), (10, 14));
+        // The new file is named even behind a long backlog of one message.
+        let e = eval_runs(&[
+            run_with("2026-11-03T00:00:00Z", &last[..30]),
+            run_with("2026-11-04T00:00:00Z", &last),
+        ]);
+        assert_eq!(
+            e.introduced_lines(),
+            vec![format!("  +1 {OLD} [new.md:99]")]
+        );
+    }
+
+    #[test]
+    fn a_rule_no_check_run_reported_is_unmeasurable_and_a_late_first_run_is_named() {
+        let e = eval_runs(&[
+            run("2026-11-01T00:00:00Z", 2, true), // quote-not-found, another rule
+            run("2026-11-04T00:00:00Z", 1, true),
+        ]);
+        assert_eq!(e.verdict, Verdict::Unmeasurable);
         assert_eq!(
             e.reason.as_deref(),
-            Some("no complete check run before adoption")
+            Some("no complete check run has reported `claimcheck:source-text-missing`")
+        );
+        // Adopted 2026-11-03; the first run after it is a week later.
+        let e = eval_runs(&[
+            run_with("2026-11-10T00:00:00Z", &[("a.md:1", OLD, "s1")]),
+            run_with("2026-11-11T00:00:00Z", &[("a.md:1", OLD, "s1")]),
+        ]);
+        assert!(
+            e.line().contains("on 2026-11-10 (adopted 2026-11-03)"),
+            "{}",
+            e.line()
         );
     }
 }

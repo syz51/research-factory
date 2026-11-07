@@ -349,7 +349,7 @@ recurrence = 3
 
 # How `lab evaluate` decides whether a lesson helped (these are the defaults).
 # [lab.evaluate]
-# min_sessions = 10     # session groups (or check runs) needed on each side of the adoption date
+# min_sessions = 10     # session groups needed on each side of the adoption date
 # alpha = 0.05          # two-sided; each direction is tested at alpha/2
 # baseline_days = 90    # compare with this many days before adoption; 0 = all earlier sessions
 
@@ -799,14 +799,18 @@ fn evaluate(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     }
     for e in &evaluations {
         println!("{}", e.line());
+        for line in e.introduced_lines() {
+            println!("{line}");
+        }
     }
     let s = &project.lab.evaluate;
     println!(
-        "\nVerdicts need {} session groups (or check runs) on each side and p below {} in one direction \
+        "\nVerdicts need {} session groups on each side and p below {} in one direction \
          (alpha {} two-sided); p↓ tests for fewer findings since adoption, p↑ for more. \
          The comparison is observational: other changes since adoption can explain a difference, \
          and with {} lessons measured some will cross the threshold by chance. \
-         Check-run verdicts are descriptive, without a test.",
+         Check runs are described, not judged: \"introduced\" counts findings in the latest \
+         complete run beyond their message's count in the first complete run since adoption.",
         s.min_sessions,
         s.alpha / 2.0,
         s.alpha,

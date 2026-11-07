@@ -225,3 +225,79 @@ fn a_lesson_without_a_metric_needs_force_to_be_verified() {
     );
     assert!(set(&["--force"]).status.success());
 }
+
+#[test]
+fn evaluate_counts_a_baselined_new_finding_but_not_a_moved_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    project(d);
+    let add = lab(
+        d,
+        &[
+            "lesson",
+            "add",
+            "--id",
+            "quote-check",
+            "--title",
+            "T",
+            "--kind",
+            "bad",
+            "--rule",
+            "Check quotes.",
+            "--metric",
+            "claimcheck:quote-not-found",
+            "--status",
+            "adopted",
+        ],
+    );
+    assert!(add.status.success(), "{}", stderr(&add));
+    // The first run since adoption holds the backlog.
+    std::fs::write(d.join("f.jsonl"), errors(&[1, 2])).unwrap();
+    lab(d, &["check"]);
+    // Quote 1 moves to a new file; quote 3 is new and the baseline accepts it.
+    std::fs::write(
+        d.join("f.jsonl"),
+        errors(&[1, 2, 3]).replace("doc.md:1", "moved/doc.md:1"),
+    )
+    .unwrap();
+    lab(d, &["check"]);
+    assert!(
+        lab(d, &["baseline", "set", "--note", "accept 3"])
+            .status
+            .success()
+    );
+    assert_eq!(lab(d, &["check", "--new-only"]).status.code(), Some(0));
+
+    let out = lab(d, &["evaluate", "--format", "jsonl"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let e: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(e["verdict"], "collecting");
+    assert_eq!(e["after"]["n"], 3);
+    assert_eq!(e["introduced"]["count"], 1, "{e}");
+    assert_eq!(e["introduced"]["findings"][0]["message"], "quote 3 missing");
+    let text = stdout(&lab(d, &["evaluate"]));
+    assert!(text.contains("  +1 quote 3 missing [doc.md:3]"), "{text}");
+
+    // The loop sends the introduced finding, and the brief shows it.
+    let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    cfg += "\n[lab.loop]\nmeasure = [[\"true\"]]\nnotify = [\"sh\", \"-c\", \"cat >> sent.jsonl; echo; echo board:1\"]\n";
+    std::fs::write(d.join("research.toml"), cfg).unwrap();
+    let out = lab(d, &["loop"]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    assert!(stdout(&out).contains("1 described"), "{}", stdout(&out));
+    let sent = std::fs::read_to_string(d.join("sent.jsonl")).unwrap();
+    let signal: serde_json::Value = serde_json::from_str(sent.lines().next().unwrap()).unwrap();
+    assert_eq!(signal["kind"], "lesson-introduced");
+    assert!(
+        signal["body"]
+            .as_str()
+            .unwrap()
+            .contains("+1 quote 3 missing [doc.md:3]"),
+        "{signal}"
+    );
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("- `quote-check`: 1 introduced since the first complete run after adoption"),
+        "{brief}"
+    );
+}

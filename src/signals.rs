@@ -102,7 +102,7 @@ fn measured(e: &Evaluation) -> String {
             "stratified permutation test that moves whole session groups (the subagents below one root session, or one session) between the sides, on the share of sessions with the finding or a field's rank within its stratum, strata = (source, role); lower is better"
         }
         Some(Method::Descriptive) => {
-            "mean findings per complete check run, without a significance test (runs repeat the same backlog, so they are not independent)"
+            "findings introduced since the first complete check run after adoption, keyed by message and data, without a verdict (runs repeat the same backlog, so they are not independent)"
         }
         None => "none",
     };
@@ -283,11 +283,42 @@ pub fn derive(
                      ```sh\nlab lesson set {id} verified --force --note \"<the evidence>\"\nlab lesson set {id} retired --note \"<why>\"\n```\n"
                 ),
             ),
+            // Check runs get no verdict: their introduced findings are
+            // what to act on.
+            (Verdict::Collecting, Status::Adopted | Status::Verified)
+                if e.method == Some(Method::Descriptive)
+                    && e.introduced.as_ref().is_some_and(|i| i.count > 0) =>
+            {
+                let i = e.introduced.as_ref().expect("checked above");
+                (
+                    "lesson-introduced",
+                    format!("Review findings introduced since lesson {id} was adopted"),
+                    format!(
+                        "{} finding(s) of its rule appeared since {}, by message, with where the new ones are:\n\n```\n{}\n```\n\n\
+                         Fix each, or show that the finding is wrong. If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
+                         Check runs give no verdict; to verify the lesson, cite other evidence with `--force`.\n",
+                        i.count,
+                        i.since_text(e.adopted.as_deref()),
+                        e.introduced_lines().join("\n")
+                    ),
+                )
+            }
             _ => continue,
         };
-        let detail = match e.verdict {
-            Verdict::Unmeasurable => format!("unmeasurable: {}", e.reason.as_deref().unwrap_or("")),
-            v => v.as_str().to_string(),
+        let detail = match (e.verdict, &e.introduced) {
+            (Verdict::Unmeasurable, _) => {
+                format!("unmeasurable: {}", e.reason.as_deref().unwrap_or(""))
+            }
+            // A changed set of introduced findings is news; their subjects alone are not.
+            (Verdict::Collecting, Some(i)) => {
+                let keys: Vec<String> = i
+                    .findings
+                    .iter()
+                    .map(|f| format!("+{} {}", f.added, f.message))
+                    .collect();
+                format!("introduced: {}", keys.join("; "))
+            }
+            (v, _) => v.as_str().to_string(),
         };
         let body = format!("{head}{}\n{act}\n{CAVEAT}\n", measured(e));
         out.push(signal(
