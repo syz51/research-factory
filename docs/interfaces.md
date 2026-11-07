@@ -51,7 +51,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 - `type`: `paper`, `dataset`, `software`, `web`, `standard` or `other`.
 - `depth`: how far the archive inspected the source, from shallowest to deepest: `metadata`, `abstract`, `method`, `full`, `artifact`, `reproduced`. `method` covers reading the method or evaluation sections; `full` is the full text; `artifact` means released code or data was inspected; `reproduced` means a result was rerun independently.
-- `texts`: local extracted-text copies a checker may quote against. Paths are relative to the project root. The `sha256` is of the text file.
+- `texts`: local extracted-text copies a checker may quote against. Paths are relative to the project root. The `sha256` is of the text file. `origin` is the URL the text came from. The optional `retrieved` is the UTC time `papers read` downloaded it (RFC 3339).
 - `duplicate_of`: the key of the surviving entry when two keys describe the same work. Keys are never renumbered or deleted.
 - `verified`: the last metadata check against an index, or null.
 - Optional fields are omitted when empty, and readers keep fields they do not know. `papers` adds `authors_truncated` (the source lists only the first authors), `author_variants` (an index's misspellings of the first author, accepted by `verify`) and `citekey`; its README describes them.
