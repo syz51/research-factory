@@ -177,7 +177,8 @@ impl<'p> Spec<'p> {
                     meta.id = index::derive_id(ix.spec, ix.id_from.as_ref(), path);
                 }
                 if meta.title.is_none() {
-                    meta.title = texts.doc(&self.root().join(path))?.title.clone();
+                    let heading = texts.doc(&self.root().join(path))?.title.clone();
+                    meta.title = heading.map(|t| without_id(&t, meta.id.as_deref()).to_string());
                 }
                 if meta.date.is_none() {
                     meta.date = front::date_in(path);
@@ -576,5 +577,41 @@ pub fn next(project: &Project, prefix: &str, width: Option<usize>) -> Result<Exi
             );
             Ok(ExitCode::from(1))
         }
+    }
+}
+
+/// A heading-derived title without a leading copy of the record's id, as in
+/// `# H158 — Personal details moved`.
+fn without_id<'t>(title: &'t str, id: Option<&str>) -> &'t str {
+    let Some(rest) = id.and_then(|id| title.strip_prefix(id)) else {
+        return title;
+    };
+    match rest
+        .trim_start()
+        .strip_prefix(['—', '–', '·', ':', '-'])
+        .map(str::trim_start)
+    {
+        Some(stripped) if !stripped.is_empty() => stripped,
+        _ => title,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::without_id;
+
+    #[test]
+    fn heading_titles_drop_a_leading_id() {
+        assert_eq!(
+            without_id("H158 — Personal details moved", Some("H158")),
+            "Personal details moved"
+        );
+        assert_eq!(without_id("H12 · Pilot", Some("H12")), "Pilot");
+        assert_eq!(without_id("H1: Scope", Some("H1")), "Scope");
+        // Another id, no separator, or nothing after it: unchanged.
+        assert_eq!(without_id("H158 — Moved", Some("H15")), "H158 — Moved");
+        assert_eq!(without_id("H15 plan", Some("H15")), "H15 plan");
+        assert_eq!(without_id("H15 —", Some("H15")), "H15 —");
+        assert_eq!(without_id("Initial topic", None), "Initial topic");
     }
 }
