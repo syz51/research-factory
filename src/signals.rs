@@ -260,7 +260,9 @@ pub fn derive(
                      ```sh\nlab lesson set {id} retired --note \"lab evaluate: {note}\"\n```\n"
                 ),
             ),
-            (Verdict::Unmeasurable, _) => (
+            // A verified lesson stays verified on other evidence; its
+            // missing or blind metric needs no further action.
+            (Verdict::Unmeasurable, Status::Adopted) => (
                 "lesson-unmeasurable",
                 format!("Choose a measurable metric for lesson {id}"),
                 format!(
@@ -414,7 +416,7 @@ impl State {
     /// Records this loop's signals and returns, for each, whether to send it.
     ///
     /// A signal is sent when its id is new, when it was resolved and came back
-    /// (`reopened`), when its detail changed and it was last sent at least
+    /// at least `renotify` after its last send (`reopened`), when its detail changed and it was last sent at least
     /// `renotify` ago (`repeat`, with the stored `ref`), and on every loop
     /// until a send succeeds. An id that this loop did not produce is
     /// resolved.
@@ -439,8 +441,19 @@ impl State {
             });
             if e.resolved.is_some() {
                 e.resolved = None;
-                e.pending = Some(Pending::Reopened);
-                e.detail_hash = h;
+                // A signal that went away and came back within `renotify` of
+                // its last send is flapping: stay quiet. The stored hash is
+                // still the one sent, so a changed detail repeats once
+                // `renotify` has passed.
+                let recent = e
+                    .last_notified
+                    .as_deref()
+                    .and_then(|t| t.parse::<jiff::Timestamp>().ok())
+                    .is_some_and(|t| now.duration_since(t) < renotify);
+                if !recent {
+                    e.pending = Some(Pending::Reopened);
+                    e.detail_hash = h;
+                }
             } else if e.pending.is_some() {
                 e.detail_hash = h;
             } else if e.detail_hash != h {
@@ -558,11 +571,34 @@ mod tests {
         );
 
         let mut s = vec![sig("a", "two")];
-        assert_eq!(st.plan(&mut s, t(27), day), [true], "reappeared");
+        assert_eq!(
+            st.plan(&mut s, t(27), day),
+            [false],
+            "reappeared within renotify_hours of the last send: flapping"
+        );
+        assert_eq!(st.signals["a"].resolved, None);
+        st.plan(&mut [], t(28), day);
+
+        let mut s = vec![sig("a", "two")];
+        assert_eq!(st.plan(&mut s, t(49), day), [true], "reappeared later");
         assert!(s[0].reopened && !s[0].repeat);
         assert_eq!(s[0].reference.as_deref(), Some("board:42"));
         assert_eq!(s[0].first_seen, t(0).to_string());
         assert_eq!(st.signals["a"].resolved, None);
+    }
+
+    #[test]
+    fn a_flapping_signal_with_a_new_detail_repeats_after_renotify() {
+        let day = jiff::SignedDuration::from_hours(24);
+        let mut st = State::default();
+        st.plan(&mut [sig("a", "one")], t(0), day);
+        st.sent("a", t(0), Some("r".into()));
+        st.plan(&mut [], t(1), day);
+        let mut s = vec![sig("a", "two")];
+        assert_eq!(st.plan(&mut s, t(2), day), [false], "back within a day");
+        let mut s = vec![sig("a", "two")];
+        assert_eq!(st.plan(&mut s, t(25), day), [true], "the change is sent");
+        assert!(s[0].repeat && !s[0].reopened);
     }
 
     #[test]
@@ -580,10 +616,10 @@ mod tests {
         // A reopen whose send fails stays a reopen.
         st.plan(&mut [], t(2), day);
         let mut s = vec![sig("a", "one")];
-        st.plan(&mut s, t(3), day);
+        assert_eq!(st.plan(&mut s, t(30), day), [true]);
         st.failed("a", "timeout".into());
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(4), day), [true]);
+        assert_eq!(st.plan(&mut s, t(31), day), [true]);
         assert!(s[0].reopened);
     }
 

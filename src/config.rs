@@ -141,6 +141,20 @@ fn default_renotify_hours() -> u64 {
     24
 }
 
+impl Default for LoopConfig {
+    fn default() -> Self {
+        Self {
+            measure: Vec::new(),
+            notify: None,
+            renotify_hours: default_renotify_hours(),
+        }
+    }
+}
+
+/// Upper bounds that keep the date and duration arithmetic in range.
+const MAX_BASELINE_DAYS: u32 = 36_500;
+const MAX_RENOTIFY_HOURS: u64 = 87_600;
+
 /// `[lab.archive]`. Paths and globs are relative to the project root.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,7 +382,19 @@ impl Project {
                 e.alpha
             ));
         }
+        if e.baseline_days > MAX_BASELINE_DAYS {
+            return Err(format!(
+                "[lab.evaluate] baseline_days must be at most {MAX_BASELINE_DAYS}, got {}",
+                e.baseline_days
+            ));
+        }
         if let Some(l) = &raw.lab.lesson_loop {
+            if l.renotify_hours > MAX_RENOTIFY_HOURS {
+                return Err(format!(
+                    "[lab.loop] renotify_hours must be at most {MAX_RENOTIFY_HOURS}, got {}",
+                    l.renotify_hours
+                ));
+            }
             if l.measure.iter().any(Vec::is_empty) {
                 return Err("[lab.loop] every `measure` command needs a program".into());
             }
@@ -498,6 +524,8 @@ mod tests {
             "[lab.evaluate]\nalpha = 1.5\n",
             "[lab.loop]\nmeasure = [[]]\n",
             "[lab.loop]\nnotfy = [\"x\"]\n",
+            "[lab.evaluate]\nbaseline_days = 10000000\n",
+            "[lab.loop]\nrenotify_hours = 18446744073709551615\n",
         ] {
             std::fs::write(&cfg, bad).unwrap();
             assert!(Project::discover(dir.path(), None).is_err(), "{bad}");

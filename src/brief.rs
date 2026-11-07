@@ -188,7 +188,9 @@ fn age(d: jiff::SignedDuration) -> String {
 }
 
 /// One lesson's verdict, as short as the brief needs.
-fn verdict_line(e: &Evaluation) -> String {
+/// `status` is the lesson's current status, which can be newer than the
+/// loop's record.
+fn verdict_line(e: &Evaluation, status: Status) -> String {
     let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     match e.verdict {
         Verdict::Collecting => {
@@ -205,7 +207,7 @@ fn verdict_line(e: &Evaluation) -> String {
             Some(m) => format!("inconclusive, about {m} more sessions"),
             None => format!("inconclusive{}", p(e.p_lower)),
         },
-        Verdict::Improved if e.lesson_status == Status::Adopted => {
+        Verdict::Improved if status == Status::Adopted => {
             format!("improved{} → verify", p(e.p_lower))
         }
         Verdict::Improved => format!("improved{}", p(e.p_lower)),
@@ -270,7 +272,11 @@ pub fn measurements(
     let mut lines = Vec::new();
     for l in &shown {
         match r.evaluations.iter().find(|e| e.lesson == l.meta.id) {
-            Some(e) => lines.push(format!("- `{}`: {}", l.meta.id, verdict_line(e))),
+            Some(e) => lines.push(format!(
+                "- `{}`: {}",
+                l.meta.id,
+                verdict_line(e, l.meta.status)
+            )),
             None => lines.push(format!("- `{}`: not measured yet", l.meta.id)),
         }
     }

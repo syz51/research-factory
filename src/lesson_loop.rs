@@ -5,6 +5,7 @@
 //! age of the last run, takes a lock, and does the work.
 
 use std::io::{Read as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -17,11 +18,11 @@ use crate::lessons::Lesson;
 use crate::signals::{self, Candidate, MeasureFailure, Signal, State};
 
 pub const SCHEMA: &str = "rf.loop/1";
-/// A lock younger than this belongs to a running loop.
-const LOCK_STALE: jiff::SignedDuration = jiff::SignedDuration::from_mins(30);
 const MEASURE_TIMEOUT: Duration = Duration::from_secs(600);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(60);
 const TAIL_LINES: usize = 20;
+/// `loop.log` is moved to `loop.log.1` once it is larger than this.
+const LOG_ROTATE_BYTES: u64 = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeasureResult {
@@ -117,9 +118,13 @@ fn open_log(dir: &Path) -> Result<std::fs::File, String> {
 /// in its own process group with its output appended to `loop.log`, and
 /// returns without waiting for it.
 pub fn background(project: &Project) -> Result<ExitCode, String> {
-    use std::os::unix::process::CommandExt as _;
     let dir = project.loop_dir();
     create_dir(&dir)?;
+    let path = dir.join("loop.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_ROTATE_BYTES) {
+        let old = dir.join("loop.log.1");
+        std::fs::rename(&path, &old).map_err(|e| format!("{}: {e}", old.display()))?;
+    }
     let log = open_log(&dir)?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let exe =
@@ -139,79 +144,36 @@ pub fn background(project: &Project) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The lock file, removed when dropped.
-struct Lock(PathBuf);
-
-#[derive(Serialize, Deserialize)]
-struct LockBody {
-    pid: u32,
-    started: String,
+/// An exclusive lock on `<loop dir>/lock`, held while the loop runs. The
+/// operating system releases it when the process exits, however it exits, so
+/// a loop that died leaves no stale lock behind.
+struct Lock {
+    _file: std::fs::File,
 }
 
 impl Lock {
-    /// Takes the lock, or `None` when a loop younger than 30 minutes holds it.
-    /// An older lock is left by a loop that died, and is taken over.
-    fn acquire(dir: &Path, now: jiff::Timestamp) -> Result<Option<Self>, String> {
+    /// Takes the lock, or `None` when another loop holds it.
+    fn acquire(dir: &Path) -> Result<Option<Self>, String> {
         let path = dir.join("lock");
-        for attempt in 0..2 {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut f) => {
-                    let lock = Self(path.clone());
-                    let body = serde_json::to_string(&LockBody {
-                        pid: std::process::id(),
-                        started: now.to_string(),
-                    })
-                    .map_err(|e| e.to_string())?;
-                    f.write_all(body.as_bytes())
-                        .map_err(|e| format!("{}: {e}", path.display()))?;
-                    return Ok(Some(lock));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let started = lock_started(&path);
-                    let stale = started.is_some_and(|t| now.duration_since(t) >= LOCK_STALE);
-                    if attempt > 0 || !stale {
-                        return Ok(None);
-                    }
-                    println!(
-                        "taking over a lock from {} (older than 30 minutes)",
-                        started.map(|t| t.to_string()).unwrap_or_default()
-                    );
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(e) => return Err(format!("{}: {e}", path.display())),
-                    }
-                }
-                Err(e) => return Err(format!("{}: {e}", path.display())),
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        match f.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(format!("{}: {e}", path.display()));
             }
         }
-        Ok(None)
-    }
-}
-
-/// When the lock was taken: its recorded time, else its modification time.
-fn lock_started(path: &Path) -> Option<jiff::Timestamp> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<LockBody>(&t).ok())
-        .and_then(|b| b.started.parse().ok())
-        .or_else(|| {
-            let m = std::fs::metadata(path).ok()?.modified().ok()?;
-            jiff::Timestamp::try_from(m).ok()
-        })
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            eprintln!("lab: {}: {e}", self.0.display());
-        }
+        // For whoever looks: which process holds it.
+        f.set_len(0)
+            .and_then(|()| writeln!(f, "pid {}", std::process::id()))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(Self { _file: f }))
     }
 }
 
@@ -221,6 +183,9 @@ enum Ended {
     TimedOut,
 }
 
+/// Waits for a child started in its own process group (`process_group(0)`);
+/// on timeout kills the whole group, so programs a wrapper such as `sh`
+/// started do not outlive it.
 fn wait_for(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<Ended> {
     let start = Instant::now();
     loop {
@@ -228,8 +193,17 @@ fn wait_for(child: &mut std::process::Child, timeout: Duration) -> std::io::Resu
             return Ok(Ended::Exit(status));
         }
         if start.elapsed() >= timeout {
-            // Already gone is fine; the wait below reaps it either way.
-            let _ = child.kill();
+            let group = format!("-{}", child.id());
+            let killed = Command::new("/bin/kill")
+                .args(["-KILL", "--", &group])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if !killed.is_ok_and(|s| s.success()) {
+                // The group is already gone, or kill failed: at least the child.
+                let _ = child.kill();
+            }
             child.wait()?;
             return Ok(Ended::TimedOut);
         }
@@ -273,6 +247,7 @@ fn run_measure(
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
+            .process_group(0)
             .spawn()
             .map_err(|e| format!("could not start: {e}"))?;
         Ok(
@@ -285,7 +260,10 @@ fn run_measure(
             },
         )
     })();
-    let output = std::fs::read_to_string(out_path).unwrap_or_default();
+    let output = match std::fs::read(out_path) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(e) => format!("(could not read the output in {}: {e})", out_path.display()),
+    };
     let _ = std::fs::remove_file(out_path);
     let _ = log.write_all(output.as_bytes());
     let (ok, status) = result.unwrap_or_else(|e| (false, e));
@@ -315,6 +293,7 @@ fn notify(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| format!("could not start `{}`: {e}", argv[0]))?;
     let mut stdin = child.stdin.take().expect("stdin is piped");
@@ -337,7 +316,15 @@ fn notify(
     }
     drop(tx);
     let ended = wait_for(&mut child, NOTIFY_TIMEOUT).map_err(|e| e.to_string())?;
-    let _ = writer.join();
+    match writer.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = writeln!(log, "-- notify {}: writing the signal: {e}", signal.id);
+        }
+        Err(_) => {
+            let _ = writeln!(log, "-- notify {}: the writer thread panicked", signal.id);
+        }
+    }
     // A process the notify command left running may hold the pipes open.
     let (mut out, mut err) = (Vec::new(), Vec::new());
     for _ in 0..2 {
@@ -365,17 +352,9 @@ fn notify(
     }
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
-    write_atomic(
-        path,
-        &(serde_json::to_string_pretty(value).map_err(|e| e.to_string())? + "\n"),
-    )
+    let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())? + "\n";
+    crate::archive::write_atomically(path, text.as_bytes())
 }
 
 /// `lab loop` in the foreground.
@@ -387,6 +366,11 @@ pub fn run(
 ) -> Result<ExitCode, String> {
     let dir = project.loop_dir();
     create_dir(&dir)?;
+    let Some(_lock) = Lock::acquire(&dir)? else {
+        println!("another loop is running");
+        return Ok(ExitCode::SUCCESS);
+    };
+    // Checked under the lock, so a loop that just finished is seen.
     let now = jiff::Timestamp::now();
     if let Some(minutes) = if_older
         && let Ok(Some(last)) = read_record(project)
@@ -395,22 +379,10 @@ pub fn run(
     {
         return Ok(ExitCode::SUCCESS);
     }
-    let Some(_lock) = Lock::acquire(&dir, now)? else {
-        println!("another loop is running");
-        return Ok(ExitCode::SUCCESS);
-    };
     let started = crate::finding::now();
     let mut log = open_log(&dir)?;
     let _ = writeln!(log, "== lab loop {started} (pid {})", std::process::id());
-    let cfg = project
-        .lab
-        .lesson_loop
-        .clone()
-        .unwrap_or(crate::config::LoopConfig {
-            measure: Vec::new(),
-            notify: None,
-            renotify_hours: 24,
-        });
+    let cfg = project.lab.lesson_loop.clone().unwrap_or_default();
     let mut measures = Vec::new();
     let mut failures = Vec::new();
     for (i, argv) in cfg.measure.iter().enumerate() {
@@ -434,73 +406,32 @@ pub fn run(
         signals: Vec::new(),
         errors: Vec::new(),
     };
-    let analysis = match analyse() {
-        Ok(a) => a,
+    let state_path = dir.join("signals.json");
+    let sigs = match evaluate_and_send(
+        project,
+        &cfg,
+        analyse,
+        &failures,
+        &state_path,
+        &mut record,
+        &mut log,
+    ) {
+        Ok(sigs) => sigs,
         Err(e) => {
             // Record the error, so the brief shows it and `--if-older` backs off.
             record.errors.push(e.clone());
             record.finished = crate::finding::now();
-            save_json(&last_path(&dir), &record)?;
             let _ = writeln!(log, "-- error: {e}");
+            save_json(&last_path(&dir), &record)?;
             return Err(e);
         }
     };
-    let now = jiff::Timestamp::now();
-    let now = now.round(jiff::Unit::Second).unwrap_or(now);
-    let at = now.to_string();
-    let mut sigs = signals::derive(
-        &project.name,
-        &project.root,
-        &at,
-        &analysis.lessons,
-        &analysis.evaluations,
-        &analysis.candidates,
-        &failures,
-    );
-    let state_path = dir.join("signals.json");
-    let mut state = State::load(&state_path)?;
-    let send = state.plan(
-        &mut sigs,
-        now,
-        jiff::SignedDuration::from_hours(cfg.renotify_hours as i64),
-    );
-    let mut notify_failed = false;
-    for (s, send) in sigs.iter().zip(send) {
-        let status = match (send, &cfg.notify) {
-            (false, _) => SendStatus::Unchanged,
-            (true, None) => SendStatus::Pending,
-            (true, Some(argv)) => match notify(project, argv, s, &mut log) {
-                Ok(out) => {
-                    let reference = out
-                        .lines()
-                        .map(str::trim)
-                        .find(|l| !l.is_empty())
-                        .map(|l| l.chars().take(200).collect::<String>());
-                    state.sent(&s.id, now, reference);
-                    SendStatus::Notified
-                }
-                Err(e) => {
-                    notify_failed = true;
-                    record.errors.push(format!("notify {}: {e}", s.id));
-                    state.failed(&s.id, e);
-                    SendStatus::Failed
-                }
-            },
-        };
-        record.signals.push(SignalStatus {
-            id: s.id.clone(),
-            kind: s.kind.clone(),
-            status,
-        });
-    }
-    // The signals as sent carry their stored ref, including one just returned.
-    for s in &mut sigs {
-        s.reference = state.signals.get(&s.id).and_then(|e| e.reference.clone());
-    }
-    save_json(&state_path, &state)?;
-    record.evaluations = analysis.evaluations;
     record.finished = crate::finding::now();
     save_json(&last_path(&dir), &record)?;
+    let notify_failed = record
+        .signals
+        .iter()
+        .any(|s| s.status == SendStatus::Failed);
     let failed_measures = record.measure.iter().filter(|m| !m.ok).count();
     let _ = writeln!(
         log,
@@ -520,6 +451,72 @@ pub fn run(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Evaluates, derives the signals, sends the due ones and saves the dedupe
+/// state, filling in `record`. Returns the signals as sent.
+fn evaluate_and_send(
+    project: &Project,
+    cfg: &crate::config::LoopConfig,
+    analyse: impl FnOnce() -> Result<Analysis, String>,
+    failures: &[MeasureFailure],
+    state_path: &Path,
+    record: &mut Record,
+    log: &mut std::fs::File,
+) -> Result<Vec<Signal>, String> {
+    let analysis = analyse()?;
+    let now = jiff::Timestamp::now();
+    let now = now.round(jiff::Unit::Second).unwrap_or(now);
+    let at = now.to_string();
+    let mut sigs = signals::derive(
+        &project.name,
+        &project.root,
+        &at,
+        &analysis.lessons,
+        &analysis.evaluations,
+        &analysis.candidates,
+        failures,
+    );
+    record.evaluations = analysis.evaluations;
+    let mut state = State::load(state_path)?;
+    let send = state.plan(
+        &mut sigs,
+        now,
+        jiff::SignedDuration::from_hours(cfg.renotify_hours as i64),
+    );
+    for (s, send) in sigs.iter().zip(send) {
+        let status = match (send, &cfg.notify) {
+            (false, _) => SendStatus::Unchanged,
+            (true, None) => SendStatus::Pending,
+            (true, Some(argv)) => match notify(project, argv, s, log) {
+                Ok(out) => {
+                    let reference = out
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .map(|l| l.chars().take(200).collect::<String>());
+                    state.sent(&s.id, now, reference);
+                    SendStatus::Notified
+                }
+                Err(e) => {
+                    record.errors.push(format!("notify {}: {e}", s.id));
+                    state.failed(&s.id, e);
+                    SendStatus::Failed
+                }
+            },
+        };
+        record.signals.push(SignalStatus {
+            id: s.id.clone(),
+            kind: s.kind.clone(),
+            status,
+        });
+    }
+    // The signals as sent carry their stored ref, including one just returned.
+    for s in &mut sigs {
+        s.reference = state.signals.get(&s.id).and_then(|e| e.reference.clone());
+    }
+    save_json(state_path, &state)?;
+    Ok(sigs)
 }
 
 fn summary(r: &Record, sigs: &[Signal]) -> String {
@@ -569,17 +566,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_fresh_lock_blocks_and_a_stale_one_is_taken_over() {
+    fn the_lock_is_exclusive_and_released_on_drop() {
         let dir = tempfile::tempdir().unwrap();
-        let now = jiff::Timestamp::now();
-        let held = Lock::acquire(dir.path(), now).unwrap().unwrap();
-        assert!(Lock::acquire(dir.path(), now).unwrap().is_none(), "held");
-        let later = now + jiff::SignedDuration::from_mins(31);
-        let taken = Lock::acquire(dir.path(), later).unwrap();
-        assert!(taken.is_some(), "stale after 30 minutes");
-        std::mem::forget(held); // its file now belongs to `taken`
-        drop(taken);
-        assert!(!dir.path().join("lock").exists(), "removed when dropped");
+        let held = Lock::acquire(dir.path()).unwrap().unwrap();
+        assert!(Lock::acquire(dir.path()).unwrap().is_none(), "held");
+        drop(held);
+        // Another test's child can briefly share the descriptor between fork
+        // and exec (it is close-on-exec), so allow a moment.
+        let start = Instant::now();
+        while Lock::acquire(dir.path()).unwrap().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(5), "released");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_timeout_kills_the_whole_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("grandchild");
+        // `sh` starts a long sleep in the background, records its pid and waits.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > '{}'; wait",
+                pid_file.display()
+            ))
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let start = Instant::now();
+        while !pid_file.exists()
+            || std::fs::read_to_string(&pid_file)
+                .unwrap()
+                .trim()
+                .is_empty()
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "sh did not start"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ended = wait_for(&mut child, Duration::from_millis(200)).unwrap();
+        assert!(matches!(ended, Ended::TimedOut));
+        let grandchild = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_string();
+        // Signal 0 only checks for the process; allow a moment for the kill to land.
+        let start = Instant::now();
+        loop {
+            let alive = Command::new("/bin/kill")
+                .args(["-0", &grandchild])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "grandchild survived"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]

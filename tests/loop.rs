@@ -32,6 +32,30 @@ fn read(dir: &Path, rel: &str) -> String {
     std::fs::read_to_string(dir.join(rel)).unwrap_or_default()
 }
 
+const LOCK: &str = ".research/lab/loop/lock";
+
+/// Takes the loop's lock as another loop would, or `None` while a loop holds it.
+fn take_lock(dir: &Path) -> Option<std::fs::File> {
+    let path = dir.join(LOCK);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .unwrap();
+    match f.try_lock() {
+        Ok(()) => Some(f),
+        Err(std::fs::TryLockError::WouldBlock) => None,
+        Err(std::fs::TryLockError::Error(e)) => panic!("lock: {e}"),
+    }
+}
+
+fn locked(dir: &Path) -> bool {
+    take_lock(dir).is_none()
+}
+
 const CONFIG: &str = r#"[project]
 name = "demo"
 timezone = "UTC"
@@ -197,7 +221,7 @@ fn the_loop_signals_once_and_feeds_the_brief() {
         "the first non-empty stdout line: {state}"
     );
     assert!(read(d, ".research/lab/loop/loop.log").contains("measured"));
-    assert!(!d.join(".research/lab/loop/lock").exists());
+    assert!(!locked(d));
 
     // Nothing changed: nothing is sent again.
     let again = lab(d, &["loop", "--format", "jsonl"]);
@@ -262,6 +286,40 @@ fn the_loop_signals_once_and_feeds_the_brief() {
         ],
     );
     assert!(ok.status.success(), "{}", stderr(&ok));
+
+    // The brief stops asking to verify at once, before the next loop.
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("- `fewer-rereads`: improved") && !brief.contains("→ verify"),
+        "{brief}"
+    );
+
+    // A lesson verified on other evidence no longer asks for a metric.
+    let forced = lab(
+        d,
+        &[
+            "lesson",
+            "set",
+            "never-seen",
+            "verified",
+            "--force",
+            "--note",
+            "other evidence",
+        ],
+    );
+    assert!(forced.status.success(), "{}", stderr(&forced));
+    assert!(lab(d, &["loop"]).status.success());
+    let state: serde_json::Value =
+        serde_json::from_str(&read(d, ".research/lab/loop/signals.json")).unwrap();
+    for id in [
+        "lesson-unmeasurable:never-seen",
+        "lesson-verifiable:fewer-rereads",
+    ] {
+        assert!(
+            state["signals"][id]["resolved"].is_string(),
+            "{id}: {state}"
+        );
+    }
 }
 
 #[test]
@@ -333,27 +391,22 @@ fn failed_measures_and_sends_are_reported_and_retried() {
 }
 
 #[test]
-fn if_older_skips_and_a_fresh_lock_blocks_but_a_stale_one_does_not() {
+fn if_older_skips_and_a_held_lock_blocks_but_a_leftover_file_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
     project(d);
-    let lock = ".research/lab/loop/lock";
-    write(
-        d,
-        lock,
-        &format!("{{\"pid\":1,\"started\":\"{}\"}}", jiff::Timestamp::now()),
-    );
+    let held = take_lock(d).unwrap();
     let busy = lab(d, &["loop"]);
     assert_eq!(busy.status.code(), Some(0));
     assert!(stdout(&busy).contains("another loop is running"));
     assert!(!d.join(".research/lab/loop/last.json").exists());
-    assert!(d.join(lock).exists(), "someone else's lock is left alone");
+    drop(held);
 
-    write(d, lock, "{\"pid\":1,\"started\":\"2000-01-01T00:00:00Z\"}");
-    let took = lab(d, &["loop"]);
-    assert_eq!(took.status.code(), Some(0), "{}", stderr(&took));
-    assert!(stdout(&took).contains("taking over a lock"));
-    assert!(!d.join(lock).exists());
+    // The file a finished or killed loop leaves behind is not a lock.
+    assert!(d.join(LOCK).exists());
+    let ran = lab(d, &["loop"]);
+    assert_eq!(ran.status.code(), Some(0), "{}", stderr(&ran));
+    assert!(!locked(d));
     let finished = last(d)["finished"].clone();
 
     let skipped = lab(d, &["loop", "--if-older", "60"]);
@@ -383,11 +436,11 @@ fn background_returns_at_once_and_the_child_finishes() {
         assert!(Instant::now() < deadline, "the child never wrote last.json");
         std::thread::sleep(Duration::from_millis(100));
     }
-    // Wait for the child to drop its lock after writing last.json.
-    while d.join(".research/lab/loop/lock").exists() {
+    // Wait for the child to release its lock after writing last.json.
+    while locked(d) {
         assert!(
             Instant::now() < deadline,
-            "the child never removed its lock"
+            "the child never released its lock"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -408,7 +461,7 @@ fn a_lab_error_is_recorded_and_releases_the_lock() {
     let out = lab(d, &["loop"]);
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     assert!(stderr(&out).contains("broken.md"), "{}", stderr(&out));
-    assert!(!d.join(".research/lab/loop/lock").exists());
+    assert!(!locked(d));
     let rec = last(d);
     assert!(
         rec["errors"][0].as_str().unwrap().contains("broken.md"),
@@ -416,4 +469,24 @@ fn a_lab_error_is_recorded_and_releases_the_lock() {
     );
     let brief = stdout(&lab(d, &["brief"]));
     assert_eq!(brief, "", "the brief itself needs valid lessons");
+}
+
+#[test]
+fn an_unreadable_signal_state_is_recorded_and_backs_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    project(d);
+    write(d, ".research/lab/loop/signals.json", "{ not json");
+    let out = lab(d, &["loop"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    let rec = last(d);
+    assert!(
+        rec["errors"][0].as_str().unwrap().contains("signals.json"),
+        "{rec}"
+    );
+    assert_eq!(sent(d).len(), 0, "nothing sent without the dedupe state");
+    assert!(!locked(d));
+    let skipped = lab(d, &["loop", "--if-older", "60"]);
+    assert_eq!(skipped.status.code(), Some(0));
+    assert_eq!(last(d)["finished"], rec["finished"], "backed off");
 }

@@ -105,7 +105,8 @@ pub fn read_findings(path: &Path) -> Result<Vec<Finding>, String> {
 }
 
 /// An `rf.session/1` record: the fields `lab evaluate` stratifies and dates
-/// sessions by, and the whole record for `session.` field metrics.
+/// sessions by, and the record's text, parsed again only for `session.`
+/// field metrics.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub source: String,
@@ -114,7 +115,7 @@ pub struct Session {
     pub role: Option<String>,
     /// Time of the session's first record; `None` when unknown.
     pub start: Option<String>,
-    record: serde_json::Value,
+    record: Box<str>,
 }
 
 #[derive(Deserialize)]
@@ -131,8 +132,7 @@ struct SessionHead {
 impl Session {
     /// Parses one JSON line, rejecting other schemas and other major versions.
     pub fn parse(line: &str) -> Result<Self, String> {
-        let record: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-        let head = SessionHead::deserialize(&record).map_err(|e| e.to_string())?;
+        let head: SessionHead = serde_json::from_str(line).map_err(|e| e.to_string())?;
         let major = head
             .schema
             .strip_prefix("rf.session/")
@@ -145,7 +145,7 @@ impl Session {
             id: head.id,
             role: head.role,
             start: head.start,
-            record,
+            record: line.into(),
         })
     }
 
@@ -161,8 +161,9 @@ impl Session {
     /// The number at a dotted path such as `total.tokens.output`; `None` when
     /// a part is missing, `null` or not a number.
     pub fn field(&self, path: &str) -> Option<f64> {
+        let record: serde_json::Value = serde_json::from_str(&self.record).ok()?;
         path.split('.')
-            .try_fold(&self.record, |v, key| v.get(key))?
+            .try_fold(&record, |v, key| v.get(key))?
             .as_f64()
     }
 }

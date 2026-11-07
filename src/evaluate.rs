@@ -476,34 +476,32 @@ fn sessions(
         .iter()
         .filter(|(_, (b, a))| !b.is_empty() && !a.is_empty())
         .collect();
-    let (before, after): (Vec<f64>, Vec<f64>) = if contributing.is_empty() {
-        (all_before.clone(), all_after.clone())
-    } else {
-        e.excluded = all_before.len() + all_after.len()
-            - contributing
-                .iter()
-                .map(|(_, (b, a))| b.len() + a.len())
-                .sum::<usize>();
-        e.strata = contributing
+    // Only strata with sessions on both sides are compared; when none has,
+    // the lesson is still collecting.
+    e.excluded = all_before.len() + all_after.len()
+        - contributing
             .iter()
-            .map(|((source, role), (b, a))| Stratum {
-                source: (*source).into(),
-                role: (*role).into(),
-                before: b.len(),
-                after: a.len(),
-            })
-            .collect();
-        (
-            contributing
-                .iter()
-                .flat_map(|(_, s)| s.0.iter().copied())
-                .collect(),
-            contributing
-                .iter()
-                .flat_map(|(_, s)| s.1.iter().copied())
-                .collect(),
-        )
-    };
+            .map(|(_, (b, a))| b.len() + a.len())
+            .sum::<usize>();
+    e.strata = contributing
+        .iter()
+        .map(|((source, role), (b, a))| Stratum {
+            source: (*source).into(),
+            role: (*role).into(),
+            before: b.len(),
+            after: a.len(),
+        })
+        .collect();
+    let (before, after): (Vec<f64>, Vec<f64>) = (
+        contributing
+            .iter()
+            .flat_map(|(_, s)| s.0.iter().copied())
+            .collect(),
+        contributing
+            .iter()
+            .flat_map(|(_, s)| s.1.iter().copied())
+            .collect(),
+    );
     let (e_before, e_after) = match field {
         None => (indicator_side(&before), indicator_side(&after)),
         Some(_) => (describe(&before), describe(&after)),
@@ -557,6 +555,12 @@ fn sessions(
             return e;
         }
         e.sessions_needed = stats::sessions_needed(pooled, half, NEEDED_LIMIT);
+        if e.sessions_needed == Some(0) {
+            // The pooled estimate already shows a decrease that the
+            // stratified test does not: it has no count to offer.
+            e.sessions_needed = None;
+            return e;
+        }
         if e.sessions_needed.is_none() {
             let why = if pooled.before_positive == 0 {
                 "no finding in the sessions before adoption, so a decrease cannot be shown"
@@ -569,11 +573,15 @@ fn sessions(
     };
     if before.len() < min || after.len() < min {
         e.verdict = Verdict::Collecting;
-        e.reason = Some(format!(
-            "{} of {min} sessions after adoption, {} of {min} before, in comparable strata",
-            after.len(),
-            before.len()
-        ));
+        e.reason = Some(if contributing.is_empty() {
+            "no (source, role) stratum has sessions both before and after adoption yet".into()
+        } else {
+            format!(
+                "{} of {min} sessions after adoption, {} of {min} before, in comparable strata",
+                after.len(),
+                before.len()
+            )
+        });
         return needed(e);
     }
     let (lo, up) = match field {
@@ -770,6 +778,28 @@ mod tests {
     }
 
     #[test]
+    fn strata_without_both_sides_are_collecting() {
+        let (mut s, mut f) = (Vec::new(), Vec::new());
+        batch(&mut s, &mut f, ("claude", "unknown"), "2026-10-01", 100, 50);
+        batch(&mut s, &mut f, ("claude", "main"), "2026-11-02", 100, 0);
+        let l = lesson("agentprof:file-reread", "2026-11-01");
+        let e = run_eval(&l, &s, &f, &EvaluateConfig::default());
+        assert_eq!(e.verdict, Verdict::Collecting, "{e:?}");
+        assert_eq!((e.before.n, e.after.n, e.excluded), (0, 0, 200));
+        assert!(e.strata.is_empty());
+        assert!(e.p_lower.is_none());
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .starts_with("no (source, role) stratum"),
+            "{e:?}"
+        );
+        // The pooled estimate says none are needed; that is not shown.
+        assert_eq!(e.sessions_needed, None);
+    }
+
+    #[test]
     fn baseline_window_and_unmeasurable_reasons() {
         let (mut s, mut f) = (Vec::new(), Vec::new());
         batch(&mut s, &mut f, ("claude", "main"), "2025-01-01", 100, 10);
@@ -885,46 +915,100 @@ mod tests {
         assert!(e.reason.unwrap().contains("never observed"));
     }
 
-    fn run(at: &str, rules: usize, ran: bool) -> Run {
-        let findings: Vec<Finding> = (0..rules)
-            .map(|i| {
-                let mut f = Finding::lab(
-                    "quote-not-found",
-                    Severity::Error,
-                    &format!("d.md:{i}"),
-                    format!("m{i}"),
-                );
-                f.tool = "claimcheck".into();
-                f
-            })
-            .collect();
-        let fps = finding::fingerprints(&findings);
+    /// A run of the named checks; each has `rules` quote-not-found findings
+    /// and either completed (`ran`) or failed.
+    fn run_checks(at: &str, checks: &[(&str, usize, bool)]) -> Run {
+        let mut items = Vec::new();
+        let mut outcomes = Vec::new();
+        for &(name, rules, ran) in checks {
+            let findings: Vec<Finding> = (0..rules)
+                .map(|i| {
+                    let mut f = Finding::lab(
+                        "quote-not-found",
+                        Severity::Error,
+                        &format!("{name}.md:{i}"),
+                        format!("m{i}"),
+                    );
+                    f.tool = "claimcheck".into();
+                    f
+                })
+                .collect();
+            let fps = finding::fingerprints(&findings);
+            items.extend(
+                findings
+                    .into_iter()
+                    .zip(fps)
+                    .map(|(finding, fingerprint)| Item {
+                        schema: ITEM_SCHEMA.into(),
+                        check: name.into(),
+                        fingerprint,
+                        finding,
+                    }),
+            );
+            outcomes.push(CheckOutcome {
+                name: name.into(),
+                command: vec![],
+                exit: Some(if ran { 1 } else { 2 }),
+                status: if ran { "ok" } else { "failed" }.into(),
+                findings: rules,
+                unparsed: 0,
+                duration_ms: 0,
+            });
+        }
         Run {
             path: "x".into(),
             header: RunHeader {
                 schema: RUN_SCHEMA.into(),
                 at: at.into(),
-                checks: vec![CheckOutcome {
-                    name: "claims".into(),
-                    command: vec![],
-                    exit: Some(if ran { 1 } else { 2 }),
-                    status: if ran { "ok" } else { "failed" }.into(),
-                    findings: rules,
-                    unparsed: 0,
-                    duration_ms: 0,
-                }],
+                checks: outcomes,
             },
-            items: findings
-                .into_iter()
-                .zip(fps)
-                .map(|(finding, fingerprint)| Item {
-                    schema: ITEM_SCHEMA.into(),
-                    check: "claims".into(),
-                    fingerprint,
-                    finding,
-                })
-                .collect(),
+            items,
         }
+    }
+
+    fn run(at: &str, rules: usize, ran: bool) -> Run {
+        run_checks(at, &[("claims", rules, ran)])
+    }
+
+    #[test]
+    fn partial_runs_are_not_counted_and_unconfigured_checks_not_required() {
+        let l = lesson("claimcheck:quote-not-found", "2026-11-03");
+        let cfg = EvaluateConfig {
+            min_sessions: 2,
+            ..EvaluateConfig::default()
+        };
+        let both = |at: &str| run_checks(at, &[("docs", 2, true), ("thesis", 2, true)]);
+        let docs_only = |at: &str| run_checks(at, &[("docs", 0, true)]);
+        let runs = vec![
+            both("2026-11-01T00:00:00Z"),
+            both("2026-11-02T00:00:00Z"),
+            docs_only("2026-11-04T00:00:00Z"),
+            docs_only("2026-11-05T00:00:00Z"),
+        ];
+        let eval = |configured: &[&str]| {
+            evaluate(
+                &l,
+                &Inputs {
+                    runs: &runs,
+                    configured,
+                    findings: &[],
+                    sessions: Err("none"),
+                    settings: &cfg,
+                },
+                utc_date,
+            )
+        };
+        // `thesis` reports the tool, so a run without it is partial, not clean.
+        let e = eval(&["docs", "thesis"]);
+        assert_eq!(
+            (e.before.n, e.after.n, e.verdict),
+            (2, 0, Verdict::Collecting)
+        );
+        // Once `thesis` is no longer configured, it is not required.
+        let e = eval(&["docs"]);
+        assert_eq!((e.before.n, e.after.n), (2, 2));
+        assert_eq!((e.before.mean, e.after.mean), (Some(2.0), Some(0.0)));
+        assert_eq!(e.verdict, Verdict::Improved);
     }
 
     #[test]

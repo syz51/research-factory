@@ -90,8 +90,8 @@ enum Command {
     },
     /// Run the [lab.loop] measure commands, evaluate, and send new or changed signals to notify.
     Loop {
-        /// Do nothing when the last loop finished less than this many minutes ago.
-        #[arg(long, value_name = "MINUTES")]
+        /// Do nothing when the last loop finished less than this many minutes ago (at most a year).
+        #[arg(long, value_name = "MINUTES", value_parser = clap::value_parser!(u64).range(..=525_600))]
         if_older: Option<u64>,
         /// Start the loop detached, with its output in <state_dir>/lab/loop/loop.log, and return at once.
         #[arg(long)]

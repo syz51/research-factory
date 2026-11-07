@@ -120,12 +120,12 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
 [lab.evaluate]                 # all optional; these are the defaults
 min_sessions = 10              # observations (sessions or check runs) needed on each side
 alpha = 0.05                   # two-sided; each direction is tested at alpha/2
-baseline_days = 90             # baseline: observations this many days before adoption; 0 = all
+baseline_days = 90             # baseline: observations this many days before adoption; 0 = all; at most 36500
 
 [lab.loop]
 measure = [["agentprof", "scan", "--out", ".research/agentprof", "--timezone", "Asia/Tokyo"]]
 notify = ["sh", "scripts/notify.sh"]   # optional
-renotify_hours = 24
+renotify_hours = 24            # at most 87600
 ```
 
 **`rf.evaluation/1`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`.
@@ -157,15 +157,15 @@ renotify_hours = 24
 | --- | --- | --- |
 | `lesson-verifiable` | `lesson-verifiable:<lesson>` | An adopted lesson's verdict is `improved`: verify it |
 | `lesson-worse` | `lesson-worse:<lesson>` | An adopted or verified lesson's verdict is `worse`: revise the rule or retire it |
-| `lesson-unmeasurable` | `lesson-unmeasurable:<lesson>` | An active lesson's verdict is `unmeasurable`: choose a metric that can show an effect, or decide on other evidence with `--force` and a note |
+| `lesson-unmeasurable` | `lesson-unmeasurable:<lesson>` | An adopted lesson's verdict is `unmeasurable` (a verified one stays verified on its other evidence): choose a metric that can show an effect, or decide on other evidence with `--force` and a note |
 | `uncovered-rules` | `uncovered-rules` | `lab retro` finds recurring rules without a lesson; one signal lists them all |
 | `measure-failed` | `measure-failed:<index>` | A `measure` command failed; the body has its command, status and last output lines |
 
-`title` is imperative and at most 72 characters; `body` is standalone Markdown with the numbers, the method and the `lab` commands to act. `id` is stable, and `detail` is a short summary whose change makes the signal worth sending again. `repeat` marks a changed signal sent again and `reopened` one that had been resolved; both carry the `ref` the notify command returned for the first send. `first_seen` is when `lab loop` first produced the id.
+`title` is imperative and at most 72 characters; `body` is standalone Markdown with the numbers, the method and the `lab` commands to act. `id` is stable, and `detail` is a short summary whose change makes the signal worth sending again. `repeat` marks a changed signal sent again and `reopened` one that had been resolved; both carry the `ref` the notify command returned for the first send. A notify command should add to that ref while it is still open and file anew when it is closed or gone. `first_seen` is when `lab loop` first produced the id.
 
 **Notify protocol.** For each signal to send, `lab loop` runs the `notify` program once, from the project root, with the signal as one JSON object on stdin, and waits up to 60 seconds. Exit 0 means sent: the first non-empty line of stdout (trimmed, at most 200 characters), if any, becomes the signal's `ref`, such as a task id, and is passed back in later sends. Any other exit, or a timeout, leaves the signal unsent; the next loop retries it. A program with a directory part resolves against the project root, as for checks.
 
-**Dedupe.** `<state_dir>/lab/loop/signals.json` (`rf.loop-signals/1`) keeps, per id, `first_seen`, `last_notified`, `detail_hash`, `ref`, `resolved`, `error` and `pending`. A signal is sent when its id is new, when it was resolved and appears again (`reopened`), when its detail changed and it was last sent at least `renotify_hours` ago (`repeat`), and on every loop until a send succeeds. An id missing from a loop is resolved. Without a `notify` command the state is still kept, and the signals stay `pending`.
+**Dedupe.** `<state_dir>/lab/loop/signals.json` (`rf.loop-signals/1`) keeps, per id, `first_seen`, `last_notified`, `detail_hash`, `ref`, `resolved`, `error` and `pending`. A signal is sent when its id is new, when it was resolved and appears again at least `renotify_hours` after its last send (`reopened`; sooner it is flapping and stays quiet), when its detail changed and it was last sent at least `renotify_hours` ago (`repeat`), and on every loop until a send succeeds. An id missing from a loop is resolved. Without a `notify` command the state is still kept, and the signals stay `pending`.
 
 **`rf.loop/1`**: `<state_dir>/lab/loop/last.json`, written atomically at the end of each loop, also after a `lab` error (in `errors`).
 
@@ -173,7 +173,7 @@ renotify_hours = 24
 {"schema":"rf.loop/1","started":"2026-11-20T03:00:00Z","finished":"2026-11-20T03:00:41Z","measure":[{"argv":["agentprof","scan","--out",".research/agentprof"],"ok":true,"status":"exit 0"}],"evaluations":[],"signals":[{"id":"uncovered-rules","kind":"uncovered-rules","status":"unchanged"}],"errors":[]}
 ```
 
-A measure's `status` is `exit N`, `killed by a signal`, `timed out after 600 s` or `could not start: …`; a signal's is `notified`, `pending` (no notify command), `failed` (retried next loop) or `unchanged`. The same directory holds `lock` (the running loop's pid and start; one older than 30 minutes is taken over) and `loop.log` (the measure commands' output and the background loop's own). `lab loop` exits 0, 1 when a measure or notify command failed, and 2 on a `lab` error.
+A measure's `status` is `exit N`, `killed by a signal`, `timed out after 600 s` or `could not start: …`; a signal's is `notified`, `pending` (no notify command), `failed` (retried next loop) or `unchanged`. The same directory holds `lock` (an exclusive OS file lock held while a loop runs and released when its process exits, so a loop that died never blocks the next; the file names the holder's pid) and `loop.log` (the measure commands' output and the background loop's own; moved to `loop.log.1` past 1 MiB). A measure or notify command that times out is killed with its whole process group. An error after the measure commands, such as an unreadable signal state, is recorded in `last.json`, so `--if-older` backs off and the brief shows it. `lab loop` exits 0, 1 when a measure or notify command failed, and 2 on a `lab` error.
 
 ## 8. Conventions every repository follows
 

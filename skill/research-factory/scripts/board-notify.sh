@@ -35,15 +35,32 @@ id=$(field '.id')
 title=$(field '.title')
 project=$(field '.project')
 ref=$(field '.ref // ""')
-repeat=$(field '.repeat // false')
-reopened=$(field '.reopened // false')
 
-# A repeat of a signal already filed: add to that task instead of filing again.
-if [ "$repeat" = true ] && [ "$reopened" != true ] && [ -n "$ref" ]; then
-    note=$(printf '%s' "$signal" | jq -r '"finding: lab loop (\(.project)) again reports \(.id): \(.detail // "")" | .[0:500]')
-    board note --kind finding "$ref" "$note" >/dev/null
-    printf '%s\n' "$ref"
-    exit 0
+# A signal filed before (a repeat, or one that went away and came back): add
+# to that task while it is open. A done, dropped or deleted task gets a new one.
+previous=""
+if [ -n "$ref" ]; then
+    errors=$(mktemp)
+    trap 'rm -f "$errors"' EXIT
+    if shown=$(board show --json "$ref" 2>"$errors"); then
+        status=$(printf '%s' "$shown" | jq -r '.task.status // empty')
+    elif grep -q not_found "$errors"; then
+        status=gone
+    else
+        echo "board-notify: board show $ref failed: $(cat "$errors")" >&2
+        exit 1
+    fi
+    case "$status" in
+        done|dropped|gone) previous="$ref ($status)" ;;
+        "") echo "board-notify: no status for $ref in: $shown" >&2; exit 1 ;;
+        *)
+            note=$(printf '%s' "$signal" | jq -r '
+                (if .reopened then "came back after going away" else "changed" end) as $what
+                | "lab loop (\(.project)): \(.id) \($what): \(.detail // "")" | .[0:500]')
+            board note --kind finding "$ref" "$note" >/dev/null
+            printf '%s\n' "$ref"
+            exit 0 ;;
+    esac
 fi
 
 lesson=$(field '.lesson // ""')
@@ -71,8 +88,8 @@ Each rule that needs no practice has an observed lesson whose note says why" ;;
 esac
 
 prefix=$(printf 'Signal `%s` from `lab loop` in project %s.' "$id" "$project")
-if [ "$reopened" = true ] && [ -n "$ref" ]; then
-    prefix="$prefix Reopened: it was filed before as $ref and went away."
+if [ -n "$previous" ]; then
+    prefix="$prefix It was filed before as $previous."
 fi
 body=$(printf '%s' "$signal" | jq -r --arg pre "$prefix" '($pre + "\n\n" + .body) | .[0:4000]')
 title=$(printf '%s' "$title" | jq -Rr '.[0:72]')
