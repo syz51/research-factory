@@ -55,6 +55,9 @@ pub struct LabConfig {
     /// and no lesson covering it becomes a lesson candidate.
     #[serde(default = "default_recurrence")]
     pub recurrence: usize,
+    /// The research archive that `lab archive` indexes and checks.
+    #[serde(default)]
+    pub archive: Option<ArchiveConfig>,
 }
 
 impl Default for LabConfig {
@@ -65,8 +68,148 @@ impl Default for LabConfig {
             agent_findings: None,
             agent_sessions: None,
             recurrence: default_recurrence(),
+            archive: None,
         }
     }
+}
+
+/// `[lab.archive]`. Paths and globs are relative to the project root.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveConfig {
+    /// The entry page every session reads first.
+    #[serde(default)]
+    pub start: Option<String>,
+    /// Where `lab archive seal` keeps the sealed files' lengths and hashes
+    /// (default: `<state_dir>/lab/archive-seal.json`).
+    #[serde(default)]
+    pub seal_manifest: Option<String>,
+    /// Append-only files.
+    #[serde(default)]
+    pub sealed: Vec<String>,
+    /// Files whose relative links are checked.
+    #[serde(default)]
+    pub links: Vec<String>,
+    #[serde(default)]
+    pub links_exclude: Vec<String>,
+    /// Pages that must not link inactive records as current.
+    #[serde(default)]
+    pub current_pages: Vec<String>,
+    /// Allowed record statuses, in the order `group_by = "status"` shows them.
+    #[serde(default = "default_statuses")]
+    pub statuses: Vec<String>,
+    /// Statuses of records that no longer apply.
+    #[serde(default = "default_inactive_statuses")]
+    pub inactive_statuses: Vec<String>,
+    #[serde(default)]
+    pub index: Vec<IndexSpec>,
+    #[serde(default)]
+    pub budget: Vec<BudgetSpec>,
+}
+
+fn default_statuses() -> Vec<String> {
+    [
+        "current",
+        "draft",
+        "proposed",
+        "accepted",
+        "open",
+        "resolved",
+        "superseded",
+        "rejected",
+        "withdrawn",
+        "historical",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+fn default_inactive_statuses() -> Vec<String> {
+    ["superseded", "rejected", "withdrawn", "historical"]
+        .map(String::from)
+        .to_vec()
+}
+
+/// `[[lab.archive.index]]`: one generated index over a set of records.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexSpec {
+    pub name: String,
+    pub output: String,
+    pub title: String,
+    #[serde(default)]
+    pub intro: String,
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    /// Regex with one capture group, matched against the file name (the parent
+    /// directory's name for `README.md`), that derives a record's id.
+    #[serde(default)]
+    pub id_from: Option<String>,
+    #[serde(default)]
+    pub id_prefix: String,
+    #[serde(default)]
+    pub trim_leading_zeros: bool,
+    #[serde(default)]
+    pub sort: SortOrder,
+    #[serde(default)]
+    pub group_by: Option<GroupBy>,
+    #[serde(default)]
+    pub require: Vec<Field>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SortOrder {
+    #[default]
+    Id,
+    IdDesc,
+    Date,
+    DateDesc,
+    Path,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    Status,
+}
+
+/// A record field that an index can require.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Field {
+    Id,
+    Title,
+    Date,
+    Status,
+    Summary,
+}
+
+impl Field {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Title => "title",
+            Self::Date => "date",
+            Self::Status => "status",
+            Self::Summary => "summary",
+        }
+    }
+}
+
+/// `[[lab.archive.budget]]`: a size limit for the files matching `path`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSpec {
+    pub path: String,
+    pub max_bytes: u64,
+    #[serde(default = "default_budget_severity")]
+    pub severity: crate::finding::Severity,
+}
+
+fn default_budget_severity() -> crate::finding::Severity {
+    crate::finding::Severity::Warn
 }
 
 fn default_lessons_dir() -> String {
@@ -181,6 +324,10 @@ impl Project {
 
     pub fn checks_dir(&self) -> PathBuf {
         self.state_dir.join("lab").join("checks")
+    }
+
+    pub fn default_seal_manifest(&self) -> PathBuf {
+        self.state_dir.join("lab").join("archive-seal.json")
     }
 
     /// Today's date in the project's zone.

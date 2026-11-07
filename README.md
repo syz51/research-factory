@@ -11,7 +11,7 @@ This repository holds the shared contracts, the `lab` CLI that ties the tools to
 | [`prov`](https://github.com/syz51/prov) | Provenance: content-hash manifests of sources and results, duplicate files, run records, reruns compared with the original, and lineage from a result back to its inputs |
 | [`ireval`](https://github.com/syz51/ireval) | Retrieval evaluation with trec_eval-compatible metrics and paired significance tests corrected for multiple comparisons |
 | [`agentprof`](https://github.com/syz51/agentprof) | Profiles Claude Code, Codex and T3 agent sessions: tokens, estimated cost, time, failures, and wasteful or risky patterns |
-| `lab` (here) | Runs every checker, keeps the findings, turns recurring problems into lessons, and hands the adopted lessons to each new session |
+| `lab` (here) | Runs every checker, keeps the findings, turns recurring problems into lessons, hands the adopted lessons to each new session, and keeps the research archive indexed, sealed and checked |
 
 The tools agree on three formats, described in [docs/interfaces.md](docs/interfaces.md): one `research.toml` per project, findings as `rf.finding/1` JSON Lines, and the reference registry as `rf.reference/1` JSON Lines. None of them links another's code.
 
@@ -50,6 +50,12 @@ cwd = "."                      # optional, relative to research.toml
 | `lab retro [--agent-findings FILE] [--since DATE] [--write]` | Finds warn and error rules with at least `recurrence` distinct findings (by fingerprint) across stored check runs and agent sessions that no lesson covers. A finding left unfixed across many runs counts once. `--write` drafts each as an `observed` lesson. |
 | `lab lesson add / list / set` | Records lessons and moves them through `observed → proposed → adopted → verified` or `retired`. Every status change needs a note and is appended to the lesson's history. |
 | `lab evaluate` | For each adopted lesson with a metric, compares that rule's findings per check run before and after adoption, counting only runs in which every configured check that reports the tool completed. A metric of an agent-session tool such as `agentprof` is measured per session instead, from `sessions.jsonl`. |
+| `lab archive update` | The archive's maintenance step, run before `lab check`: `lab archive index`, then `lab archive seal`. Exits 1 if either reports a problem. |
+| `lab archive index` | Regenerates each `[[lab.archive.index]]` file from its records' front matter, one line per record, and writes only the files that changed. Writes nothing and exits 1 when a record's front matter is invalid. |
+| `lab archive seal [--accept PATH --note WHY]` | Records the length and SHA-256 of each `sealed` (append-only) file's body in the seal manifest, and accepts growth that keeps the sealed bytes. Reports an edited or deleted sealed file and exits 1. `--accept` re-seals one edited file and keeps the note in the manifest's history. |
+| `lab archive check [--format text\|jsonl]` | Read-only check of the archive: invalid front matter, missing required fields, duplicate or unknown ids, supersession links that disagree, stale or missing indexes, size budgets, broken relative links and anchors, current pages linking inactive records, and unsealed, edited or missing sealed files. With `--format jsonl` it is a `[[lab.checks]]` checker. |
+| `lab archive find TERMS... [--limit N]` | Lists the records whose id, title, summary, aliases or path contain every term, exact id first, as `id`, `date`, `status`, `path` and `title` separated by tabs. Exits 1 when nothing matches. |
+| `lab archive next PREFIX [--width N]` | Prints the next free id with that prefix, keeping the existing zero padding (`D007` → `D008`); `--width` starts a new series. |
 
 A lesson can be marked `verified` only when `lab evaluate` reports fewer findings since adoption, with at least two runs (or sessions) on each side, unless `--force` is given with a note that cites other evidence. A lesson without a metric always needs `--force`. The comparison is observational: other changes in the same period can explain a difference. Adopting a lesson again after retiring it restarts the measured period.
 
@@ -58,6 +64,8 @@ A finding's fingerprint covers its tool, rule, severity, message and subject, wi
 `<state_dir>` defaults to `.research`. The lessons directory should be committed. Commit `.research/lab/checks/` and `.research/lab/baseline.json` as well if check history and the accepted baseline should travel with the project, which `lab evaluate` and `--new-only` need on every machine; otherwise ignore `.research/`.
 
 Check names must be unique. A check's program with a directory part, such as `scripts/check.sh`, resolves against the folder holding `research.toml`; a bare name is looked up on `PATH`.
+
+`lab archive` reads `[lab.archive]`; `lab init` writes a commented example, and [docs/factory.md](docs/factory.md#the-archive) explains the layout it maintains. Its globs are relative to the folder holding `research.toml`; `*` does not cross `/` and `**` matches any depth. The walk enters only directories a glob can match below and never follows a symbolic link to a directory. With `[lab.archive]` configured, `lab brief` ends with the start page to read first and the indexes to search.
 
 Lesson files are Markdown with YAML frontmatter, so they read well on GitHub and in Obsidian:
 

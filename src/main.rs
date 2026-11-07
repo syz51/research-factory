@@ -5,6 +5,7 @@
 //! adopted by a person or agent with a note; `lab brief` hands the adopted
 //! rules to every new session; `lab evaluate` measures whether they helped.
 
+mod archive;
 mod brief;
 mod check;
 mod config;
@@ -81,6 +82,51 @@ enum Command {
     /// Manage lessons.
     #[command(subcommand)]
     Lesson(LessonCommand),
+    /// Index, seal and check the research archive configured in [lab.archive].
+    #[command(subcommand)]
+    Archive(ArchiveCommand),
+}
+
+#[derive(Subcommand)]
+enum ArchiveCommand {
+    /// Regenerate every configured index from its records' front matter.
+    Index,
+    /// Seal new append-only files and record appends; report edited or missing ones.
+    Seal {
+        /// Re-seal this edited file at its current content (needs --note).
+        #[arg(long, value_name = "PATH", requires = "note")]
+        accept: Option<String>,
+        /// Why the edit is accepted; kept in the manifest's history.
+        #[arg(long, requires = "accept")]
+        note: Option<String>,
+    },
+    /// `index`, then `seal`: run it before `lab check`.
+    Update,
+    /// Check records, indexes, links, size budgets and seals without changing anything.
+    Check {
+        #[arg(long, value_enum, default_value_t = Format::Text)]
+        format: Format,
+    },
+    /// Find records whose id, title, summary, aliases or path contain every term.
+    Find {
+        #[arg(required = true)]
+        terms: Vec<String>,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Print the next free id with this prefix, such as `H159` for `H`.
+    Next {
+        prefix: String,
+        /// Zero-pad the number to this width; also starts a series no record has yet.
+        #[arg(long)]
+        width: Option<usize>,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Format {
+    Text,
+    Jsonl,
 }
 
 #[derive(Subcommand)]
@@ -182,8 +228,31 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 eprintln!("lab: {note}");
             }
             let checks: Vec<String> = project.lab.checks.iter().map(|c| c.name.clone()).collect();
+            let archive = match project.lab.archive.as_ref() {
+                None => None,
+                Some(a) => {
+                    let start = match &a.start {
+                        None => None,
+                        Some(s) => {
+                            // A missing start page is reported in the brief; any other
+                            // problem with it is an error, not an invitation to create it.
+                            let bytes = match std::fs::metadata(project.path(s)) {
+                                Ok(m) if m.is_file() => Some(m.len()),
+                                Ok(_) => return Err(format!("{s}: the start page is not a file")),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                                Err(e) => return Err(format!("{s}: {e}")),
+                            };
+                            Some((s.clone(), bytes))
+                        }
+                    };
+                    Some(brief::Archive {
+                        start,
+                        indexes: a.index.iter().map(|i| i.output.clone()).collect(),
+                    })
+                }
+            };
             print!(
-                "{}",
+                "{}{}",
                 brief::render(
                     &project.name,
                     &project.today().to_string(),
@@ -192,10 +261,21 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     &checks,
                     &tags,
                     n
-                )
+                ),
+                archive.as_ref().map(brief::archive).unwrap_or_default()
             );
             Ok(ExitCode::SUCCESS)
         }
+        Command::Archive(cmd) => match cmd {
+            ArchiveCommand::Index => archive::index(&project),
+            ArchiveCommand::Seal { accept, note } => {
+                archive::seal(&project, accept.as_deref().zip(note.as_deref()))
+            }
+            ArchiveCommand::Update => archive::update(&project),
+            ArchiveCommand::Check { format } => archive::check(&project, format == Format::Jsonl),
+            ArchiveCommand::Find { terms, limit } => archive::find(&project, &terms, limit),
+            ArchiveCommand::Next { prefix, width } => archive::next(&project, &prefix, width),
+        },
         Command::Retro {
             agent_findings: path,
             since,
@@ -236,6 +316,47 @@ recurrence = 3
 # [[lab.checks]]
 # name = "sources"
 # run = ["prov", "manifest", "verify", "sources/manifest.jsonl", "--format", "jsonl"]
+
+# The research archive: a short start page, records with optional YAML front matter, indexes
+# generated from it, and append-only files sealed against edits. `lab archive update` writes the
+# indexes and seals; check the archive with the other checks:
+# [[lab.checks]]
+# name = "archive"
+# run = ["lab", "archive", "check", "--format", "jsonl"]
+#
+# [lab.archive]
+# start = "docs/research/START.md"
+# seal_manifest = "docs/research/.seal.json"     # default: <state_dir>/lab/archive-seal.json
+# sealed = ["docs/research/history/[0-9]*.md", "docs/research/log/*.md"]
+# links = ["docs/research/**/*.md"]
+# links_exclude = ["docs/research/followups/*/inputs/**"]
+# current_pages = ["docs/research/START.md"]
+#
+# [[lab.archive.index]]
+# name = "history"
+# output = "docs/research/history/INDEX.md"
+# title = "History reports"
+# intro = "One line per session report, newest first."
+# include = ["docs/research/history/[0-9]*.md"]
+# id_from = '^(\d+[a-z]?)-'
+# id_prefix = "H"
+# trim_leading_zeros = true
+# sort = "id-desc"
+# require = ["id", "title", "date"]
+#
+# [[lab.archive.index]]
+# name = "decisions"
+# output = "docs/research/decisions/INDEX.md"
+# title = "Decisions"
+# include = ["docs/research/decisions/D*.md"]
+# id_from = '^(D\d+)-'
+# group_by = "status"
+# require = ["id", "title", "status"]
+#
+# [[lab.archive.budget]]
+# path = "docs/research/START.md"
+# max_bytes = 8192
+# severity = "error"
 "#;
 
 const LESSONS_README: &str = "# Lessons\n\nOne file per lesson, managed with `lab lesson`. \

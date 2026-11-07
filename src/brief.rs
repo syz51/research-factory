@@ -164,6 +164,43 @@ pub fn render(
     out
 }
 
+/// What the brief says about a `[lab.archive]`.
+pub struct Archive {
+    /// The start page and its size, `None` when it does not exist.
+    pub start: Option<(String, Option<u64>)>,
+    /// The generated index files.
+    pub indexes: Vec<String>,
+}
+
+/// The brief's closing section for a project with an archive.
+pub fn archive(a: &Archive) -> String {
+    let mut out = String::from("\n## Archive\n\n");
+    match &a.start {
+        Some((path, Some(bytes))) => {
+            let _ = writeln!(
+                out,
+                "- Read {path} first ({:.1} KB).",
+                *bytes as f64 / 1024.0
+            );
+        }
+        Some((path, None)) => {
+            let _ = writeln!(
+                out,
+                "- The start page {path} does not exist yet; create it."
+            );
+        }
+        None => {}
+    }
+    let _ = write!(out, "- Look things up: `lab archive find <words>`");
+    if a.indexes.is_empty() {
+        out.push_str(".\n");
+    } else {
+        let _ = writeln!(out, ", or the indexes {}.", a.indexes.join(", "));
+    }
+    out.push_str("- Before finishing: `lab archive update`, then `lab check --new-only`.\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +353,25 @@ mod tests {
         );
         let all = render("demo", "2026-11-07", &lessons, &[], &[], &[], 3);
         assert!(all.contains("- 3 recurring finding rule(s) have no lesson (run `lab retro`)."));
+    }
+
+    #[test]
+    fn archive_section_names_the_start_page_and_indexes() {
+        let a = Archive {
+            start: Some(("docs/START.md".into(), Some(6246))),
+            indexes: vec!["docs/history/INDEX.md".into()],
+        };
+        assert_eq!(
+            archive(&a),
+            "\n## Archive\n\n- Read docs/START.md first (6.1 KB).\n\
+             - Look things up: `lab archive find <words>`, or the indexes docs/history/INDEX.md.\n\
+             - Before finishing: `lab archive update`, then `lab check --new-only`.\n"
+        );
+        let missing = archive(&Archive {
+            start: Some(("docs/START.md".into(), None)),
+            indexes: vec![],
+        });
+        assert!(missing.contains("The start page docs/START.md does not exist yet"));
+        assert!(missing.contains("`lab archive find <words>`.\n"));
     }
 }
