@@ -1,0 +1,540 @@
+//! The rules of `lab archive check`. Each problem becomes an `rf.finding/1`
+//! whose subject and message stay the same while the problem does, so its
+//! fingerprint survives unrelated edits.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use super::front::{self, Meta};
+use super::markdown;
+use super::seal::{Entry, Manifest, State};
+use super::{Record, Spec, Texts, read_optional};
+use crate::finding::{Evidence, Finding, Severity};
+
+/// A problem `lab archive check` reports, before it becomes an `rf.finding/1`.
+#[derive(Debug)]
+pub(super) struct Problem {
+    rule: &'static str,
+    pub(super) severity: Severity,
+    path: String,
+    line: Option<usize>,
+    /// The subject when it is not `path[:line]`, such as a duplicated id.
+    subject: Option<String>,
+    message: String,
+    evidence: Vec<String>,
+    data: Option<serde_json::Value>,
+}
+
+impl Problem {
+    fn new(rule: &'static str, severity: Severity, path: &str, message: String) -> Self {
+        Self {
+            rule,
+            severity,
+            path: path.into(),
+            line: None,
+            subject: None,
+            message,
+            evidence: Vec::new(),
+            data: None,
+        }
+    }
+
+    fn at(mut self, line: usize) -> Self {
+        self.line = Some(line);
+        self
+    }
+
+    fn subject(&self) -> String {
+        match (&self.subject, self.line) {
+            (Some(s), _) => s.clone(),
+            (None, Some(l)) => format!("{}:{l}", self.path),
+            (None, None) => self.path.clone(),
+        }
+    }
+
+    pub(super) fn text(&self) -> String {
+        format!(
+            "{} {} {} — {}",
+            self.severity.as_str(),
+            self.rule,
+            self.subject(),
+            self.message
+        )
+    }
+
+    pub(super) fn finding(&self) -> Finding {
+        let mut f = Finding::lab(
+            self.rule,
+            self.severity,
+            &self.subject(),
+            self.message.clone(),
+        );
+        f.evidence = self
+            .evidence
+            .iter()
+            .map(|p| Evidence {
+                path: p.clone(),
+                locator: None,
+            })
+            .collect();
+        f.data = self.data.clone();
+        f
+    }
+}
+
+pub(super) fn invalid_problem(r: &Record) -> Option<Problem> {
+    let inv = r.invalid.as_ref()?;
+    Some(
+        Problem::new(
+            "front-matter-invalid",
+            Severity::Error,
+            &r.path,
+            inv.message.clone(),
+        )
+        .at(inv.line),
+    )
+}
+
+pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
+    let mut extra = vec![&spec.sealed, &spec.links, &spec.current];
+    extra.extend(spec.budgets.iter());
+    let found = spec.walk(&extra)?;
+    let (by_index, rest) = found.split_at(spec.indexes.len());
+    let (sealed, links, current, budgets) = (&rest[0], &rest[1], &rest[2], &rest[3..]);
+    let mut texts = Texts::new();
+    let records = spec.records(by_index, &mut texts)?;
+    let mut out = Vec::new();
+    record_problems(spec, &records, &mut out);
+    index_problems(spec, &records, &mut out)?;
+    for (b, paths) in spec.cfg.budget.iter().zip(budgets) {
+        for path in paths {
+            let bytes = std::fs::metadata(spec.root().join(path))
+                .map_err(|e| format!("{path}: {e}"))?
+                .len();
+            if bytes > b.max_bytes {
+                let mut p = Problem::new(
+                    "size-budget",
+                    b.severity,
+                    path,
+                    format!(
+                        "is larger than its budget of {} bytes; move detail into linked records",
+                        b.max_bytes
+                    ),
+                );
+                p.data = Some(serde_json::json!({"bytes": bytes, "max_bytes": b.max_bytes}));
+                out.push(p);
+            }
+        }
+    }
+    link_problems(spec, &records, links, current, &mut texts, &mut out)?;
+    seal_problems(spec, sealed, &mut out)?;
+    out.sort_by(|a, b| {
+        (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
+    });
+    Ok(out)
+}
+
+/// Each record once, by path, in index order.
+fn unique(records: &[Record]) -> Vec<&Record> {
+    let mut seen = BTreeSet::new();
+    records
+        .iter()
+        .filter(|r| seen.insert(r.path.as_str()))
+        .collect()
+}
+
+fn record_problems(spec: &Spec, records: &[Record], out: &mut Vec<Problem>) {
+    let mut missing = BTreeSet::new();
+    for r in records {
+        for field in &spec.indexes[r.index].spec.require {
+            let m = &r.meta;
+            let value = match field {
+                crate::config::Field::Id => &m.id,
+                crate::config::Field::Title => &m.title,
+                crate::config::Field::Date => &m.date,
+                crate::config::Field::Status => &m.status,
+                crate::config::Field::Summary => &m.summary,
+            };
+            if value.is_none() && r.invalid.is_none() && missing.insert((&r.path, field.as_str())) {
+                out.push(Problem::new(
+                    "missing-field",
+                    Severity::Error,
+                    &r.path,
+                    format!(
+                        "has no `{}`, which index `{}` requires; add it to the front matter",
+                        field.as_str(),
+                        spec.indexes[r.index].spec.name
+                    ),
+                ));
+            }
+        }
+    }
+    let records = unique(records);
+    out.extend(records.iter().filter_map(|r| invalid_problem(r)));
+    let mut by_id: BTreeMap<&str, Vec<&Record>> = BTreeMap::new();
+    for r in &records {
+        if let Some(id) = &r.meta.id {
+            by_id.entry(id).or_default().push(r);
+        }
+    }
+    for (id, rs) in by_id.iter().filter(|(_, rs)| rs.len() > 1) {
+        let paths: Vec<String> = rs.iter().map(|r| r.path.clone()).collect();
+        let mut p = Problem::new(
+            "duplicate-id",
+            Severity::Error,
+            &paths[0],
+            format!(
+                "{} records have id {id}: {}; give each its own id",
+                paths.len(),
+                paths.join(", ")
+            ),
+        );
+        p.subject = Some((*id).into());
+        p.evidence = paths;
+        out.push(p);
+    }
+    let lists = |id: &str, pick: fn(&Meta) -> &Vec<String>, wanted: &str| {
+        by_id
+            .get(id)
+            .is_some_and(|rs| rs.iter().any(|r| pick(&r.meta).iter().any(|x| x == wanted)))
+    };
+    for r in &records {
+        let m = &r.meta;
+        for (field, ids) in [
+            ("supersedes", &m.supersedes),
+            ("superseded_by", &m.superseded_by),
+            ("decisions", &m.decisions),
+        ] {
+            for id in ids.iter().filter(|id| !by_id.contains_key(id.as_str())) {
+                out.push(Problem::new(
+                    "unknown-id",
+                    Severity::Error,
+                    &r.path,
+                    format!("`{field}` names {id}, which no indexed record has"),
+                ));
+            }
+        }
+        if let Some(me) = &m.id {
+            for other in m
+                .supersedes
+                .iter()
+                .filter(|o| by_id.contains_key(o.as_str()))
+            {
+                if !lists(other, |m| &m.superseded_by, me) {
+                    out.push(Problem::new(
+                        "supersession-mismatch",
+                        Severity::Warn,
+                        &r.path,
+                        format!(
+                            "supersedes {other}, but {other}'s `superseded_by` does not list {me}"
+                        ),
+                    ));
+                }
+            }
+            for other in m
+                .superseded_by
+                .iter()
+                .filter(|o| by_id.contains_key(o.as_str()))
+            {
+                if !lists(other, |m| &m.supersedes, me) {
+                    out.push(Problem::new(
+                        "supersession-mismatch",
+                        Severity::Warn,
+                        &r.path,
+                        format!("is superseded by {other}, but {other}'s `supersedes` does not list {me}"),
+                    ));
+                }
+            }
+        }
+        if !m.superseded_by.is_empty() && !spec.inactive(r) {
+            out.push(Problem::new(
+                "superseded-but-active",
+                Severity::Warn,
+                &r.path,
+                format!(
+                    "is superseded by {} but its status is {}; set it to one of: {}",
+                    m.superseded_by.join(", "),
+                    m.status
+                        .as_deref()
+                        .map_or_else(|| "missing".into(), |s| format!("`{s}`")),
+                    spec.cfg.inactive_statuses.join(", ")
+                ),
+            ));
+        }
+    }
+}
+
+fn index_problems(spec: &Spec, records: &[Record], out: &mut Vec<Problem>) -> Result<(), String> {
+    for (i, ix) in spec.indexes.iter().enumerate() {
+        // `lab archive index` would refuse to write it, so there is nothing to compare.
+        if records.iter().any(|r| r.index == i && r.invalid.is_some()) {
+            continue;
+        }
+        let output = &ix.spec.output;
+        let (rule, message) = match read_optional(&spec.root().join(output))? {
+            None => ("index-missing", "does not exist; run `lab archive update`"),
+            Some(b) if b != spec.render(records, i).as_bytes() => (
+                "index-stale",
+                "differs from what its records generate; run `lab archive update` (never edit an index by hand)",
+            ),
+            Some(_) => continue,
+        };
+        out.push(Problem::new(rule, Severity::Error, output, message.into()));
+    }
+    Ok(())
+}
+
+/// Where a link points.
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// A URL, or nothing to check.
+    Skip,
+    /// `#fragment` in the same file.
+    Here(String),
+    /// A file or directory; `rel` when it lies inside the project.
+    There {
+        abs: PathBuf,
+        rel: Option<String>,
+        fragment: Option<String>,
+    },
+}
+
+fn has_scheme(dest: &str) -> bool {
+    dest.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+    })
+}
+
+/// `dir/path` with `.` and `..` resolved; `None` when it leaves the root.
+fn normalize(dir: &str, path: &str) -> Option<String> {
+    let mut parts: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            p => parts.push(p),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+/// Resolves a link destination written in a file in directory `dir`.
+fn resolve(root: &Path, dir: &str, dest: &str) -> Target {
+    let dest = dest.trim();
+    if dest.is_empty() || has_scheme(dest) {
+        return Target::Skip;
+    }
+    let (path, fragment) = match dest.split_once('#') {
+        Some((p, f)) => (
+            p,
+            Some(markdown::percent_decode(f)).filter(|f| !f.is_empty()),
+        ),
+        None => (dest, None),
+    };
+    let path = path.split_once('?').map_or(path, |(p, _)| p);
+    if path.is_empty() {
+        return fragment.map_or(Target::Skip, Target::Here);
+    }
+    let path = markdown::percent_decode(path);
+    if let Some(stripped) = path.strip_prefix('/') {
+        let abs = PathBuf::from(&path);
+        if abs.exists() {
+            let rel = abs
+                .strip_prefix(root)
+                .ok()
+                .map(|r| r.to_string_lossy().replace('\\', "/"));
+            return Target::There { abs, rel, fragment };
+        }
+        // Not a file system path: try it relative to the project root, as GitHub does.
+        let rel = normalize("", stripped);
+        let abs = root.join(stripped);
+        return Target::There { abs, rel, fragment };
+    }
+    let rel = normalize(dir, &path);
+    let abs = match &rel {
+        Some(r) => root.join(r),
+        None => root.join(dir).join(&path),
+    };
+    Target::There { abs, rel, fragment }
+}
+
+fn is_markdown(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| x.eq_ignore_ascii_case("md") || x.eq_ignore_ascii_case("markdown"))
+}
+
+/// Words that mark a link to an inactive record as deliberate.
+const HISTORY_WORDS: [&str; 4] = ["superseded", "historical", "rejected", "withdrawn"];
+
+fn link_problems(
+    spec: &Spec,
+    records: &[Record],
+    links: &[String],
+    current: &[String],
+    texts: &mut Texts,
+    out: &mut Vec<Problem>,
+) -> Result<(), String> {
+    let root = spec.root();
+    let by_path: HashMap<&str, &Record> = unique(records)
+        .into_iter()
+        .map(|r| (r.path.as_str(), r))
+        .collect();
+    let checked: BTreeSet<&str> = links.iter().map(String::as_str).collect();
+    let current: BTreeSet<&str> = current.iter().map(String::as_str).collect();
+    let mut exists: HashMap<PathBuf, bool> = HashMap::new();
+    for file in checked.union(&current) {
+        let abs_file = root.join(file);
+        let doc = texts.doc(&abs_file)?;
+        let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
+        let check = checked.contains(file);
+        for link in &doc.links {
+            let problem =
+                |rule, message| Problem::new(rule, Severity::Error, file, message).at(link.line);
+            match resolve(root, dir, &link.dest) {
+                Target::Skip => {}
+                Target::Here(fragment) => {
+                    if check && !doc.anchors.contains(&fragment.to_lowercase()) {
+                        out.push(problem(
+                            "broken-anchor",
+                            format!("links to `#{fragment}`, which matches no heading or anchor in this file"),
+                        ));
+                    }
+                }
+                Target::There { abs, rel, fragment } => {
+                    if !*exists.entry(abs.clone()).or_insert_with(|| abs.exists()) {
+                        if check {
+                            out.push(problem(
+                                "broken-link",
+                                format!("links to `{}`, which does not exist", link.dest),
+                            ));
+                        }
+                        continue;
+                    }
+                    // Anchors are checked only in Markdown files inside the project.
+                    if check
+                        && let Some(fragment) = &fragment
+                        && rel.is_some()
+                        && is_markdown(&abs)
+                        && abs.is_file()
+                        && !texts.doc(&abs)?.anchors.contains(&fragment.to_lowercase())
+                    {
+                        out.push(problem(
+                            "broken-anchor",
+                            format!(
+                                "links to `{}`, but the target has no heading or anchor `#{fragment}`",
+                                link.dest
+                            ),
+                        ));
+                    }
+                    if current.contains(file)
+                        && let Some(r) = rel.as_deref().and_then(|r| by_path.get(r))
+                        && spec.inactive(r)
+                    {
+                        let bytes = texts.bytes(&abs_file)?;
+                        let text = String::from_utf8_lossy(&bytes);
+                        let line = text.lines().nth(link.line - 1).unwrap_or("").to_lowercase();
+                        if !HISTORY_WORDS.iter().any(|w| line.contains(w)) {
+                            let mut p = problem(
+                                "superseded-link",
+                                format!(
+                                    "links {} ({}) as if it were current; link the record that replaced it, or say on the line that it is superseded or historical",
+                                    r.meta.id.as_deref().unwrap_or(&r.path),
+                                    r.meta.status.as_deref().unwrap_or_default()
+                                ),
+                            );
+                            p.severity = Severity::Warn;
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn seal_problems(spec: &Spec, sealed: &[String], out: &mut Vec<Problem>) -> Result<(), String> {
+    let manifest = Manifest::load(&spec.manifest)?;
+    for path in sealed {
+        let bytes = std::fs::read(spec.root().join(path)).map_err(|e| format!("{path}: {e}"))?;
+        match Entry::state(manifest.files.get(path), front::split(&bytes).body) {
+            State::New => out.push(Problem::new(
+                "unsealed",
+                Severity::Warn,
+                path,
+                "is append-only but not sealed yet; run `lab archive update`".into(),
+            )),
+            State::Edited => out.push(Problem::new(
+                "sealed-edited",
+                Severity::Error,
+                path,
+                "was edited after it was sealed; restore the sealed text and append a dated correction, \
+                 or accept the edit with `lab archive seal --accept <path> --note \"<why>\"`"
+                    .into(),
+            )),
+            State::Unchanged | State::Appended => {}
+        }
+    }
+    for path in manifest.files.keys() {
+        if !spec.root().join(path).is_file() {
+            out.push(Problem::new(
+                "sealed-missing",
+                Severity::Error,
+                path,
+                format!(
+                    "is sealed in {} but no longer exists; restore it",
+                    spec.manifest_display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_links_relative_to_the_file() {
+        let root = Path::new("/p");
+        let there = |rel: &str, fragment: Option<&str>| Target::There {
+            abs: root.join(rel),
+            rel: Some(rel.into()),
+            fragment: fragment.map(Into::into),
+        };
+        assert_eq!(
+            resolve(root, "docs/a", "../b/c.md#Sec%20One"),
+            there("docs/b/c.md", Some("Sec One"))
+        );
+        assert_eq!(
+            resolve(root, "docs", "x%20y.md?raw=1"),
+            there("docs/x y.md", None)
+        );
+        assert_eq!(resolve(root, "docs", "#top"), Target::Here("top".into()));
+        for skipped in [
+            "https://x.org/a.md",
+            "mailto:a@b.c",
+            "file:///x",
+            "",
+            "#",
+            "  ",
+        ] {
+            assert_eq!(resolve(root, "docs", skipped), Target::Skip, "{skipped}");
+        }
+        assert!(matches!(
+            resolve(root, "docs", "../../outside.md"),
+            Target::There { rel: None, .. }
+        ));
+        assert_eq!(
+            resolve(root, "docs", "/no/such/dir/a.md"),
+            there("no/such/dir/a.md", None)
+        );
+    }
+}
