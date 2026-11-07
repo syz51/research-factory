@@ -294,7 +294,7 @@ pub fn derive(
                     "lesson-introduced",
                     format!("Review findings introduced since lesson {id} was adopted"),
                     format!(
-                        "{} finding(s) of its rule appeared since {}, by message, with where the new ones are:\n\n```\n{}\n```\n\n\
+                        "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
                          Fix each, or show that the finding is wrong. If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
                          Check runs give no verdict; to verify the lesson, cite other evidence with `--force`.\n",
                         i.count,
