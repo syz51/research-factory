@@ -30,20 +30,24 @@ pub fn render(
     let _ = writeln!(out, "## Rules from lessons ({})\n", active.len());
     if active.is_empty() {
         out.push_str("None adopted yet.\n");
+    } else {
+        out.push_str("Follow every rule below; its group says only where it came from.\n");
     }
-    // Every rule is an instruction to follow; the kind says only where it came from.
-    for (kind, heading) in [
-        (Kind::Bad, "Learned from failures"),
-        (Kind::Good, "Practices that worked"),
+    let (mut failures, mut worked) = (Vec::new(), Vec::new());
+    for l in &active {
+        match l.meta.kind {
+            Kind::Bad => failures.push(*l),
+            Kind::Good => worked.push(*l),
+        }
+    }
+    for (heading, rules) in [
+        ("Learned from failures", failures),
+        ("Practices that worked", worked),
     ] {
-        let rules: Vec<&&Lesson> = active.iter().filter(|l| l.meta.kind == kind).collect();
         if rules.is_empty() {
             continue;
         }
-        if !out.ends_with("\n\n") {
-            out.push('\n');
-        }
-        let _ = writeln!(out, "{heading}:\n");
+        let _ = writeln!(out, "\n{heading}:\n");
         for l in rules {
             let _ = writeln!(out, "- {} (`{}`)", l.meta.rule.trim(), l.meta.id);
         }
@@ -184,14 +188,19 @@ mod tests {
             failures < worked,
             "lessons from failures come first:\n{text}"
         );
+        assert!(text.contains("Follow every rule below"));
         assert!(
-            !text.contains("[avoid]"),
+            !text.contains("[avoid]") && !text.contains("[keep]"),
             "a rule is never shown inverted:\n{text}"
         );
         assert!(!text.contains("rule c"));
         assert!(text.contains("not yet verified: b"));
         assert!(text.contains("2 recurring finding rule(s)"));
         let lit = render("demo", "2026-11-07", &lessons, None, &["lit".into()], 0);
-        assert!(lit.contains("rule a") && !lit.contains("rule b") && !lit.contains("Maintenance"));
+        assert!(lit.contains("rule a") && !lit.contains("(`b`)") && !lit.contains("Maintenance"));
+        assert!(
+            !lit.contains("Learned from failures"),
+            "an empty group has no heading:\n{lit}"
+        );
     }
 }

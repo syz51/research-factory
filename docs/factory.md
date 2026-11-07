@@ -30,7 +30,7 @@ These shared rules let `lab` run any checker without knowing anything about it. 
 
 ## A session
 
-1. **Start:** `lab brief` prints the adopted rules (failures to avoid first, then practices to keep), the state of the last check, and any lessons due for evaluation. The agent skill tells an agent to run it first and follow it.
+1. **Start:** `lab brief` prints the adopted rules (those learned from failures first, then practices that worked; every rule is an instruction to follow), the state of the last check, and any lessons due for evaluation. The agent skill tells an agent to run it first and follow it.
 2. **Work:** the agent registers each new source with `papers`, saves the extracted text, and records its reading depth. Experiments run under `prov run` and are scored with `ireval`.
 3. **Check:** `lab check` runs every checker. With `--new-only` it fails only on errors outside the baseline, the findings accepted with `lab baseline set --note`, so an old backlog does not block new work, while `lab brief` still shows the backlog. Re-running the check never moves the baseline, so the gate clears only when the new errors are fixed or someone deliberately accepts them with a recorded note.
 4. **Fix:** errors are fixed or, if the finding is wrong, the checker or its configuration is corrected. Findings are not deleted by hand.
