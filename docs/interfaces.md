@@ -53,6 +53,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 - `texts`: local extracted-text copies a checker may quote against. Paths are relative to the project root. The `sha256` is of the text file.
 - `duplicate_of`: the key of the surviving entry when two keys describe the same work. Keys are never renumbered or deleted.
 - `verified`: the last metadata check against an index, or null.
+- Optional fields are omitted when empty, and readers keep fields they do not know. `papers` adds `authors_truncated` (the source lists only the first authors), `author_variants` (an index's misspellings of the first author, accepted by `verify`) and `citekey`; its README describes them.
 - Unknown values are `null`, never invented.
 
 ## 4. Provenance records: `rf.run/1` and `rf.manifest/1`
