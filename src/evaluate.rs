@@ -656,19 +656,33 @@ fn check_runs(
         let at = |i: usize| inputs.runs[i].header.at.as_str();
         at(*a).cmp(at(*b)).then(a.cmp(b))
     });
+    // The interval end stored last, whose versions are the current
+    // checkers': a replay is stored after the live runs it predates.
+    let newest = ends
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, (i, _))| *i)
+        .map(|(at, _)| at);
     let points: Vec<(&Run, Measured)> = ends
         .into_iter()
         .map(|(i, m)| (&inputs.runs[i], m))
         .collect();
     let min = inputs.settings.min_sessions;
-    // Each interval: its side, its unit (the required checks' units, joined
-    // by `+`), findings introduced and new units. An interval across a
-    // change of a check's unit is left out, since its counts do not compare,
-    // and so is one across a change of a required checker's version; both
-    // are counted.
-    // The last field indexes `versions` at the interval's later end, whose
-    // known versions hold for both ends, since the interval crosses no change.
-    let mut intervals: Vec<(bool, String, u64, u64, usize)> = Vec::new();
+    // An interval across a change of a check's unit is left out, since its
+    // counts do not compare, and so is one across a change of a required
+    // checker's version; both are counted.
+    struct Interval {
+        side: bool,
+        /// The required checks' units, joined by `+`.
+        unit: String,
+        found: u64,
+        new_units: u64,
+        /// Indexes `versions` at the later end: the versions known there,
+        /// which the earlier end shares where it knows one, since the
+        /// interval crosses no change, and takes where it knows none.
+        end: usize,
+    }
+    let mut intervals: Vec<Interval> = Vec::new();
     let mut version_changes = 0;
     let mut unit_changes = 0;
     let versions = known_versions(points.iter().map(|(run, _)| *run), required);
@@ -686,11 +700,7 @@ fn check_runs(
         if new_units == 0 {
             continue;
         }
-        let (v0, v1) = (&versions[i], &versions[i + 1]);
-        if v1
-            .iter()
-            .any(|(check, v)| v0.get(check).is_some_and(|w| w != v))
-        {
+        if conflicts(&versions[i + 1], &versions[i]) {
             version_changes += 1;
             continue;
         }
@@ -700,7 +710,13 @@ fn check_runs(
             &metric_items(r1, metric, required),
         );
         let unit = unit.into_iter().collect::<Vec<_>>().join("+");
-        intervals.push((side, unit, found, new_units, i + 1));
+        intervals.push(Interval {
+            side,
+            unit,
+            found,
+            new_units,
+            end: i + 1,
+        });
     }
     if version_changes > 0 {
         let _ = write!(
@@ -715,10 +731,16 @@ fn check_runs(
         );
     }
     // Only the latest unit counts: a checker that renamed or changed its
-    // unit gets a baseline again from runs in the new unit. So does the
-    // latest checker version: an update can change what a unit counts under
-    // the same name. A version unknown on either side matches.
-    let Some((unit, latest)) = intervals.last().map(|i| (i.1.clone(), &versions[i.4])) else {
+    // unit gets a baseline again from runs in the new unit. Only the current
+    // checker versions count too, those of the interval end stored last: an
+    // update can change what a unit counts under the same name. A version
+    // unknown on either side matches.
+    let current = newest.map(|at| &versions[at]);
+    let Some((unit, current)) = intervals
+        .last()
+        .zip(current)
+        .map(|(i, c)| (i.unit.clone(), c))
+    else {
         let why = if e.introduced.is_some() {
             "descriptive: no measured interval yet"
         } else {
@@ -733,23 +755,21 @@ fn check_runs(
     };
     let mut sides = [IntervalSide::default(); 2];
     let mut other_unit = 0;
-    let mut other_version = 0;
-    for (side, u, found, new_units, at) in &intervals {
-        if *u != unit {
+    // Per side: before, after.
+    let mut other_version = [0; 2];
+    for i in &intervals {
+        if i.unit != unit {
             other_unit += 1;
             continue;
         }
-        if versions[*at]
-            .iter()
-            .any(|(check, v)| latest.get(check).is_some_and(|w| w != v))
-        {
-            other_version += 1;
+        if conflicts(&versions[i.end], current) {
+            other_version[usize::from(i.side)] += 1;
             continue;
         }
-        let s = &mut sides[usize::from(*side)];
+        let s = &mut sides[usize::from(i.side)];
         s.n += 1;
-        s.findings += found;
-        s.new_units += new_units;
+        s.findings += i.found;
+        s.new_units += i.new_units;
     }
     if other_unit > 0 {
         let _ = write!(
@@ -757,12 +777,16 @@ fn check_runs(
             "; {other_unit} interval(s) measured in another unit than `{unit}` left out"
         );
     }
-    if other_version > 0 {
-        let named: Vec<String> = latest.iter().map(|(c, v)| format!("{c} {v}")).collect();
+    if let [before, after] = other_version
+        && before + after > 0
+    {
+        let named: Vec<String> = current.iter().map(|(c, v)| format!("{c} {v}")).collect();
         let _ = write!(
             note,
-            "; {other_version} interval(s) measured with another checker version than the \
-             latest ({}) left out (`lab check --at` can replay their commits with it)",
+            "; {} interval(s) ({before} before adoption, {after} after) measured with another \
+             checker version than the current one ({}) left out, which a replay of their \
+             commits measures again",
+            before + after,
             named.join(", ")
         );
     }
@@ -891,6 +915,12 @@ fn known_versions<'r>(
             known.clone()
         })
         .collect()
+}
+
+/// Whether two sets of known versions differ for a check both know.
+fn conflicts(a: &BTreeMap<&str, &str>, b: &BTreeMap<&str, &str>) -> bool {
+    a.iter()
+        .any(|(check, v)| b.get(check).is_some_and(|w| w != v))
 }
 
 /// The units a check-run lesson counts, by the metric's tool and rule, joined
@@ -2903,6 +2933,15 @@ mod tests {
         let e = eval_min(&runs, 1);
         assert_eq!(e.after.new_units, Some(200));
         assert_eq!((e.before.n, e.after.n), (1, 2));
+        assert_eq!(e.verdict, Verdict::Improved);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "1 interval(s) across a checker version change left out; 2 interval(s) (2 \
+                 before adoption, 0 after) measured with another checker version than the \
+                 current one (claims v2) left out, which a replay of their commits measures again"
+            )
+        );
         // An unknown version between v1 and v2 does not hide the change: it
         // is counted in the interval that reaches v2.
         let runs = with_versions([v("v1"), v("v1"), v("v1"), v("v1"), None, v("v2"), v("v2")]);
@@ -2952,14 +2991,39 @@ mod tests {
                 "no baseline: 0 of 2 measured intervals before adoption, 2 of 2 after; the rate \
                  after adoption has nothing to compare with yet (`lab check --at` can replay \
                  commits before adoption); 1 interval(s) across a checker version change left \
-                 out; 3 interval(s) measured with another checker version than the latest \
-                 (claims v2) left out (`lab check --at` can replay their commits with it)"
+                 out; 3 interval(s) (3 before adoption, 0 after) measured with another checker \
+                 version than the current one (claims v2) left out, which a replay of their \
+                 commits measures again"
             )
         );
         // Replayed with v2, the baseline is back.
         let runs = with_versions([v("v2"); 7]);
         let e = eval_min(&runs, 2);
         assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
+        // Updated to v2 after live v1 runs on every commit, then the
+        // commits before adoption replayed: the replays are stored last, so
+        // v2 is current, though live v1 runs come later in time. The v1
+        // intervals after adoption are left out until a replay or live v2
+        // runs measure them again.
+        let mut runs = with_versions([v("v1"); 7]);
+        let mut replays = with_versions([v("v2"); 7]);
+        replays.truncate(4);
+        for (i, r) in replays.iter_mut().enumerate() {
+            r.header.replayed = true;
+            r.path = format!("replay-{i}.jsonl").into();
+        }
+        runs.extend(replays);
+        let e = eval_min(&runs, 2);
+        assert_eq!((e.before.n, e.after.n), (3, 0));
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "0 of 2 measured intervals after adoption, 3 of 2 before; 1 interval(s) across \
+                 a checker version change left out; 2 interval(s) (0 before adoption, 2 after) \
+                 measured with another checker version than the current one (claims v2) left \
+                 out, which a replay of their commits measures again"
+            )
+        );
         // An unknown version matches any: runs stored before lab 0.9.0 still
         // count beside the latest version.
         let runs = with_versions([None, None, None, None, None, None, v("v2")]);
