@@ -490,3 +490,92 @@ fn an_unreadable_signal_state_is_recorded_and_backs_off() {
     assert_eq!(skipped.status.code(), Some(0));
     assert_eq!(last(d)["finished"], rec["finished"], "backed off");
 }
+
+/// Runs `program` in `dir` with git confined to repositories below `ceiling`
+/// and free of the user's configuration.
+fn isolated(program: &str, dir: &Path, ceiling: &Path, args: &[&str]) -> Output {
+    Command::new(program)
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("run")
+}
+
+fn git(dir: &Path, ceiling: &Path, args: &[&str]) {
+    let mut all = vec!["-c", "user.name=t", "-c", "user.email=t@example.com"];
+    all.extend_from_slice(args);
+    let out = isolated("git", dir, ceiling, &all);
+    assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+}
+
+#[test]
+fn a_loop_in_a_linked_worktree_runs_for_the_main_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (main, linked) = (ceiling.join("main"), ceiling.join("linked"));
+    // The project is in a subdirectory, and its measured data is not committed.
+    let (m, w) = (main.join("proj"), linked.join("proj"));
+    project(&m);
+    write(&main, ".gitignore", ".research/\nagent/\nsent.jsonl\n");
+    git(&main, ceiling, &["init", "-q"]);
+    git(&main, ceiling, &["add", "-A"]);
+    git(&main, ceiling, &["commit", "-qm", "project"]);
+    git(&main, ceiling, &["worktree", "add", "-q", "../linked"]);
+    let lab = |d: &Path, args: &[&str]| isolated(env!("CARGO_BIN_EXE_lab"), d, ceiling, args);
+
+    let out = lab(&w, &["loop"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(
+        stdout(&out).contains("ran the loop for the main checkout"),
+        "{}",
+        stdout(&out)
+    );
+    // The main checkout's measures, data, notify command and state served.
+    let ids: Vec<String> = sent(&m)
+        .iter()
+        .map(|s| s["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "lesson-verifiable:fewer-rereads",
+            "lesson-unmeasurable:never-seen",
+            "uncovered-rules"
+        ]
+    );
+    assert!(read(&m, "measure.out").is_empty());
+    assert!(read(&m, ".research/lab/loop/loop.log").contains("linked git worktree"));
+    assert!(!w.join("sent.jsonl").exists());
+    assert!(!w.join(".research").exists(), "no state in the worktree");
+
+    // One dedupe state and one `--if-older` clock for both checkouts.
+    let finished = last(&m)["finished"].clone();
+    let skipped = lab(&w, &["loop", "--if-older", "60"]);
+    assert_eq!(skipped.status.code(), Some(0));
+    assert_eq!(stdout(&skipped), "", "quiet");
+    assert_eq!(last(&m)["finished"], finished, "not run again");
+    let again = lab(&m, &["loop"]);
+    assert_eq!(again.status.code(), Some(0), "{}", stderr(&again));
+    assert!(!stdout(&again).contains("worktree"), "{}", stdout(&again));
+    assert_eq!(sent(&m).len(), 3, "nothing sent twice");
+
+    // Without the project in the main checkout, the worktree's loop does nothing.
+    std::fs::remove_file(m.join("research.toml")).unwrap();
+    let out = lab(&w, &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("did nothing"), "{}", stdout(&out));
+    assert!(!w.join(".research").exists());
+    assert_eq!(sent(&m).len(), 3);
+}

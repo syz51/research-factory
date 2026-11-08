@@ -360,9 +360,98 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     crate::archive::write_atomically(path, text.as_bytes())
 }
 
-/// `lab loop` in the foreground.
+/// Where `lab loop` runs.
+pub enum Checkout {
+    /// The project as found: not in a linked git worktree.
+    This,
+    /// The same project in the main checkout of the linked worktree `lab`
+    /// started in.
+    Main(Box<Project>),
+    /// A linked worktree whose main checkout has no such project; the message
+    /// says so.
+    Skip(String),
+}
+
+/// The checkout `lab loop` runs for. In a linked git worktree it is the main
+/// checkout: agent sessions run there, and one lock, `--if-older` state and
+/// signal state per project keep the worktrees from measuring nothing and
+/// signalling apart. `config` is the `--config` path, if any.
+pub fn checkout(project: &Project, config: Option<&Path>) -> Result<Checkout, String> {
+    let git = |args: &[&str]| -> Result<Option<String>, String> {
+        let out = match Command::new("git")
+            .args(args)
+            .current_dir(&project.root)
+            .env("LC_ALL", "C")
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("git: {e}")),
+        };
+        let err = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() {
+            Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+        } else if err.contains("not a git repository") {
+            Ok(None)
+        } else {
+            Err(format!("git {}: {}", args.join(" "), err.trim()))
+        }
+    };
+    let Some(dirs) = git(&[
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-dir",
+        "--git-common-dir",
+        "--show-prefix",
+    ])?
+    else {
+        return Ok(Checkout::This);
+    };
+    let mut lines = dirs.lines();
+    let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
+        return Err(format!("git rev-parse printed too little: {dirs:?}"));
+    };
+    if Path::new(git_dir) == Path::new(common) {
+        return Ok(Checkout::This);
+    }
+    // The project's directory below the top of the work tree, empty at the top.
+    let prefix = lines.next().unwrap_or("");
+    let list = git(&["worktree", "list", "--porcelain"])?.unwrap_or_default();
+    // The first entry is the main worktree.
+    let main = list.split("\n\n").next().unwrap_or("");
+    let path = main.lines().find_map(|l| l.strip_prefix("worktree "));
+    let name = config
+        .and_then(Path::file_name)
+        .unwrap_or(crate::config::CONFIG_FILE.as_ref());
+    let here = project.root.display();
+    let path = match path {
+        Some(p) if !main.lines().any(|l| l == "bare") => Path::new(p).join(prefix),
+        _ => {
+            return Ok(Checkout::Skip(format!(
+                "{here} is a linked git worktree of a bare repository; `lab loop` runs only \
+                 in a main checkout, so it did nothing."
+            )));
+        }
+    };
+    let file = path.join(name);
+    if !file.is_file() {
+        return Ok(Checkout::Skip(format!(
+            "{here} is a linked git worktree, and the main checkout has no {}; `lab loop` \
+             runs only in the main checkout, so it did nothing.",
+            file.display()
+        )));
+    }
+    Ok(Checkout::Main(Box::new(Project::discover(
+        &path,
+        Some(&file),
+    )?)))
+}
+
+/// `lab loop` in the foreground. `worktree` is the linked git worktree it
+/// started in, when it runs for the main checkout instead.
 pub fn run(
     project: &Project,
+    worktree: Option<&Path>,
     if_older: Option<u64>,
     jsonl: bool,
     analyse: impl FnOnce() -> Result<Analysis, String>,
@@ -385,6 +474,16 @@ pub fn run(
     let started = crate::finding::now();
     let mut log = open_log(&dir)?;
     let _ = writeln!(log, "== lab loop {started} (pid {})", std::process::id());
+    let redirected = worktree.map(|w| {
+        format!(
+            "Started in the linked git worktree {}: ran the loop for the main checkout {}.",
+            w.display(),
+            project.root.display()
+        )
+    });
+    if let Some(r) = &redirected {
+        let _ = writeln!(log, "-- {r}");
+    }
     let cfg = project.lab.lesson_loop.clone().unwrap_or_default();
     let mut measures = Vec::new();
     let mut failures = Vec::new();
@@ -442,6 +541,14 @@ pub fn run(
         record.evaluations.len(),
         sigs.len()
     );
+    if let Some(r) = &redirected {
+        // The JSONL output holds only signals.
+        if jsonl {
+            eprintln!("{r}");
+        } else {
+            println!("{r}");
+        }
+    }
     if jsonl {
         for s in &sigs {
             println!("{}", serde_json::to_string(s).map_err(|e| e.to_string())?);

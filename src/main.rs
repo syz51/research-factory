@@ -348,12 +348,29 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             background,
             format,
         } => {
+            let (project, worktree) = match lesson_loop::checkout(&project, cli.config.as_deref())?
+            {
+                lesson_loop::Checkout::This => (project, None),
+                lesson_loop::Checkout::Main(main) => (*main, Some(project.root)),
+                lesson_loop::Checkout::Skip(message) => {
+                    if format == Format::Jsonl {
+                        eprintln!("{message}");
+                    } else {
+                        println!("{message}");
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
+            };
             if background {
                 return lesson_loop::background(&project);
             }
-            lesson_loop::run(&project, if_older, format == Format::Jsonl, || {
-                analyse(&project)
-            })
+            lesson_loop::run(
+                &project,
+                worktree.as_deref(),
+                if_older,
+                format == Format::Jsonl,
+                || analyse(&project),
+            )
         }
         Command::Lesson(cmd) => lesson(&project, cmd),
     }
