@@ -664,7 +664,7 @@ fn check_runs(
             version_changes += 1;
             continue;
         }
-        let unit: BTreeSet<&str> = m1.values().map(|u| u.unit).collect();
+        let unit: BTreeSet<&str> = m1.values().map(|u| u.unit.as_str()).collect();
         let found = introduced_count(
             &metric_items(r0, metric, required),
             &metric_items(r1, metric, required),
@@ -814,15 +814,20 @@ fn known_versions<'r>(
         .collect()
 }
 
-/// The unit a check-run lesson counts, by the metric's tool and rule. A rule
-/// listed here counts only its unit: a check that does not print it, such as
-/// claimcheck before 0.2.0, measures nothing for the rule. `uncited-claim`
-/// fires only on sentences that do not cite, so their text adds no citing
-/// sentence. `evidence-label` counts uncited sentences too for now, though it
-/// also fires on paragraphs that cite.
-const RULE_UNITS: &[(&str, &str, &str)] = &[
-    ("claimcheck", "uncited-claim", "uncited-sentence"),
-    ("claimcheck", "evidence-label", "uncited-sentence"),
+/// The units a check-run lesson counts, by the metric's tool and rule. A rule
+/// listed here counts only its units, summed: a check that does not print
+/// each of them, such as claimcheck before 0.2.0, measures nothing for the
+/// rule. The summed units must not share a text, so their keys stay
+/// disjoint. `uncited-claim` fires only on prose sentences that do not cite,
+/// so their text adds no citing sentence. `evidence-label` fires on prose
+/// paragraphs that cite or claim, so it counts both.
+const RULE_UNITS: &[(&str, &str, &[&str])] = &[
+    ("claimcheck", "uncited-claim", &["uncited-sentence"]),
+    (
+        "claimcheck",
+        "evidence-label",
+        &["citing-sentence", "uncited-sentence"],
+    ),
 ];
 
 /// The unit a tool's other rules count when its check prints several units.
@@ -831,8 +836,8 @@ const TOOL_UNITS: &[(&str, &str)] = &[("claimcheck", "citing-sentence")];
 /// Which `rf.measure/1` unit a lesson's metric counts.
 #[derive(Debug, Clone, Copy)]
 struct UnitChoice {
-    /// The rule's own unit (`RULE_UNITS`), the only one it counts.
-    rule: Option<&'static str>,
+    /// The rule's own units (`RULE_UNITS`), the only ones it counts.
+    rule: Option<&'static [&'static str]>,
     /// The tool's unit (`TOOL_UNITS`) among several a check printed.
     tool: Option<&'static str>,
 }
@@ -852,11 +857,12 @@ impl UnitChoice {
     }
 }
 
-/// The units one check measured for a tool in one run, in the unit the
-/// lesson counts, merged over the `rf.measure/1` records in that unit.
+/// The units one check measured for a tool in one run, in the units the
+/// lesson counts, merged over the `rf.measure/1` records in them.
 #[derive(Debug)]
 struct Units<'r> {
-    unit: &'r str,
+    /// The unit, or several summed, joined by `+`.
+    unit: String,
     count: u64,
     /// `None` when a record has no keys.
     keys: Option<BTreeSet<&'r str>>,
@@ -865,11 +871,11 @@ struct Units<'r> {
 /// Per required check, its units.
 type Measured<'r> = BTreeMap<&'r str, Units<'r>>;
 
-/// What each required check measured for `tool` in `run`, in the unit
-/// `choice` gives: the rule's own unit; otherwise the one unit the check
-/// printed, or among several the tool's unit. A check that measured nothing
-/// in that unit, or printed several units and the tool has none, is missing,
-/// so the run ends no interval. Record order plays no part.
+/// What each required check measured for `tool` in `run`, in the units
+/// `choice` gives: the rule's own units, summed; otherwise the one unit the
+/// check printed, or among several the tool's unit. A check that did not
+/// print each of those units, or printed several and the tool has none, is
+/// missing, so the run ends no interval. Record order plays no part.
 fn measured<'r>(
     run: &'r Run,
     tool: &str,
@@ -890,21 +896,24 @@ fn measured<'r>(
     let mut out: Measured = BTreeMap::new();
     for (check, records) in by_check {
         let units: BTreeSet<&str> = records.iter().map(|m| m.unit.as_str()).collect();
-        let unit = match (choice.rule, choice.tool) {
-            (Some(unit), _) => unit,
-            (None, _) if units.len() == 1 => records[0].unit.as_str(),
-            (None, Some(unit)) => unit,
+        let wanted: &[&str] = match (choice.rule, choice.tool) {
+            (Some(wanted), _) => wanted,
+            (None, _) if units.len() == 1 => &[records[0].unit.as_str()],
+            (None, Some(unit)) => &[unit],
             (None, None) => continue,
         };
-        if !units.contains(unit) {
+        if !wanted.iter().all(|w| units.contains(w)) {
             continue;
         }
         let mut u = Units {
-            unit,
+            unit: wanted.join("+"),
             count: 0,
             keys: Some(BTreeSet::new()),
         };
-        for m in records.into_iter().filter(|m| m.unit == unit) {
+        for m in records
+            .into_iter()
+            .filter(|m| wanted.contains(&m.unit.as_str()))
+        {
             u.count += m.count;
             match (&mut u.keys, &m.keys) {
                 (Some(keys), Some(more)) => keys.extend(more.iter().map(String::as_str)),
@@ -2866,7 +2875,11 @@ mod tests {
         let uncited = [0, 10, 20, 30, 1030, 2030, 3030];
         for (rule, unit, units) in [
             ("uncited-claim", "uncited-sentence", (30, 3000)),
-            ("evidence-label", "uncited-sentence", (30, 3000)),
+            (
+                "evidence-label",
+                "citing-sentence+uncited-sentence",
+                (330, 3300),
+            ),
             ("source-text-missing", "citing-sentence", (300, 300)),
         ] {
             let runs = with_uncited(three_and_three(1, 1), rule, &uncited);
@@ -2906,6 +2919,35 @@ mod tests {
     }
 
     #[test]
+    fn evidence_label_counts_cited_paragraphs_as_new_units() {
+        // Commits that add only cited paragraphs without labels: citing
+        // sentences grow, uncited ones do not, and evidence-label fires.
+        let runs = with_uncited(three_and_three(1, 1), "evidence-label", &[5; 7]);
+        let e = eval_rule(&runs, "evidence-label");
+        assert_eq!(
+            e.measure.as_deref(),
+            Some("citing-sentence+uncited-sentence")
+        );
+        assert_eq!(
+            (e.before.n, e.after.n, e.after.findings, e.after.new_units),
+            (3, 3, Some(3), Some(300))
+        );
+        // Counted in uncited sentences alone, as uncited-claim is, such
+        // intervals have no new units and drop out with their findings.
+        let runs = with_uncited(three_and_three(1, 1), "uncited-claim", &[5; 7]);
+        let e = eval_rule(&runs, "uncited-claim");
+        assert_eq!((e.measure, e.unit), (None, Some(Unit::Run)));
+        // A check that prints only one of the summed units measures nothing
+        // for the rule.
+        let mut runs = with_uncited(three_and_three(1, 1), "evidence-label", &[5; 7]);
+        for r in &mut runs {
+            r.measures.pop();
+        }
+        let e = eval_rule(&runs, "evidence-label");
+        assert_eq!((e.measure, e.unit), (None, Some(Unit::Run)));
+    }
+
+    #[test]
     fn the_unit_choice_ignores_record_order_and_keeps_keys_apart() {
         let required: BTreeSet<&str> = ["claims"].into();
         // A sentence that gained a citation moves from one unit to the other
@@ -2925,9 +2967,12 @@ mod tests {
             run(&["aa"], &["bb"], false),
             run(&["aa", "bb"], &["cc"], true),
         );
+        // Summed, the units share no key, so a sentence that moved from one
+        // to the other is not new.
         for (metric, new) in [
             ("claimcheck:uncited-claim", 1),
             ("claimcheck:source-text-missing", 1),
+            ("claimcheck:evidence-label", 1),
         ] {
             let choice = UnitChoice::of(&metric.parse().unwrap());
             let (ma, mb) = (
