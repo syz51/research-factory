@@ -598,14 +598,17 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
     let empty = commit_at(top, ceiling, "2026-09-30T00:00:00Z", "readme");
 
     // The check prints the committed f.jsonl and the git-ignored source
-    // text's measure, which only the work tree holds.
+    // text's measure, which only the work tree holds: the commits hold only
+    // the directory's .gitignore. Its version is the commit's v.txt.
     std::fs::create_dir_all(d).unwrap();
     assert!(lab(d, &["init", "--name", "demo"]).status.success());
     let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
-    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat sources/m.jsonl; exit 0\"]\nversion = [\"sh\", \"-c\", \"echo claims 1.0\"]\nuncommitted_inputs = [\"sources/m.jsonl\", \"gone\"]\n";
+    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat sources/m.jsonl; exit 0\"]\nversion = [\"sh\", \"-c\", \"cat v.txt\"]\nuncommitted_inputs = [\"sources\", \"gone\"]\n";
     std::fs::write(d.join("research.toml"), cfg).unwrap();
-    std::fs::write(d.join(".gitignore"), "sources/\n.research/\n").unwrap();
+    std::fs::write(d.join(".gitignore"), ".research/\n").unwrap();
     std::fs::create_dir_all(d.join("sources")).unwrap();
+    std::fs::write(d.join("sources/.gitignore"), "*\n!.gitignore\n").unwrap();
+    std::fs::write(d.join("v.txt"), "claims 1.0\n").unwrap();
     std::fs::write(
         d.join("sources/m.jsonl"),
         r#"{"schema":"rf.measure/1","tool":"claimcheck","unit":"citing-sentence","count":2,"keys":["00000000000000aa","00000000000000bb"]}"#,
@@ -615,10 +618,21 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
     git(top, ceiling, &["add", "-A"]);
     let first = commit_at(top, ceiling, "2026-10-01T00:00:00Z", "first");
     std::fs::write(d.join("f.jsonl"), errors(&[1])).unwrap();
+    std::fs::write(d.join("v.txt"), "claims 2.0\n").unwrap();
     git(top, ceiling, &["add", "-A"]);
     let second = commit_at(top, ceiling, "2026-10-02T12:30:00Z", "second");
     // Uncommitted text the replay must not see.
     std::fs::write(d.join("f.jsonl"), errors(&[1, 2, 3])).unwrap();
+
+    // A worktree that a killed replay left, and an unrelated one whose
+    // directory is gone for now, as on an unmounted disk.
+    let leftover = tmp.join("lab-replay-999999-1");
+    let other = ceiling.join("other");
+    for path in [&leftover, &other] {
+        let path = path.to_str().unwrap();
+        git(top, ceiling, &["worktree", "add", "--detach", "-q", path]);
+    }
+    std::fs::rename(&other, ceiling.join("moved")).unwrap();
 
     // No live run yet: a replay is not one, so no baseline can come from it.
     let out = lab_in(
@@ -636,9 +650,11 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
     assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
     let text = stdout(&out);
     assert_eq!(text.matches("replayed ").count(), 2, "{text}");
+    assert!(text.contains("read sources from the work tree"), "{text}");
     assert!(
-        text.contains("read sources/m.jsonl from the work tree"),
-        "{text}"
+        stderr(&out).contains("left by a stopped run"),
+        "{}",
+        stderr(&out)
     );
     assert!(
         stderr(&out).contains("uncommitted input `gone` is missing"),
@@ -668,7 +684,7 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
             )
         })
         .collect();
-    let inputs = serde_json::json!(["sources/m.jsonl"]);
+    let inputs = serde_json::json!(["sources"]);
     assert_eq!(
         summary,
         [
@@ -687,7 +703,7 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
                 Some(false),
                 Some(true),
                 Some(1),
-                Some("claims 1.0"),
+                Some("claims 2.0"),
                 inputs
             ),
         ]
@@ -700,31 +716,28 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
     );
 
     // Every path removes the worktree: success, a commit without the project
-    // root, and a revision that names nothing.
+    // root, and a revision that names nothing. The leftover is gone too, but
+    // the unrelated worktree stays registered.
     let worktrees = || git(top, ceiling, &["worktree", "list", "--porcelain"]);
     let tmp_entries = || std::fs::read_dir(tmp).unwrap().count();
-    assert_eq!(
-        worktrees().matches("worktree ").count(),
-        1,
-        "{}",
-        worktrees()
-    );
+    let registered = || {
+        let list = worktrees();
+        assert!(list.contains("/other\n"), "{list}");
+        list.matches("worktree ").count()
+    };
+    assert_eq!(registered(), 2);
     assert_eq!(tmp_entries(), 0);
     let out = lab_in(d, ceiling, tmp, &["check", "--at", &empty]);
     assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
     assert!(
-        stderr(&out).contains("has no `proj`, the project root"),
+        stderr(&out).contains("has no `proj`, the project root; skipped")
+            && stderr(&out).contains("no commit named holds `proj`"),
         "{}",
         stderr(&out)
     );
     let out = lab_in(d, ceiling, tmp, &["check", "--at", "no-such-rev"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
-    assert_eq!(
-        worktrees().matches("worktree ").count(),
-        1,
-        "{}",
-        worktrees()
-    );
+    assert_eq!(registered(), 2);
     assert_eq!(tmp_entries(), 0);
     // The work tree, with its uncommitted text, is untouched.
     assert_eq!(

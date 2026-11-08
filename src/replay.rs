@@ -4,10 +4,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use crate::check::{self, Run, RunHeader};
 use crate::config::{CheckSpec, Project};
+
+/// The prefix of a replay worktree's directory name, followed by the pid of
+/// the `lab` process that made it.
+const WORKTREE_PREFIX: &str = "lab-replay-";
 
 /// Runs git in `dir` with a stable message language and no hooks, since a
 /// checkout would otherwise run the repository's `post-checkout` hook.
@@ -35,13 +39,14 @@ fn git_ok(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// The commits `revs` name, oldest first within a range, without repeats:
-/// a revision is one commit, and `A..B` every commit `git rev-list` lists.
+/// a revision is one commit, and `A..B` every commit `git rev-list` lists
+/// that changed something under the project root (`root`).
 pub fn commits(root: &Path, revs: &[String]) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for rev in revs {
         let listed = if rev.contains("..") {
-            git_ok(root, &["rev-list", "--reverse", rev, "--"])?
+            git_ok(root, &["rev-list", "--reverse", rev, "--", "."])?
         } else {
             git_ok(
                 root,
@@ -54,7 +59,7 @@ pub fn commits(root: &Path, revs: &[String]) -> Result<Vec<String>, String> {
             )?
         };
         if listed.is_empty() {
-            return Err(format!("`{rev}` names no commit"));
+            return Err(format!("`{rev}` names no commit that changed the project"));
         }
         for commit in listed.lines() {
             if seen.insert(commit.to_string()) {
@@ -63,6 +68,93 @@ pub fn commits(root: &Path, revs: &[String]) -> Result<Vec<String>, String> {
         }
     }
     Ok(out)
+}
+
+/// The administrative directory git keeps for the worktree at `path`, found
+/// by the directory name, which is unique to one replay.
+fn admin_dir(repo: &Path, path: &Path) -> Option<PathBuf> {
+    let common = git_ok(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()?;
+    let name = path.file_name()?;
+    std::fs::read_dir(Path::new(&common).join("worktrees"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|admin| {
+            std::fs::read_to_string(admin.join("gitdir")).is_ok_and(|gitdir| {
+                Path::new(gitdir.trim())
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n == name)
+            })
+        })
+}
+
+/// Removes the replay worktree at `path` and its registration, and only
+/// those: unrelated worktrees whose directory is missing stay registered.
+fn remove_worktree(repo: &Path, path: &Path) {
+    let p = path.to_string_lossy().into_owned();
+    if git(repo, &["worktree", "remove", "--force", "--force", &p])
+        .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    // git refuses a half-made or vanished worktree: remove its directory and
+    // its registration directly.
+    let admin = admin_dir(repo, path);
+    if path.exists()
+        && let Err(e) = std::fs::remove_dir_all(path)
+    {
+        eprintln!(
+            "lab: could not remove the replay worktree {}: {e}",
+            path.display()
+        );
+    }
+    if let Some(admin) = admin
+        && let Err(e) = std::fs::remove_dir_all(&admin)
+    {
+        eprintln!("lab: {}: {e}", admin.display());
+    }
+}
+
+/// Whether the process `pid` is running.
+fn alive(pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Removes replay worktrees that a `lab` process killed by a signal, such as
+/// Ctrl-C, left behind: `Drop` does not run then.
+fn remove_leftovers(repo: &Path) -> Result<(), String> {
+    let list = git_ok(repo, &["worktree", "list", "--porcelain"])?;
+    for path in list.lines().filter_map(|l| l.strip_prefix("worktree ")) {
+        let path = Path::new(path);
+        let pid = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix(WORKTREE_PREFIX))
+            .and_then(|rest| rest.split_once('-'))
+            .and_then(|(pid, _)| pid.parse::<u32>().ok());
+        if let Some(pid) = pid
+            && pid != std::process::id()
+            && !alive(pid)
+        {
+            eprintln!(
+                "lab: removing the replay worktree {} left by a stopped run",
+                path.display()
+            );
+            remove_worktree(repo, path);
+        }
+    }
+    Ok(())
 }
 
 /// A temporary git worktree, removed when dropped, so it goes on every path
@@ -76,7 +168,8 @@ struct Worktree {
 impl Worktree {
     fn add(repo: &Path, commit: &str) -> Result<Self, String> {
         let stamp = jiff::Timestamp::now().as_nanosecond();
-        let path = std::env::temp_dir().join(format!("lab-replay-{}-{stamp}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("{WORKTREE_PREFIX}{}-{stamp}", std::process::id()));
         // The guard exists before git creates anything, so a half-made
         // worktree is removed too.
         let tree = Self {
@@ -94,63 +187,70 @@ impl Worktree {
 
 impl Drop for Worktree {
     fn drop(&mut self) {
-        let path = self.path.to_string_lossy().into_owned();
-        let removed = git(
-            &self.repo,
-            &["worktree", "remove", "--force", "--force", &path],
-        );
-        // git refuses a half-made worktree, so remove what is left directly.
-        if !removed.as_ref().is_ok_and(|o| o.status.success())
-            && self.path.exists()
-            && let Err(e) = std::fs::remove_dir_all(&self.path)
-        {
-            eprintln!(
-                "lab: could not remove the replay worktree {}: {e}",
-                self.path.display()
-            );
-        }
-        // Forget a registration whose directory is gone.
-        if let Err(e) = git_ok(&self.repo, &["worktree", "prune"]) {
-            eprintln!("lab: {e}");
-        }
+        remove_worktree(&self.repo, &self.path);
     }
 }
 
-/// Links each check's uncommitted inputs that the checkout lacks from the
-/// project root into `root`, the checkout's project root. Returns, per check,
-/// the inputs it reads from the work tree.
+/// Links `source` to `target` when the checkout lacks it; in a directory both
+/// have, such as one whose committed `.gitignore` or `.gitkeep` keeps it,
+/// links each entry the checkout lacks. Returns whether it linked anything.
+fn link_missing(source: &Path, target: &Path) -> Result<bool, String> {
+    let Ok(meta) = target.symlink_metadata() else {
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::os::unix::fs::symlink(source, target)
+            .map_err(|e| format!("{}: {e}", target.display()))?;
+        return Ok(true);
+    };
+    if !(meta.is_dir() && source.is_dir()) {
+        // The commit holds this file, so the check reads its copy.
+        return Ok(false);
+    }
+    let mut any = false;
+    let entries = std::fs::read_dir(source).map_err(|e| format!("{}: {e}", source.display()))?;
+    for entry in entries {
+        let name = entry
+            .map_err(|e| format!("{}: {e}", source.display()))?
+            .file_name();
+        any |= link_missing(&source.join(&name), &target.join(&name))?;
+    }
+    Ok(any)
+}
+
+/// Links each check's uncommitted inputs, or the parts of them the checkout
+/// lacks, from the project root into `root`, the checkout's project root.
+/// Returns, per check, the inputs it reads from the work tree.
 fn link_inputs(
     project: &Project,
     root: &Path,
     specs: &[&CheckSpec],
 ) -> Result<BTreeMap<String, Vec<String>>, String> {
-    let mut linked: BTreeSet<&str> = BTreeSet::new();
+    let mut done: BTreeMap<&str, bool> = BTreeMap::new();
     let mut out = BTreeMap::new();
     for spec in specs {
         let mut mine = Vec::new();
         for input in &spec.uncommitted_inputs {
-            if !linked.contains(input.as_str()) {
-                let target = root.join(input);
-                if target.symlink_metadata().is_ok() {
-                    // This commit holds the path, so the check reads its copy.
-                    continue;
+            let linked = match done.get(input.as_str()) {
+                Some(&linked) => linked,
+                None => {
+                    let source = project.root.join(input);
+                    let linked = if source.symlink_metadata().is_ok() {
+                        link_missing(&source, &root.join(input))?
+                    } else {
+                        eprintln!(
+                            "lab: check `{}`: uncommitted input `{input}` is missing from the work tree",
+                            spec.name
+                        );
+                        false
+                    };
+                    done.insert(input, linked);
+                    linked
                 }
-                let source = project.root.join(input);
-                if !source.exists() {
-                    eprintln!(
-                        "lab: check `{}`: uncommitted input `{input}` is missing from the work tree",
-                        spec.name
-                    );
-                    continue;
-                }
-                if let Some(dir) = target.parent() {
-                    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-                }
-                std::os::unix::fs::symlink(&source, &target)
-                    .map_err(|e| format!("{}: {e}", target.display()))?;
-                linked.insert(input);
+            };
+            if linked {
+                mine.push(input.clone());
             }
-            mine.push(input.clone());
         }
         if !mine.is_empty() {
             out.insert(spec.name.clone(), mine);
@@ -161,15 +261,28 @@ fn link_inputs(
 
 /// Replays each commit with the selected checks and stores its run, with that
 /// `commit`, `dirty` false, `at` the commit's committer time and `replayed`
-/// true. Checks run in the commit's copy of the project root; their programs
-/// resolve against the project root, so they are today's.
-pub fn replay(project: &Project, only: &[String], revs: &[String]) -> Result<Vec<Run>, String> {
+/// true, passing each stored run to `stored`. Checks run in the commit's copy
+/// of the project root: only their program resolves against the project root,
+/// and their versions are read there too. A commit without the project root
+/// is skipped with a note; none with it is an error.
+pub fn replay(
+    project: &Project,
+    only: &[String],
+    revs: &[String],
+    mut stored: impl FnMut(&Run),
+) -> Result<(), String> {
     let specs = check::select(project, only)?;
+    if specs.len() < project.lab.checks.len() {
+        eprintln!(
+            "lab: `lab evaluate` uses a run, replayed or not, only when every configured check \
+             that reports the metric's tool ran in it; `--only` may leave one out"
+        );
+    }
     let root = &project.root;
     let prefix = git_ok(root, &["rev-parse", "--show-prefix"])?;
     let commits = commits(root, revs)?;
-    let versions = check::versions(project, &specs);
-    let mut runs = Vec::new();
+    remove_leftovers(root)?;
+    let mut replayed = 0;
     for commit in commits {
         let seconds: i64 = git_ok(root, &["show", "-s", "--format=%ct", &commit])?
             .parse()
@@ -180,12 +293,14 @@ pub fn replay(project: &Project, only: &[String], revs: &[String]) -> Result<Vec
         let tree = Worktree::add(root, &commit)?;
         let replay_root = tree.path.join(&prefix);
         if !replay_root.is_dir() {
-            return Err(format!(
-                "commit {commit} has no `{}`, the project root",
+            eprintln!(
+                "lab: commit {commit} has no `{}`, the project root; skipped",
                 prefix.trim_end_matches('/')
-            ));
+            );
+            continue;
         }
         let linked = link_inputs(project, &replay_root, &specs)?;
+        let versions = check::versions(project, &replay_root, &specs);
         let ran = check::run_checks(project, &replay_root, &specs, &versions, &linked);
         drop(tree);
         let header = RunHeader {
@@ -196,7 +311,14 @@ pub fn replay(project: &Project, only: &[String], revs: &[String]) -> Result<Vec
             replayed: true,
             checks: Vec::new(),
         };
-        runs.push(check::store_run(project, header, ran)?);
+        stored(&check::store_run(project, header, ran)?);
+        replayed += 1;
     }
-    Ok(runs)
+    if replayed == 0 {
+        return Err(format!(
+            "no commit named holds `{}`, the project root",
+            prefix.trim_end_matches('/')
+        ));
+    }
+    Ok(())
 }

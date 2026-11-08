@@ -613,7 +613,8 @@ fn check_runs(
     // so is one across a change of a required checker's version, counted.
     let mut intervals: Vec<(bool, String, u64, u64)> = Vec::new();
     let mut version_changes = 0;
-    for pair in points.windows(2) {
+    let versions = known_versions(&points, required);
+    for (i, pair) in points.windows(2).enumerate() {
         let ((r0, m0), (r1, m1)) = (&pair[0], &pair[1]);
         let Some(side) = place(&r1.header.at) else {
             continue;
@@ -628,7 +629,11 @@ fn check_runs(
         if new_units == 0 {
             continue;
         }
-        if required.iter().any(|check| version_changed(r0, r1, check)) {
+        let (v0, v1) = (&versions[i], &versions[i + 1]);
+        if v1
+            .iter()
+            .any(|(check, v)| v0.get(check).is_some_and(|w| w != v))
+        {
             version_changes += 1;
             continue;
         }
@@ -718,17 +723,32 @@ fn check_runs(
     e
 }
 
-/// Whether `check` ran with a different known version in `r1` than in `r0`.
-/// An unknown version, as in runs stored before lab 0.9.0, changes nothing.
-fn version_changed(r0: &Run, r1: &Run, check: &str) -> bool {
-    let version = |r: &Run| {
-        r.header
-            .checks
-            .iter()
-            .find(|c| c.name == check)
-            .and_then(|c| c.version.clone())
-    };
-    matches!((version(r0), version(r1)), (Some(a), Some(b)) if a != b)
+/// At each interval end, the last known version of each required check up
+/// to it. An interval crosses a version change when a check has a known
+/// version at both ends and they differ, so an unknown version, as in runs
+/// stored before lab 0.9.0, neither forms a change nor hides one between the
+/// known versions around it.
+fn known_versions<'r>(
+    points: &[(&'r Run, Measured)],
+    required: &BTreeSet<&str>,
+) -> Vec<BTreeMap<&'r str, &'r str>> {
+    let mut known: BTreeMap<&'r str, &'r str> = BTreeMap::new();
+    points
+        .iter()
+        .map(|(run, _)| {
+            for c in run
+                .header
+                .checks
+                .iter()
+                .filter(|c| required.contains(c.name.as_str()))
+            {
+                if let Some(v) = &c.version {
+                    known.insert(c.name.as_str(), v.as_str());
+                }
+            }
+            known.clone()
+        })
+        .collect()
 }
 
 /// The units one check measured for a tool in one run, merged over its
@@ -2455,6 +2475,29 @@ mod tests {
         assert_eq!((e.before.n, e.after.n), (3, 2));
         assert_eq!(e.after.new_units, Some(200));
         assert_eq!(e.verdict, Verdict::Improved);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("1 interval(s) across a checker version change left out")
+        );
+        // An unknown version between v1 and v2 does not hide the change: it
+        // is counted in the interval that reaches v2.
+        let mut runs = three_and_three(10, 0);
+        let versions = [
+            Some("v1"),
+            Some("v1"),
+            Some("v1"),
+            Some("v1"),
+            None,
+            Some("v2"),
+            Some("v2"),
+        ];
+        for (r, v) in runs.iter_mut().zip(versions) {
+            for c in &mut r.header.checks {
+                c.version = v.map(Into::into);
+            }
+        }
+        let e = eval_min(&runs, 2);
+        assert_eq!((e.before.n, e.after.n), (3, 2));
         assert_eq!(
             e.reason.as_deref(),
             Some("1 interval(s) across a checker version change left out")

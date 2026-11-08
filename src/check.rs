@@ -144,7 +144,13 @@ impl Run {
             .unwrap_or_default()
     }
 
+    #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self, String> {
+        Ok(Self::read(path, true)?.expect("replayed runs are kept"))
+    }
+
+    /// Loads a stored run; `None` for a replayed one unless `replays`.
+    fn read(path: &Path, replays: bool) -> Result<Option<Self>, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut lines = text
             .lines()
@@ -157,6 +163,9 @@ impl Run {
             serde_json::from_str(first).map_err(|e| format!("{}:1: {e}", path.display()))?;
         if header.schema != RUN_SCHEMA {
             return Err(format!("{}:1: not a {RUN_SCHEMA} record", path.display()));
+        }
+        if header.replayed && !replays {
+            return Ok(None);
         }
         // Lines of another schema are records a later lab version added;
         // skipping them keeps a shared run directory readable.
@@ -174,12 +183,12 @@ impl Run {
                 None => return Err(format!("{}:{}: no schema", path.display(), i + 1)),
             }
         }
-        Ok(Self {
+        Ok(Some(Self {
             path: path.to_path_buf(),
             header,
             items,
             measures,
-        })
+        }))
     }
 
     fn fingerprints(&self, check: &str) -> BTreeSet<&str> {
@@ -194,13 +203,15 @@ impl Run {
 /// Stored runs of the work tree, oldest first, without replayed runs, which
 /// only `lab evaluate` reads. A missing directory means no history.
 pub fn history(project: &Project) -> Result<Vec<Run>, String> {
-    let mut runs = history_with_replays(project)?;
-    runs.retain(|r| !r.header.replayed);
-    Ok(runs)
+    load_runs(project, false)
 }
 
 /// Every stored run, replayed ones included, in the order they were stored.
 pub fn history_with_replays(project: &Project) -> Result<Vec<Run>, String> {
+    load_runs(project, true)
+}
+
+fn load_runs(project: &Project, replays: bool) -> Result<Vec<Run>, String> {
     let dir = project.checks_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -215,7 +226,14 @@ pub fn history_with_replays(project: &Project) -> Result<Vec<Run>, String> {
         }
     }
     paths.sort_by_cached_key(|p| run_order(p));
-    paths.iter().map(|p| Run::load(p)).collect()
+    let mut runs = Vec::new();
+    for path in &paths {
+        // A replayed run is left out by its header, before its lines are parsed.
+        if let Some(run) = Run::read(path, replays)? {
+            runs.push(run);
+        }
+    }
+    Ok(runs)
 }
 
 /// `<stamp>.jsonl` sorts before `<stamp>-1.jsonl`, which sorts before `<stamp>-2.jsonl`.
@@ -552,9 +570,12 @@ const MAX_VERSION_CHARS: usize = 200;
 /// How long a version command may run.
 const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Programs whose `--version` names an interpreter, not the checker it runs.
+/// Names starting with `python` count too, such as `python3.12`.
 const INTERPRETERS: &[&str] = &[
-    "sh", "bash", "zsh", "dash", "ksh", "fish", "env", "python", "python3", "uv", "uvx", "node",
-    "bun", "bunx", "deno", "npx", "perl", "ruby", "cargo",
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "env", "uv", "uvx", "pipx", "poetry", "pdm",
+    "hatch", "conda", "node", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "deno", "perl", "ruby",
+    "bundle", "cargo", "go", "java", "make", "just", "timeout", "nice", "nohup", "time", "xargs",
+    "docker", "podman",
 ];
 
 /// The command that prints a check's version: its `version`, or, when that is
@@ -566,22 +587,25 @@ fn version_command(spec: &CheckSpec) -> Option<Vec<String>> {
     }
     let program = &spec.run[0];
     let bare = Path::new(program).components().count() == 1 && !program.contains('/');
-    (bare && !INTERPRETERS.contains(&program.as_str()))
-        .then(|| vec![program.clone(), "--version".into()])
+    let interpreter = INTERPRETERS.contains(&program.as_str()) || program.starts_with("python");
+    (bare && !interpreter).then(|| vec![program.clone(), "--version".into()])
 }
 
-/// Each check's version: the first line its version command prints, from
-/// the project root. A command that fails, times out or prints no short,
-/// non-JSON line gives `None`, with a warning on stderr.
+/// Each check's version: the first line its version command prints, run in
+/// `root` (the project root, or a replayed commit's copy of it, where the
+/// check runs) with its program resolved as the check's is. A command that
+/// fails, times out or prints no short, non-JSON line gives `None`, with a
+/// warning on stderr.
 pub(crate) fn versions(
     project: &Project,
+    root: &Path,
     specs: &[&CheckSpec],
 ) -> BTreeMap<String, Option<String>> {
     specs
         .iter()
         .map(|spec| {
             let version = version_command(spec).and_then(|argv| {
-                version_of(project, &argv)
+                version_of(project, root, &argv)
                     .map_err(|e| {
                         eprintln!(
                             "lab: check `{}`: no version from `{}`: {e}; set `version` in its \
@@ -597,19 +621,28 @@ pub(crate) fn versions(
         .collect()
 }
 
-fn version_of(project: &Project, argv: &[String]) -> Result<String, String> {
+fn version_of(project: &Project, root: &Path, argv: &[String]) -> Result<String, String> {
+    use std::io::Read as _;
     use std::os::unix::process::CommandExt as _;
     use std::process::Stdio;
     let mut child = Command::new(project.resolve_program(&argv[0]))
         .args(&argv[1..])
-        .current_dir(&project.root)
+        .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("could not start: {e}"))?;
-    // A version line fits in the pipe, so reading after the exit cannot block it.
+    // A thread drains stdout, so a program that prints much never blocks on
+    // a full pipe; one whose output a background process keeps open after it
+    // exits is given up on.
+    let mut out = child.stdout.take().expect("stdout is piped");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = tx.send(out.read_to_end(&mut bytes).map(|_| bytes));
+    });
     let status = match crate::lesson_loop::wait_for(&mut child, VERSION_TIMEOUT)
         .map_err(|e| e.to_string())?
     {
@@ -618,12 +651,11 @@ fn version_of(project: &Project, argv: &[String]) -> Result<String, String> {
             return Err(format!("timed out after {} s", VERSION_TIMEOUT.as_secs()));
         }
     };
-    let mut stdout = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read as _;
-        out.read_to_string(&mut stdout)
-            .map_err(|e| format!("its output: {e}"))?;
-    }
+    let stdout = match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(Ok(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        Ok(Err(e)) => return Err(format!("its output: {e}")),
+        Err(_) => return Err("its output stayed open after it exited".into()),
+    };
     if !status.success() {
         return Err(format!("it exited with {status}"));
     }
@@ -646,7 +678,7 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         eprintln!("lab: the run records no commit: {e}");
         (None, None)
     });
-    let versions = versions(project, &specs);
+    let versions = versions(project, &project.root, &specs);
     let ran = run_checks(project, &project.root, &specs, &versions, &BTreeMap::new());
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
@@ -894,6 +926,8 @@ mod tests {
         assert_eq!(cmd(&["scripts/check.sh"], None), None);
         assert_eq!(cmd(&["/usr/local/bin/claimcheck"], None), None);
         assert_eq!(cmd(&["sh", "-c", "claimcheck check"], None), None);
+        assert_eq!(cmd(&["npm", "run", "check"], None), None);
+        assert_eq!(cmd(&["python3.12", "check.py"], None), None);
         assert_eq!(cmd(&["claimcheck"], Some(&[])), None);
         assert_eq!(
             cmd(&["sh", "-c", "x"], Some(&["x", "-V"])),
@@ -911,10 +945,16 @@ mod tests {
                 "{checks}version = [\"sh\", \"-c\", \"echo; echo '  tool 1.2  '; echo more\"]\n\
                  [[lab.checks]]\nname = \"none\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\n\
                  [[lab.checks]]\nname = \"bad\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo 2.0; exit 3\"]\n\
-                 [[lab.checks]]\nname = \"json\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo '{{}}'\"]\n"
+                 [[lab.checks]]\nname = \"json\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo '{{}}'\"]\n\
+                 [[lab.checks]]\nname = \"big\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo 4.0; yes x | head -c 300000\"]\n\
+                 [[lab.checks]]\nname = \"held\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo 5.0; (sleep 30; echo late) &\"]\n"
             ),
         );
+        let started = Instant::now();
         let report = run(&p, &[]).unwrap();
+        // Neither much output nor a background process holding it open
+        // blocks the run.
+        assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
         let versions: Vec<Option<&str>> = report
             .run
             .header
@@ -922,7 +962,10 @@ mod tests {
             .iter()
             .map(|c| c.version.as_deref())
             .collect();
-        assert_eq!(versions, [Some("tool 1.2"), None, None, None]);
+        assert_eq!(
+            versions,
+            [Some("tool 1.2"), None, None, None, Some("4.0"), None]
+        );
         let stored = std::fs::read_to_string(&report.run.path).unwrap();
         let header: serde_json::Value =
             serde_json::from_str(stored.lines().next().unwrap()).unwrap();

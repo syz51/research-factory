@@ -602,9 +602,10 @@ fn replay(
     revs: &[String],
     verbose: bool,
 ) -> Result<ExitCode, String> {
-    let runs = replay::replay(project, only, revs)?;
     let mut failed = false;
-    for run in &runs {
+    // Each run is printed as it is stored, so an error on a later commit
+    // still shows the earlier ones.
+    replay::replay(project, only, revs, |run| {
         let h = &run.header;
         let commit = h.commit.as_deref().unwrap_or("?");
         let checks: Vec<String> = h
@@ -663,7 +664,7 @@ fn replay(
             }
         }
         println!("  stored {}", run.path.display());
-    }
+    })?;
     Ok(if failed {
         ExitCode::from(1)
     } else {
