@@ -14,6 +14,57 @@ use crate::finding::{self, Finding, Severity};
 
 pub const RUN_SCHEMA: &str = "rf.labcheck/1";
 pub const ITEM_SCHEMA: &str = "rf.labcheck.item/1";
+pub const MEASURE_ITEM_SCHEMA: &str = "rf.labcheck.measure/1";
+
+/// An `rf.measure/1` record: how many units of text a checker checked, the
+/// denominator of its findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Measure {
+    pub schema: String,
+    pub tool: String,
+    /// What is counted, such as `citing-sentence`.
+    pub unit: String,
+    pub count: u64,
+    /// The sorted, distinct first 16 hex digits of the SHA-256 of each
+    /// unit's normalized text; they let lab count new units exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
+}
+
+impl Measure {
+    /// Checks a checker's `rf.measure/1` record.
+    fn parse(value: serde_json::Value) -> Result<Self, String> {
+        let m: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        if !finding::version_1(&m.schema, "rf.measure/") {
+            return Err(format!("unsupported schema `{}`", m.schema));
+        }
+        if m.tool.is_empty() || m.unit.is_empty() {
+            return Err("an rf.measure/1 record needs a tool and a unit".into());
+        }
+        if let Some(keys) = &m.keys {
+            if let Some(k) = keys.iter().find(|k| {
+                k.len() != 16 || !k.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            }) {
+                return Err(format!("key `{k}` is not 16 lowercase hex digits"));
+            }
+            if keys.windows(2).any(|w| w[0] >= w[1]) {
+                return Err("keys are not sorted and distinct".into());
+            }
+            if keys.len() as u64 > m.count {
+                return Err(format!("{} keys for a count of {}", keys.len(), m.count));
+            }
+        }
+        Ok(m)
+    }
+}
+
+/// A stored `rf.measure/1` record with the check that printed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeasureItem {
+    pub schema: String,
+    pub check: String,
+    pub measure: Measure,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckOutcome {
@@ -24,7 +75,8 @@ pub struct CheckOutcome {
     /// `ok` when the checker ran to completion (exit 0 or 1), else `failed`.
     pub status: String,
     pub findings: usize,
-    /// Non-empty stdout lines that were not `rf.finding/1` records.
+    /// Non-empty stdout lines that were neither `rf.finding/1` nor valid
+    /// `rf.measure/1` records.
     pub unparsed: usize,
     pub duration_ms: u128,
 }
@@ -66,6 +118,8 @@ pub struct Run {
     pub path: PathBuf,
     pub header: RunHeader,
     pub items: Vec<Item>,
+    /// `rf.measure/1` records the checks printed (since lab 0.8.0).
+    pub measures: Vec<MeasureItem>,
 }
 
 impl Run {
@@ -95,11 +149,15 @@ impl Run {
         // Lines of another schema are records a later lab version added;
         // skipping them keeps a shared run directory readable.
         let mut items = Vec::new();
+        let mut measures = Vec::new();
         for (i, line) in lines {
             let at = |e: serde_json::Error| format!("{}:{}: {e}", path.display(), i + 1);
             let value: serde_json::Value = serde_json::from_str(line).map_err(at)?;
             match value.get("schema").and_then(|s| s.as_str()) {
                 Some(ITEM_SCHEMA) => items.push(serde_json::from_value::<Item>(value).map_err(at)?),
+                Some(MEASURE_ITEM_SCHEMA) => {
+                    measures.push(serde_json::from_value::<MeasureItem>(value).map_err(at)?);
+                }
                 Some(_) => {}
                 None => return Err(format!("{}:{}: no schema", path.display(), i + 1)),
             }
@@ -108,6 +166,7 @@ impl Run {
             path: path.to_path_buf(),
             header,
             items,
+            measures,
         })
     }
 
@@ -153,8 +212,29 @@ fn run_order(path: &Path) -> (String, u32) {
     }
 }
 
+/// One stdout line of a checker.
+enum Line {
+    Finding(Finding),
+    Measure(Measure),
+}
+
+impl Line {
+    fn parse(line: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let measure = value
+            .get("schema")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.starts_with("rf.measure/"));
+        if measure {
+            Measure::parse(value).map(Self::Measure)
+        } else {
+            Finding::from_value(value).map(Self::Finding)
+        }
+    }
+}
+
 /// Runs one checker and parses its stdout.
-fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>) {
+fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>, Vec<Measure>) {
     let cwd = spec
         .cwd
         .as_deref()
@@ -185,19 +265,21 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>) 
                 format!("could not start `{}`: {e}", program.display()),
             );
             outcome.findings = 1;
-            return (outcome, vec![f]);
+            return (outcome, vec![f], Vec::new());
         }
     };
     outcome.exit = output.status.code();
     let mut findings = Vec::new();
+    let mut measures = Vec::new();
     let mut first_unparsed = None;
     for (i, line) in String::from_utf8_lossy(&output.stdout).lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        match Finding::parse(line) {
-            Ok(f) => findings.push(f),
+        match Line::parse(line) {
+            Ok(Line::Finding(f)) => findings.push(f),
+            Ok(Line::Measure(m)) => measures.push(m),
             Err(e) => {
                 outcome.unparsed += 1;
                 first_unparsed.get_or_insert((i + 1, e));
@@ -211,8 +293,8 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>) 
             Severity::Error,
             &spec.name,
             format!(
-                "{} stdout line(s) are not rf.finding/1 records (first: line {line}: {e}); \
-                 is the checker run with `--format jsonl`?",
+                "{} stdout line(s) are not rf.finding/1 or rf.measure/1 records \
+                 (first: line {line}: {e}); is the checker run with `--format jsonl`?",
                 outcome.unparsed
             ),
         ));
@@ -240,7 +322,11 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>) 
         ));
     }
     outcome.findings = findings.len();
-    (outcome, findings)
+    // A check that did not run to completion measured an unknown part.
+    if !outcome.ran() {
+        measures.clear();
+    }
+    (outcome, findings, measures)
 }
 
 /// Fingerprints that appeared or disappeared relative to the baseline.
@@ -374,8 +460,14 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     });
     let mut outcomes = Vec::new();
     let mut items = Vec::new();
+    let mut measures = Vec::new();
     for spec in specs {
-        let (outcome, findings) = run_one(project, spec);
+        let (outcome, findings, measured) = run_one(project, spec);
+        measures.extend(measured.into_iter().map(|measure| MeasureItem {
+            schema: MEASURE_ITEM_SCHEMA.into(),
+            check: spec.name.clone(),
+            measure,
+        }));
         let fps = finding::fingerprints(&findings);
         items.extend(findings.into_iter().zip(fps).map(|(f, fingerprint)| Item {
             schema: ITEM_SCHEMA.into(),
@@ -385,6 +477,13 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         }));
         outcomes.push(outcome);
     }
+    // Only a clean run can end an interval, so only it keeps the keys,
+    // which can be most of a run file.
+    if dirty != Some(false) {
+        for m in &mut measures {
+            m.measure.keys = None;
+        }
+    }
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,
@@ -392,11 +491,12 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         dirty,
         checks: outcomes,
     };
-    let path = store(project, &header, &items)?;
+    let path = store(project, &header, &items, &measures)?;
     let run = Run {
         path,
         header,
         items,
+        measures,
     };
     let mut delta = BTreeMap::new();
     for outcome in run.header.checks.iter().filter(|c| c.ran()) {
@@ -528,7 +628,12 @@ impl Baseline {
 }
 
 /// Writes the run atomically under a new, sortable file name.
-fn store(project: &Project, header: &RunHeader, items: &[Item]) -> Result<PathBuf, String> {
+fn store(
+    project: &Project,
+    header: &RunHeader,
+    items: &[Item],
+    measures: &[MeasureItem],
+) -> Result<PathBuf, String> {
     let dir = project.checks_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let stamp = jiff::Timestamp::now()
@@ -537,6 +642,9 @@ fn store(project: &Project, header: &RunHeader, items: &[Item]) -> Result<PathBu
     let mut body = serde_json::to_string(header).map_err(|e| e.to_string())? + "\n";
     for item in items {
         body += &(serde_json::to_string(item).map_err(|e| e.to_string())? + "\n");
+    }
+    for m in measures {
+        body += &(serde_json::to_string(m).map_err(|e| e.to_string())? + "\n");
     }
     let tmp = dir.join(format!(".{stamp}-{}.tmp", std::process::id()));
     let mut file = std::fs::File::create(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
@@ -590,6 +698,7 @@ mod tests {
         )
         .unwrap();
         let run = Run::load(&path).unwrap();
+        assert!(run.measures.is_empty());
         assert_eq!((run.header.commit, run.header.dirty), (None, None));
     }
 
@@ -600,7 +709,7 @@ mod tests {
         let item = format!(
             r#"{{"schema":"{ITEM_SCHEMA}","check":"c","fingerprint":"f","finding":{FINDING_A}}}"#
         );
-        let later = r#"{"schema":"rf.labcheck.measure/1","check":"c","count":3}"#;
+        let later = r#"{"schema":"rf.labcheck.later/1","check":"c","count":3}"#;
         let header = r#"{"schema":"rf.labcheck/1","at":"2026-11-01T00:00:00Z","checks":[]}"#;
         std::fs::write(&path, [header, &item, later].join("\n")).unwrap();
         assert_eq!(Run::load(&path).unwrap().items.len(), 1);
@@ -670,6 +779,63 @@ mod tests {
                 .any(|i| i.finding.rule == "check-output-invalid"
                     && i.finding.severity == Severity::Error)
         );
+    }
+
+    #[test]
+    fn measures_are_stored_and_loaded_not_counted_as_unparsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let measure = r#"{"schema":"rf.measure/1","tool":"t","unit":"sentence","count":3,"keys":["00000000000000aa","00000000000000bb"]}"#;
+        let p = project(
+            dir.path(),
+            &emit_script(dir.path(), &[FINDING_B, measure], 0, false),
+        );
+        let report = run(&p, &[]).unwrap();
+        let c = &report.run.header.checks[0];
+        assert_eq!((c.ran(), c.unparsed, c.findings), (true, 0, 1));
+        let stored = Run::load(&report.run.path).unwrap();
+        assert_eq!(stored.measures.len(), 1);
+        let m = &stored.measures[0];
+        assert_eq!(
+            (m.schema.as_str(), m.check.as_str()),
+            (MEASURE_ITEM_SCHEMA, "x")
+        );
+        assert_eq!((m.measure.unit.as_str(), m.measure.count), ("sentence", 3));
+        assert_eq!(m.measure.keys, None);
+        // The temporary directory is not a git repository, so the run is
+        // not clean and keeps no keys.
+        assert_eq!(report.run.header.dirty, None);
+    }
+
+    #[test]
+    fn a_failed_check_stores_no_measure() {
+        let dir = tempfile::tempdir().unwrap();
+        let measure = r#"{"schema":"rf.measure/1","tool":"t","unit":"sentence","count":3}"#;
+        let p = project(
+            dir.path(),
+            &emit_script(dir.path(), &[FINDING_B, measure], 2, false),
+        );
+        let report = run(&p, &[]).unwrap();
+        assert!(!report.run.header.checks[0].ran());
+        assert!(report.run.measures.is_empty());
+    }
+
+    #[test]
+    fn invalid_measures_fail_the_check() {
+        for bad in [
+            r#"{"schema":"rf.measure/1","tool":"t","unit":"","count":1}"#,
+            r#"{"schema":"rf.measure/2","tool":"t","unit":"u","count":1}"#,
+            r#"{"schema":"rf.measure/1","tool":"t","unit":"u","count":1,"keys":["XYZ"]}"#,
+            r#"{"schema":"rf.measure/1","tool":"t","unit":"u","count":2,"keys":["00000000000000bb","00000000000000aa"]}"#,
+            r#"{"schema":"rf.measure/1","tool":"t","unit":"u","count":1,"keys":["00000000000000aa","00000000000000bb"]}"#,
+            r#"{"schema":"rf.measure/1","tool":"t","unit":"u","count":-1}"#,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = project(dir.path(), &emit_script(dir.path(), &[bad], 0, false));
+            let report = run(&p, &[]).unwrap();
+            let c = &report.run.header.checks[0];
+            assert_eq!((c.ran(), c.unparsed), (false, 1), "{bad}");
+            assert!(report.run.measures.is_empty(), "{bad}");
+        }
     }
 
     #[test]

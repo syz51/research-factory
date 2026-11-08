@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::evaluate::{Evaluation, Method, Verdict, p_label, p_value};
+use crate::evaluate::{Evaluation, Method, Unit, Verdict, p_label, p_value};
 use crate::lessons::{Lesson, Status};
 
 pub const SCHEMA: &str = "rf.signal/1";
@@ -111,7 +111,10 @@ fn measured(e: &Evaluation) -> String {
             "stratified permutation test that moves whole session groups (the subagents below one root session, or one session) between the sides, on the share of sessions with the finding or a field's rank within its stratum, strata = (source, role); lower is better"
         }
         Some(Method::Descriptive) => {
-            "findings introduced since the first complete check run after adoption, or since the run of the last `lab lesson review`, keyed by message and data, without a verdict (runs repeat the same backlog, so they are not independent)"
+            "findings introduced since the first complete check run after adoption, or since the run of the last `lab lesson review`, keyed by message and data, without a verdict (runs repeat the same backlog, so they are not independent; a verdict needs measured intervals)"
+        }
+        Some(Method::ConditionalBinomial) => {
+            "exact conditional binomial test on findings introduced per new unit of checked text, over intervals between clean check runs on consecutive commits; given the total introduced, the after side's count is binomial with its share of the new units"
         }
         None => "none",
     };
@@ -127,6 +130,10 @@ fn measured(e: &Evaluation) -> String {
             Some(sessions) => format!("{sessions} sessions in {} {unit}s", s.n),
             None => format!("{} {unit}s", s.n),
         };
+        if let (Some(f), Some(u)) = (s.findings, s.new_units) {
+            let measure = e.measure.as_deref().unwrap_or("unit");
+            return format!("{count}: {f} introduced in {u} new {measure}s");
+        }
         match (s.positives, s.rate, s.median, s.mean) {
             (Some(p), Some(r), _, _) => format!("{p} of {count} ({:.1}%)", r * 100.0),
             (_, _, Some(med), Some(mean)) if s.sessions.is_some() => {
@@ -190,6 +197,15 @@ fn summary(e: &Evaluation) -> String {
         e.after.n
     );
     match (e.before.rate, e.after.rate) {
+        (Some(b), Some(a)) if e.unit == Some(Unit::Interval) => {
+            let _ = write!(
+                s,
+                ", {:.2} → {:.2} per 100 new {}s",
+                b * 100.0,
+                a * 100.0,
+                e.measure.as_deref().unwrap_or("unit")
+            );
+        }
         (Some(b), Some(a)) => {
             let _ = write!(s, ", {:.1}% → {:.1}% of sessions", b * 100.0, a * 100.0);
         }
@@ -204,6 +220,7 @@ fn summary(e: &Evaluation) -> String {
         Some(Method::VanElteren) => "van Elteren",
         Some(Method::Descriptive) => "descriptive",
         Some(Method::ClusterPermutation) => "cluster permutation",
+        Some(Method::ConditionalBinomial) => "conditional binomial",
         None => "",
     };
     match (e.verdict, e.p_lower, e.p_upper) {
@@ -263,13 +280,21 @@ pub fn derive(
         );
         let file = l.path.strip_prefix(root).unwrap_or(&l.path).display();
         let note = summary(e).replace('"', "'");
+        let open = e.introduced.as_ref().filter(|i| i.count > 0);
         let (kind, t, act) = match (e.verdict, l.meta.status) {
             (Verdict::Improved, Status::Adopted) => (
                 "lesson-verifiable",
                 format!("Verify lesson {id}: its metric improved"),
                 format!(
                     "Its metric is lower since adoption. Read the numbers, then mark it verified:\n\n\
-                     ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n"
+                     ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n{}",
+                    open.map(|i| format!(
+                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n",
+                        i.count,
+                        i.since_text(e.adopted.as_deref()),
+                        e.introduced_lines().join("\n")
+                    ))
+                    .unwrap_or_default()
                 ),
             ),
             (Verdict::Worse, Status::Adopted | Status::Verified) => (
@@ -292,13 +317,18 @@ pub fn derive(
                      ```sh\nlab lesson set {id} verified --force --note \"<the evidence>\"\nlab lesson set {id} retired --note \"<why>\"\n```\n"
                 ),
             ),
-            // Check runs get no verdict: their introduced findings are
-            // what to act on.
-            (Verdict::Collecting, Status::Adopted | Status::Verified)
-                if e.method == Some(Method::Descriptive)
-                    && e.introduced.as_ref().is_some_and(|i| i.count > 0) =>
-            {
-                let i = e.introduced.as_ref().expect("checked above");
+            // Any other check-run lesson with introduced findings, verified
+            // ones included: the findings are what to act on.
+            (verdict, Status::Adopted | Status::Verified) if open.is_some() => {
+                let i = open.expect("checked above");
+                let next = match verdict {
+                    Verdict::Inconclusive => "The measured intervals show no change in either direction yet; to verify the lesson sooner, cite other evidence with `--force`.".to_string(),
+                    Verdict::Improved => "Its metric is lower since adoption; keep it that way.".to_string(),
+                    _ => format!(
+                        "A verdict needs {} measured intervals on each side of adoption (`lab evaluate` says how many there are); to verify the lesson sooner, cite other evidence with `--force`.",
+                        e.min_sessions
+                    ),
+                };
                 (
                     "lesson-introduced",
                     if i.reviewed.is_some() {
@@ -310,8 +340,7 @@ pub fn derive(
                         "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
                          Fix each, or show that the finding is wrong. When `lab evaluate` lists only findings that cannot be fixed, such as those in append-only files, record their review with their count:\n\n\
                          ```sh\nlab lesson review {id} --count <n> --note \"<what was found>\"\n```\n\n\
-                         If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
-                         Check runs give no verdict; to verify the lesson, cite other evidence with `--force`.\n",
+                         If such findings keep appearing, revise the rule in `{file}` or retire the lesson. {next}\n",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
                         e.introduced_lines().join("\n")
@@ -320,13 +349,13 @@ pub fn derive(
             }
             _ => continue,
         };
-        let detail = match (e.verdict, &e.introduced) {
+        let detail = match (e.verdict, open) {
             (Verdict::Unmeasurable, _) => {
                 format!("unmeasurable: {}", e.reason.as_deref().unwrap_or(""))
             }
             // A changed set of introduced findings, or a review that moved the
             // run they are counted from, is news; their subjects alone are not.
-            (Verdict::Collecting, Some(i)) => {
+            (_, Some(i)) if kind == "lesson-introduced" => {
                 let keys: Vec<String> = i
                     .findings
                     .iter()
@@ -643,6 +672,7 @@ mod tests {
                     more: 0,
                 }],
             }),
+            measure: None,
         };
         let one = |e: Evaluation| {
             derive(
@@ -668,6 +698,60 @@ mod tests {
             "{}",
             after.body
         );
+
+        // Measured intervals: an inconclusive verdict still lists the
+        // introduced findings; an improved one asks for verification.
+        let interval = |verdict: Verdict| {
+            let side = |findings: u64| Side {
+                n: 10,
+                rate: Some(findings as f64 / 300.0),
+                findings: Some(findings),
+                new_units: Some(300),
+                ..Side::default()
+            };
+            Evaluation {
+                unit: Some(Unit::Interval),
+                method: Some(Method::ConditionalBinomial),
+                measure: Some("citing-sentence".into()),
+                verdict,
+                before: side(30),
+                after: side(3),
+                p_lower: Some(0.000_001),
+                p_upper: Some(1.0),
+                ..eval("2026-11-01T00:00:00Z", None)
+            }
+        };
+        let s = one(interval(Verdict::Inconclusive));
+        assert_eq!(s.kind, "lesson-introduced");
+        assert_eq!(s.detail, before.detail);
+        let s = one(interval(Verdict::Improved));
+        assert_eq!(s.kind, "lesson-verifiable");
+        for text in [
+            "exact conditional binomial test",
+            "Before adoption (intervals in the 90 days before 2026-11-01): 10 intervals: 30 introduced in 300 new citing-sentences",
+            "After adoption: 10 intervals: 3 introduced in 300 new citing-sentences",
+        ] {
+            assert!(s.body.contains(text), "{text:?} in\n{}", s.body);
+        }
+        assert!(s.body.contains("were still introduced since"), "{}", s.body);
+        // A verified lesson keeps the introduced signal after an improvement.
+        let mut verified = lesson.clone();
+        verified.meta.status = Status::Verified;
+        let s = derive(
+            "p",
+            Path::new("."),
+            "now",
+            std::slice::from_ref(&verified),
+            &[interval(Verdict::Improved)],
+            &Uncovered::default(),
+            &[],
+        )
+        .remove(0);
+        assert_eq!(
+            (s.kind.as_str(), s.detail),
+            ("lesson-introduced", before.detail)
+        );
+        assert!(s.body.contains("keep it that way"), "{}", s.body);
     }
 
     #[test]

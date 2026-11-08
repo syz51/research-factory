@@ -191,11 +191,23 @@ fn age(d: jiff::SignedDuration) -> String {
 /// `status` and `reviewed` are the lesson's current ones, which can be newer
 /// than the loop's record.
 fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> String {
-    let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     let unit = e.unit.map_or("session", |u| u.as_str());
-    // Check runs get no verdict; their introduced findings are the news.
-    if e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting {
-        return match &e.introduced {
+    // A check-run lesson: its verdict, if any, and its introduced findings,
+    // which are the news while there is no verdict.
+    if e.is_check_run() && e.verdict != Verdict::Unmeasurable {
+        let min = e.min_sessions;
+        let verdict = match e.verdict {
+            Verdict::Collecting if e.method == Some(Method::ConditionalBinomial) => {
+                let mut s = format!("collecting {}/{min} {unit}s after", e.after.n);
+                if e.before.n < min {
+                    let _ = write!(s, ", {}/{min} before", e.before.n);
+                }
+                s
+            }
+            Verdict::Collecting => String::new(),
+            _ => verdict_text(e, status),
+        };
+        let introduced = match &e.introduced {
             Some(i) if reviewed.is_some() && i.reviewed.as_deref() != reviewed => {
                 "reviewed after the last `lab loop`; `lab evaluate` gives the current count".into()
             }
@@ -210,7 +222,20 @@ fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> Strin
             ),
             None => "no complete check run since adoption".into(),
         };
+        return if verdict.is_empty() {
+            introduced
+        } else {
+            format!("{verdict}; {introduced}")
+        };
     }
+    verdict_text(e, status)
+}
+
+/// A verdict as the brief shows it for agent sessions, and for a check-run
+/// lesson with a verdict.
+fn verdict_text(e: &Evaluation, status: Status) -> String {
+    let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
+    let unit = e.unit.map_or("session", |u| u.as_str());
     match e.verdict {
         Verdict::Collecting => {
             let mut s = format!("collecting {}/{}", e.after.n, e.min_sessions);
@@ -506,6 +531,7 @@ mod tests {
                     finding: Finding::lab(rule, Severity::Error, "s", "m".into()),
                 })
                 .collect(),
+            measures: Vec::new(),
         }
     }
 
@@ -590,7 +616,49 @@ mod tests {
             alpha: 0.05,
             baseline_days: 90,
             introduced: None,
+            measure: None,
         }
+    }
+
+    #[test]
+    fn a_check_run_lesson_shows_its_intervals_with_the_introduced_findings() {
+        use crate::evaluate::{Introduced, Method, Unit};
+        let mut e = evaluation("c", Verdict::Collecting);
+        e.unit = Some(Unit::Interval);
+        e.method = Some(Method::ConditionalBinomial);
+        e.before.n = 0;
+        e.introduced = Some(Introduced {
+            since: "2026-11-01T00:00:00Z".into(),
+            since_date: Some("2026-11-01".into()),
+            latest: "2026-11-05T00:00:00Z".into(),
+            latest_run: "r5.jsonl".into(),
+            reviewed: None,
+            count: 2,
+            findings: vec![],
+        });
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "collecting 3/10 intervals after, 0/10 before; 2 introduced since the first \
+             complete run after adoption, on 2026-11-01 → review (`lab evaluate`)"
+        );
+        e.verdict = Verdict::Inconclusive;
+        assert!(
+            verdict_line(&e, Status::Adopted, None)
+                .starts_with("inconclusive p=0.004; 2 introduced")
+        );
+        e.verdict = Verdict::Improved;
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "improved p=0.004 → verify; 2 introduced since the first complete run after \
+             adoption, on 2026-11-01 → review (`lab evaluate`)"
+        );
+        // Without a run since adoption the brief still names intervals.
+        e.verdict = Verdict::Collecting;
+        e.introduced = None;
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "collecting 3/10 intervals after, 0/10 before; no complete check run since adoption"
+        );
     }
 
     #[test]
