@@ -666,7 +666,9 @@ fn check_runs(
     // change of a check's unit is left out, since its counts do not compare,
     // and so is one across a change of a required checker's version; both
     // are counted.
-    let mut intervals: Vec<(bool, String, u64, u64)> = Vec::new();
+    // The last field indexes `versions` at the interval's later end, whose
+    // known versions hold for both ends, since the interval crosses no change.
+    let mut intervals: Vec<(bool, String, u64, u64, usize)> = Vec::new();
     let mut version_changes = 0;
     let mut unit_changes = 0;
     let versions = known_versions(points.iter().map(|(run, _)| *run), required);
@@ -698,7 +700,7 @@ fn check_runs(
             &metric_items(r1, metric, required),
         );
         let unit = unit.into_iter().collect::<Vec<_>>().join("+");
-        intervals.push((side, unit, found, new_units));
+        intervals.push((side, unit, found, new_units, i + 1));
     }
     if version_changes > 0 {
         let _ = write!(
@@ -713,8 +715,10 @@ fn check_runs(
         );
     }
     // Only the latest unit counts: a checker that renamed or changed its
-    // unit gets a baseline again from runs in the new unit.
-    let Some(unit) = intervals.last().map(|i| i.1.clone()) else {
+    // unit gets a baseline again from runs in the new unit. So does the
+    // latest checker version: an update can change what a unit counts under
+    // the same name. A version unknown on either side matches.
+    let Some((unit, latest)) = intervals.last().map(|i| (i.1.clone(), &versions[i.4])) else {
         let why = if e.introduced.is_some() {
             "descriptive: no measured interval yet"
         } else {
@@ -729,9 +733,17 @@ fn check_runs(
     };
     let mut sides = [IntervalSide::default(); 2];
     let mut other_unit = 0;
-    for (side, u, found, new_units) in &intervals {
+    let mut other_version = 0;
+    for (side, u, found, new_units, at) in &intervals {
         if *u != unit {
             other_unit += 1;
+            continue;
+        }
+        if versions[*at]
+            .iter()
+            .any(|(check, v)| latest.get(check).is_some_and(|w| w != v))
+        {
+            other_version += 1;
             continue;
         }
         let s = &mut sides[usize::from(*side)];
@@ -743,6 +755,15 @@ fn check_runs(
         let _ = write!(
             note,
             "; {other_unit} interval(s) measured in another unit than `{unit}` left out"
+        );
+    }
+    if other_version > 0 {
+        let named: Vec<String> = latest.iter().map(|(c, v)| format!("{c} {v}")).collect();
+        let _ = write!(
+            note,
+            "; {other_version} interval(s) measured with another checker version than the \
+             latest ({}) left out (`lab check --at` can replay their commits with it)",
+            named.join(", ")
         );
     }
     let [b, a] = sides;
@@ -2863,55 +2884,37 @@ mod tests {
         assert!(i.version_changed.is_empty());
     }
 
+    fn with_versions(versions: [Option<&str>; 7]) -> Vec<Run> {
+        let mut runs = three_and_three(10, 0);
+        for (r, v) in runs.iter_mut().zip(versions) {
+            for c in &mut r.header.checks {
+                c.version = v.map(Into::into);
+            }
+        }
+        runs
+    }
+
     #[test]
     fn intervals_across_a_checker_version_change_are_left_out() {
-        let mut runs = three_and_three(10, 0);
         // c0 and c1 were stored before versions were recorded: unknown, so
-        // they still form intervals with each other and with v1.
-        let versions = [
-            None,
-            None,
-            Some("v1"),
-            Some("v1"),
-            Some("v2"),
-            Some("v2"),
-            Some("v2"),
-        ];
-        for (r, v) in runs.iter_mut().zip(versions) {
-            for c in &mut r.header.checks {
-                c.version = v.map(Into::into);
-            }
-        }
-        let e = eval_min(&runs, 2);
-        assert_eq!((e.before.n, e.after.n), (3, 2));
+        // they form an interval with each other and with v1.
+        let v = |s| Some(s);
+        let runs = with_versions([None, None, v("v1"), v("v1"), v("v2"), v("v2"), v("v2")]);
+        let e = eval_min(&runs, 1);
         assert_eq!(e.after.new_units, Some(200));
-        assert_eq!(e.verdict, Verdict::Improved);
-        assert_eq!(
-            e.reason.as_deref(),
-            Some("1 interval(s) across a checker version change left out")
-        );
+        assert_eq!((e.before.n, e.after.n), (1, 2));
         // An unknown version between v1 and v2 does not hide the change: it
         // is counted in the interval that reaches v2.
-        let mut runs = three_and_three(10, 0);
-        let versions = [
-            Some("v1"),
-            Some("v1"),
-            Some("v1"),
-            Some("v1"),
-            None,
-            Some("v2"),
-            Some("v2"),
-        ];
-        for (r, v) in runs.iter_mut().zip(versions) {
-            for c in &mut r.header.checks {
-                c.version = v.map(Into::into);
-            }
-        }
-        let e = eval_min(&runs, 2);
-        assert_eq!((e.before.n, e.after.n), (3, 2));
-        assert_eq!(
-            e.reason.as_deref(),
-            Some("1 interval(s) across a checker version change left out")
+        let runs = with_versions([v("v1"), v("v1"), v("v1"), v("v1"), None, v("v2"), v("v2")]);
+        let e = eval_min(&runs, 1);
+        assert_eq!((e.before.n, e.after.n), (0, 1));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .contains("; 1 interval(s) across a checker version change left out;"),
+            "{:?}",
+            e.reason
         );
         // A change in a check the metric does not need changes nothing.
         let mut runs = three_and_three(10, 0);
@@ -2921,6 +2924,45 @@ mod tests {
             other.version = Some(format!("v{i}"));
             r.header.checks.push(other);
         }
+        let e = eval_min(&runs, 3);
+        assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
+    }
+
+    #[test]
+    fn only_intervals_in_the_latest_checker_version_count() {
+        // v1 before adoption, v2 after it: an update that may have changed
+        // what the unit counts under its name. The v1 rate does not pool
+        // with the v2 one, so the v2 side has no baseline yet.
+        let v = |s| Some(s);
+        let runs = with_versions([
+            v("v1"),
+            v("v1"),
+            v("v1"),
+            v("v1"),
+            v("v2"),
+            v("v2"),
+            v("v2"),
+        ]);
+        let e = eval_min(&runs, 2);
+        assert_eq!((e.before.n, e.after.n), (0, 2));
+        assert_eq!(e.verdict, Verdict::Collecting);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "no baseline: 0 of 2 measured intervals before adoption, 2 of 2 after; the rate \
+                 after adoption has nothing to compare with yet (`lab check --at` can replay \
+                 commits before adoption); 1 interval(s) across a checker version change left \
+                 out; 3 interval(s) measured with another checker version than the latest \
+                 (claims v2) left out (`lab check --at` can replay their commits with it)"
+            )
+        );
+        // Replayed with v2, the baseline is back.
+        let runs = with_versions([v("v2"); 7]);
+        let e = eval_min(&runs, 2);
+        assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
+        // An unknown version matches any: runs stored before lab 0.9.0 still
+        // count beside the latest version.
+        let runs = with_versions([None, None, None, None, None, None, v("v2")]);
         let e = eval_min(&runs, 3);
         assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
     }
