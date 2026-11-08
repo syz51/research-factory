@@ -228,7 +228,8 @@ impl Introduced {
             .collect();
         Some(format!(
             "the checker version changed since that run ({}), so the update alone can add or \
-             remove findings",
+             remove findings; `lab check --at` on that run's commit shows what today's checker \
+             finds there",
             changes.join(", ")
         ))
     }
@@ -548,6 +549,8 @@ fn check_runs(
     let mut reviewed_run: Option<&Run> = None;
     let mut last: Option<&Run> = None;
     let mut observed = false;
+    // Complete live runs, in stored order, for `introduced`'s version check.
+    let mut history: Vec<&Run> = Vec::new();
     // Clean runs in which every required check measured the lesson's unit,
     // with what they measured: the last one on each commit.
     let choice = UnitChoice::of(metric);
@@ -565,6 +568,9 @@ fn check_runs(
         // today's checkers: an interval end, but not a run of the history
         // that `introduced` and the means describe.
         let live = !run.header.replayed;
+        if live {
+            history.push(run);
+        }
         match place(&run.header.at).filter(|_| live) {
             Some(true) => {
                 after.push(count as f64);
@@ -613,7 +619,7 @@ fn check_runs(
         found.latest = last.header.at.clone();
         found.latest_run = last.name();
         found.reviewed = reviewed_run.map(Run::name);
-        found.version_changed = version_changed(first, last, required);
+        found.version_changed = version_changed(&history, first, last, required);
         e.introduced = Some(found);
     }
 
@@ -635,7 +641,7 @@ fn check_runs(
     let mut intervals: Vec<(bool, String, u64, u64)> = Vec::new();
     let mut version_changes = 0;
     let mut unit_changes = 0;
-    let versions = known_versions(&points, required);
+    let versions = known_versions(points.iter().map(|(run, _)| *run), required);
     for (i, pair) in points.windows(2).enumerate() {
         let ((r0, m0), (r1, m1)) = (&pair[0], &pair[1]);
         let Some(side) = place(&r1.header.at) else {
@@ -750,28 +756,34 @@ fn check_runs(
     e
 }
 
-/// The required checks whose known versions differ between `since` and
-/// `latest`, with `[old, new]`.
+/// The required checks whose version changed between `since` and `latest`,
+/// two of `history` (complete live runs in stored order), with `[old, new]`.
+/// As for intervals, each run takes the last known version up to it; a check
+/// with none known at `since` takes the first one known after it, since a
+/// change can show only from there. A check known on one side only is no
+/// change.
 fn version_changed(
+    history: &[&Run],
     since: &Run,
     latest: &Run,
     required: &BTreeSet<&str>,
 ) -> BTreeMap<String, [String; 2]> {
-    let version = |run: &Run, name: &str| {
-        run.header
-            .checks
-            .iter()
-            .find(|c| c.name == name)
-            .and_then(|c| c.version.clone())
+    let at = |run: &Run| history.iter().position(|r| std::ptr::eq(*r, run));
+    let (Some(i), Some(j)) = (at(since), at(latest)) else {
+        return BTreeMap::new();
     };
-    required
-        .iter()
-        .filter_map(
-            |&name| match (version(since, name), version(latest, name)) {
-                (Some(old), Some(new)) if old != new => Some((name.to_string(), [old, new])),
-                _ => None,
-            },
-        )
+    let known = known_versions(history[..=j].iter().copied(), required);
+    let mut old = known[i].clone();
+    for later in &known[i..=j] {
+        for (check, v) in later {
+            old.entry(check).or_insert(v);
+        }
+    }
+    old.into_iter()
+        .filter_map(|(check, old)| {
+            let new = known[j][check];
+            (old != new).then(|| (check.to_string(), [old.to_string(), new.to_string()]))
+        })
         .collect()
 }
 
@@ -781,13 +793,12 @@ fn version_changed(
 /// stored before lab 0.9.0, neither forms a change nor hides one between the
 /// known versions around it.
 fn known_versions<'r>(
-    points: &[(&'r Run, Measured)],
+    runs: impl IntoIterator<Item = &'r Run>,
     required: &BTreeSet<&str>,
 ) -> Vec<BTreeMap<&'r str, &'r str>> {
     let mut known: BTreeMap<&'r str, &'r str> = BTreeMap::new();
-    points
-        .iter()
-        .map(|(run, _)| {
+    runs.into_iter()
+        .map(|run| {
             for c in run
                 .header
                 .checks
@@ -2630,6 +2641,48 @@ mod tests {
                     .contains("version_changed")
             );
         }
+        // Runs stored before lab 0.9.0 have no version: a change recorded
+        // between `since` and the latest run still shows.
+        let mut runs = three_and_three(1, 1);
+        for (r, v) in [(5, "v1"), (6, "v2")] {
+            for c in &mut runs[r].header.checks {
+                c.version = Some(v.into());
+            }
+        }
+        let e = eval_min(&runs, 3);
+        assert_eq!(
+            e.introduced.unwrap().version_changed,
+            BTreeMap::from([("claims".to_string(), ["v1".to_string(), "v2".to_string()])])
+        );
+        // After a review, versions count from the reviewed run.
+        let mut runs = three_and_three(1, 1);
+        for (r, v) in [(4, "v1"), (5, "v2"), (6, "v2")] {
+            for c in &mut runs[r].header.checks {
+                c.version = Some(v.into());
+            }
+        }
+        let flagged = eval_min(&runs, 3).introduced.unwrap();
+        assert_eq!(flagged.version_changed.len(), 1);
+        let mut l = lesson("claimcheck:source-text-missing", "2026-11-03");
+        l.meta.reviewed = Some(runs[5].name());
+        let cfg = EvaluateConfig {
+            min_sessions: 3,
+            ..EvaluateConfig::default()
+        };
+        let e = evaluate(
+            &l,
+            &Inputs {
+                runs: &runs,
+                configured: &["claims"],
+                findings: &[],
+                sessions: Err("none"),
+                settings: &cfg,
+            },
+            utc_date,
+        );
+        let i = e.introduced.unwrap();
+        assert_eq!(i.reviewed.as_deref(), Some(runs[5].name().as_str()));
+        assert!(i.version_changed.is_empty());
     }
 
     #[test]

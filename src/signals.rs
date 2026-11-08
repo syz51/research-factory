@@ -97,6 +97,18 @@ fn command(argv: &[String]) -> String {
 }
 
 /// The numbers of an evaluation, as Markdown lines.
+/// A paragraph naming a checker version change between the runs introduced
+/// findings are counted from, or nothing.
+fn version_note(i: &crate::evaluate::Introduced) -> String {
+    i.version_text().map_or_else(String::new, |v| {
+        format!(
+            "\nNote: {v}. Fix the findings that new text caused; `lab lesson review` records \
+             all listed findings at once, so run it only when every remaining one comes from \
+             the update or cannot be fixed.\n\n"
+        )
+    })
+}
+
 fn measured(e: &Evaluation) -> String {
     let mut out = String::new();
     let unit = e.unit.map_or("observation", |u| u.as_str());
@@ -289,10 +301,11 @@ pub fn derive(
                     "Its metric is lower since adoption. Read the numbers, then mark it verified:\n\n\
                      ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n{}",
                     open.map(|i| format!(
-                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n",
+                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n{}",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
-                        e.introduced_lines().join("\n")
+                        e.introduced_lines().join("\n"),
+                        version_note(i)
                     ))
                     .unwrap_or_default()
                 ),
@@ -344,13 +357,7 @@ pub fn derive(
                         i.count,
                         i.since_text(e.adopted.as_deref()),
                         e.introduced_lines().join("\n"),
-                        i.version_text().map_or_else(String::new, |v| {
-                            format!(
-                                "Note: {v}. Check whether these findings come from the update; \
-                                 if they do and cannot be fixed, record their review with \
-                                 `lab lesson review`.\n\n"
-                            )
-                        })
+                        version_note(i)
                     ),
                 )
             }
@@ -368,7 +375,21 @@ pub fn derive(
                     .iter()
                     .map(|f| format!("+{} {}", f.added, f.message))
                     .collect();
-                format!("introduced since {}: {}", i.since, keys.join("; "))
+                let versions: Vec<String> = i
+                    .version_changed
+                    .iter()
+                    .map(|(check, [old, new])| format!("{check} {old}→{new}"))
+                    .collect();
+                let versions = if versions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (checker {})", versions.join(", "))
+                };
+                format!(
+                    "introduced since {}{versions}: {}",
+                    i.since,
+                    keys.join("; ")
+                )
             }
             (v, _) => v.as_str().to_string(),
         };
@@ -714,11 +735,13 @@ mod tests {
         }
         let s = one(changed);
         assert_eq!(s.kind, "lesson-introduced");
+        // The change alone is news: it changes the detail.
+        assert_ne!(s.detail, before.detail);
         assert!(
             s.body.contains(
                 "Note: the checker version changed since that run (claims v1 → v2), so the \
-                 update alone can add or remove findings."
-            ),
+                 update alone can add or remove findings"
+            ) && s.body.contains("records all listed findings at once"),
             "{}",
             s.body
         );
