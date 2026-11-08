@@ -143,8 +143,8 @@ fn measured(e: &Evaluation) -> String {
             None => format!("{} {unit}s", s.n),
         };
         if let (Some(f), Some(u)) = (s.findings, s.new_units) {
-            let measure = e.measure.as_deref().unwrap_or("unit");
-            return format!("{count}: {f} introduced in {u} new {measure}s");
+            let measure = e.measure_plural();
+            return format!("{count}: {f} introduced in {u} new {measure}");
         }
         match (s.positives, s.rate, s.median, s.mean) {
             (Some(p), Some(r), _, _) => format!("{p} of {count} ({:.1}%)", r * 100.0),
@@ -212,10 +212,10 @@ fn summary(e: &Evaluation) -> String {
         (Some(b), Some(a)) if e.unit == Some(Unit::Interval) => {
             let _ = write!(
                 s,
-                ", {:.2} → {:.2} per 100 new {}s",
+                ", {:.2} → {:.2} per 100 new {}",
                 b * 100.0,
                 a * 100.0,
-                e.measure.as_deref().unwrap_or("unit")
+                e.measure_plural()
             );
         }
         (Some(b), Some(a)) => {
