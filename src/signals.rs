@@ -670,6 +670,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_uncovered_rules_signal_says_why_findings_were_not_grouped() {
+        let candidate = Candidate {
+            tool: "agentprof".into(),
+            rule: "reread-file".into(),
+            severity: "warn".into(),
+            count: "3 distinct finding(s)".into(),
+            sample: vec!["claude:a".into()],
+        };
+        let body = |ungrouped: Option<&str>| {
+            let uncovered = Uncovered {
+                candidates: vec![candidate.clone()],
+                ungrouped: ungrouped.map(Into::into),
+            };
+            derive("p", Path::new("."), "now", &[], &[], &uncovered, &[])
+                .remove(0)
+                .body
+        };
+        let noted = body(Some("sessions file unreadable"));
+        assert!(
+            noted.contains("`agentprof:reread-file`: 3 distinct finding(s); e.g. claude:a")
+                && noted.matches("Note: sessions file unreadable.").count() == 1,
+            "{noted}"
+        );
+        assert!(!body(None).contains("Note:"));
+    }
+
     fn t(h: i64) -> jiff::Timestamp {
         jiff::Timestamp::from_second(1_800_000_000 + h * 3600).unwrap()
     }

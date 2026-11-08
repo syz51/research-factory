@@ -256,7 +256,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let lessons = lessons::load(&project.lessons_dir())?;
             let runs = check::history(&project)?;
             let agent = agent_findings(&project, None)?;
-            let (groups, ungrouped) = session_groups(&agent_sessions(&project, &agent), &agent);
+            let (groups, ungrouped) = session_groups(&agent, || {
+                agent_sessions(&project, &agent).map(|s| retro::SessionGroups::new(&s))
+            });
             let rec = retro::recurrences(&runs, &agent.findings, groups.as_ref());
             let n = retro::candidates(&rec, &lessons, project.lab.recurrence).len();
             for note in [&agent.note, &ungrouped].into_iter().flatten() {
@@ -567,6 +569,9 @@ struct AgentFiles {
     path: Option<PathBuf>,
     /// Why the configured findings file was not read.
     note: Option<String>,
+    /// Whether the file was named on the command line, which makes its
+    /// sibling `sessions.jsonl` its sessions file.
+    explicit: bool,
 }
 
 /// Agent findings from `explicit` (must exist) or `[lab] agent_findings` (may
@@ -580,6 +585,7 @@ fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFil
                 findings: Vec::new(),
                 path: None,
                 note: None,
+                explicit: false,
             });
         }
     };
@@ -591,18 +597,24 @@ fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFil
                 path.display()
             )),
             path: Some(path),
+            explicit: false,
         });
     }
     Ok(AgentFiles {
         findings: retro::read_findings(&path)?,
         path: Some(path),
         note: None,
+        explicit: required,
     })
 }
 
-/// The agent sessions that measure agent-rule lessons, or why they are unavailable.
+/// The agent sessions that measure agent-rule lessons, or why they are
+/// unavailable: the sibling `sessions.jsonl` of a findings file named on the
+/// command line, else `[lab] agent_sessions`, else the configured findings
+/// file's sibling.
 fn agent_sessions(project: &Project, agent: &AgentFiles) -> Result<Vec<retro::Session>, String> {
     let path = match (&project.lab.agent_sessions, &agent.path) {
+        (_, Some(findings)) if agent.explicit => findings.with_file_name("sessions.jsonl"),
         (Some(p), _) => project.path(p),
         (None, Some(findings)) => findings.with_file_name("sessions.jsonl"),
         (None, None) => return Err("no [lab] agent_findings or agent_sessions configured".into()),
@@ -610,15 +622,18 @@ fn agent_sessions(project: &Project, agent: &AgentFiles) -> Result<Vec<retro::Se
     retro::read_sessions(&path)
 }
 
-/// The session groups `lab retro` counts agent findings in; without them, a
-/// note saying why agent findings count one per distinct finding.
+/// The session groups `lab retro` counts agent findings in, read only when
+/// there are agent findings; without them, a note saying why agent findings
+/// count once per distinct finding.
 fn session_groups(
-    sessions: &Result<Vec<retro::Session>, String>,
     agent: &AgentFiles,
+    sessions: impl FnOnce() -> Result<retro::SessionGroups, String>,
 ) -> (Option<retro::SessionGroups>, Option<String>) {
-    match sessions {
-        Ok(s) => (Some(retro::SessionGroups::new(s)), None),
-        Err(_) if agent.findings.is_empty() => (None, None),
+    if agent.findings.is_empty() {
+        return (None, None);
+    }
+    match sessions() {
+        Ok(groups) => (Some(groups), None),
         Err(why) => (
             None,
             Some(format!(
@@ -683,7 +698,9 @@ fn retro_cmd(
         .filter(|r| since.is_none_or(|s| project.date_of(&r.header.at).is_ok_and(|d| d >= s)))
         .collect();
     let agent = agent_findings(project, path)?;
-    let (groups, ungrouped) = session_groups(&agent_sessions(project, &agent), &agent);
+    let (groups, ungrouped) = session_groups(&agent, || {
+        agent_sessions(project, &agent).map(|s| retro::SessionGroups::new(&s))
+    });
     for note in [&agent.note, &ungrouped].into_iter().flatten() {
         println!("{note}");
     }
@@ -799,7 +816,13 @@ fn analyse(project: &Project) -> Result<lesson_loop::Analysis, String> {
     let lessons = lessons::load(&project.lessons_dir())?;
     let evidence = Evidence::load(project)?;
     let evaluations = evidence.active(&lessons);
-    let (groups, ungrouped) = session_groups(&evidence.sessions, &evidence.agent);
+    let (groups, ungrouped) = session_groups(&evidence.agent, || {
+        evidence
+            .sessions
+            .as_deref()
+            .map(retro::SessionGroups::new)
+            .map_err(Clone::clone)
+    });
     let rec = retro::recurrences(&evidence.runs, &evidence.agent.findings, groups.as_ref());
     let candidates = retro::candidates(&rec, &lessons, project.lab.recurrence)
         .into_iter()

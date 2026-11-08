@@ -191,19 +191,42 @@ fn retro_counts_agent_findings_once_per_session_group() {
         session("c", "\"b\""),
     ];
     std::fs::write(d.join("agent/sessions.jsonl"), sessions.join("\n")).unwrap();
-    let retro = || {
-        let out = lab(d, &["retro", "--agent-findings", "agent/findings.jsonl"]);
-        assert!(out.status.success(), "{}", stderr(&out));
-        stdout(&out)
+    let template = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    let config = |extra: &str| {
+        let cfg = template.replace(
+            "# agent_findings = \".research/agentprof/findings.jsonl\"",
+            &format!("agent_findings = \"agent/findings.jsonl\"\n{extra}"),
+        );
+        std::fs::write(d.join("research.toml"), cfg).unwrap();
     };
-    let grouped = retro();
+    let run = |args: &[&str]| {
+        let out = lab(d, args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        (stdout(&out), stderr(&out))
+    };
+    let explicit = ["retro", "--agent-findings", "agent/findings.jsonl"];
+    let none = "0 recurring rule(s) without a lesson";
+
+    config("");
+    let (grouped, _) = run(&["retro"]);
     assert!(
-        grouped.contains("0 recurring rule(s) without a lesson"),
+        grouped.contains(none),
         "three subagents of one root are one recurrence: {grouped}"
     );
+    let (brief, _) = run(&["brief"]);
+    assert!(!brief.contains("recurring finding rule(s)"), "{brief}");
+
+    // A configured sessions file that is missing leaves the brief ungrouped,
+    // but a findings file named on the command line uses its own sessions.
+    config("agent_sessions = \"nowhere.jsonl\"");
+    let (brief, note) = run(&["brief"]);
+    assert!(brief.contains("1 recurring finding rule(s)"), "{brief}");
+    assert!(note.contains("not once per session group"), "{note}");
+    let (grouped, _) = run(&explicit);
+    assert!(grouped.contains(none), "{grouped}");
 
     std::fs::remove_file(d.join("agent/sessions.jsonl")).unwrap();
-    let ungrouped = retro();
+    let (ungrouped, _) = run(&explicit);
     assert!(
         ungrouped.contains("not once per session group: sessions file unreadable"),
         "{ungrouped}"
@@ -214,8 +237,19 @@ fn retro_counts_agent_findings_once_per_session_group() {
     );
 }
 
-/// Runs `lab check` and returns the header of the run it stored.
-fn check_header(d: &Path) -> serde_json::Value {
+/// Isolates git from the user's configuration and environment, and stops
+/// repository discovery at `ceiling`.
+fn isolated<'a>(cmd: &'a mut Command, ceiling: &Path) -> &'a mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+}
+
+/// Runs `lab check` in `d` and returns the header of the run it stored.
+fn check_header(d: &Path, ceiling: &Path) -> serde_json::Value {
     let dir = d.join(".research/lab/checks");
     let runs = || -> std::collections::BTreeSet<std::path::PathBuf> {
         std::fs::read_dir(&dir)
@@ -223,7 +257,11 @@ fn check_header(d: &Path) -> serde_json::Value {
             .unwrap_or_default()
     };
     let before = runs();
-    let out = lab(d, &["check"]);
+    let out = isolated(&mut Command::new(env!("CARGO_BIN_EXE_lab")), ceiling)
+        .arg("check")
+        .current_dir(d)
+        .output()
+        .expect("run lab");
     assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
     let new: Vec<_> = runs().difference(&before).cloned().collect();
     assert_eq!(new.len(), 1, "{new:?}");
@@ -231,8 +269,8 @@ fn check_header(d: &Path) -> serde_json::Value {
     serde_json::from_str(text.lines().next().unwrap()).unwrap()
 }
 
-fn git(d: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
+fn git(d: &Path, ceiling: &Path, args: &[&str]) -> String {
+    let out = isolated(&mut Command::new("git"), ceiling)
         .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
         .args(args)
         .current_dir(d)
@@ -245,27 +283,44 @@ fn git(d: &Path, args: &[&str]) -> String {
 #[test]
 fn check_runs_record_the_commit_and_a_dirty_work_tree() {
     let dir = tempfile::tempdir().unwrap();
-    let d = dir.path();
+    // Git does not look for a repository in the ceiling directory or above it.
+    let ceiling = dir.path();
+    let top = &ceiling.join("repo");
+    let d = &top.join("proj");
+    std::fs::create_dir_all(d).unwrap();
     project(d);
     std::fs::write(d.join("f.jsonl"), "").unwrap();
-    let outside = check_header(d);
+    let outside = check_header(d, ceiling);
     assert!(
         outside["commit"].is_null() && outside["dirty"].is_null(),
         "{outside}"
     );
 
-    git(d, &["init", "-q"]);
-    git(d, &["add", "-A"]);
-    git(d, &["commit", "-qm", "init"]);
-    let head = git(d, &["rev-parse", "HEAD"]);
-    // Runs stored after the commit are untracked but lab's own state, not a change.
-    check_header(d);
-    let clean = check_header(d);
+    git(top, ceiling, &["init", "-q"]);
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "init"]);
+    let head = git(top, ceiling, &["rev-parse", "HEAD"]);
+    // Runs stored after the commit are untracked but in the state directory,
+    // not checked text.
+    check_header(d, ceiling);
+    let clean = check_header(d, ceiling);
     assert_eq!(clean["commit"], head.as_str());
     assert_eq!(clean["dirty"], false, "{clean}");
 
+    std::fs::write(d.join("new.md"), "untracked text").unwrap();
+    assert_eq!(check_header(d, ceiling)["dirty"], true, "an untracked file");
+    std::fs::remove_file(d.join("new.md")).unwrap();
     std::fs::write(d.join("f.jsonl"), "\n").unwrap();
-    assert_eq!(check_header(d)["dirty"], true);
+    assert_eq!(check_header(d, ceiling)["dirty"], true, "a tracked change");
+
+    // An ignored project root lists no changes, but no commit holds its files.
+    git(top, ceiling, &["checkout", "-q", "--", "proj"]);
+    std::fs::write(top.join(".gitignore"), "proj/\n").unwrap();
+    git(top, ceiling, &["rm", "-rq", "--cached", "proj"]);
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "ignore"]);
+    let ignored = check_header(d, ceiling);
+    assert_eq!(ignored["dirty"], true, "{ignored}");
 }
 
 #[test]
