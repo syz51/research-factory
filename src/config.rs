@@ -312,6 +312,17 @@ pub struct CheckSpec {
     /// Working directory relative to the project root (default: the root).
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Program and arguments whose first stdout line is the checker's
+    /// version, recorded in each run; `[]` records none. Default:
+    /// `<program> --version` for a program named without a directory part
+    /// that is not an interpreter such as `sh`.
+    #[serde(default)]
+    pub version: Option<Vec<String>>,
+    /// Paths relative to the project root that the check reads but no commit
+    /// holds, such as git-ignored source texts. `lab check --at` links them
+    /// from the current work tree into a replayed commit and records them.
+    #[serde(default)]
+    pub uncommitted_inputs: Vec<String>,
 }
 
 impl Project {
@@ -370,6 +381,19 @@ impl Project {
             }
             if c.run.is_empty() {
                 return Err(format!("[lab] check `{}` needs a non-empty `run`", c.name));
+            }
+            if let Some(p) = c.uncommitted_inputs.iter().find(|p| {
+                let path = Path::new(p);
+                path.components().next().is_none()
+                    || !path
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_)))
+            }) {
+                return Err(format!(
+                    "[lab] check `{}`: uncommitted input `{p}` must be a relative path below \
+                     the project root, without `..`",
+                    c.name
+                ));
             }
         }
         let e = &raw.lab.evaluate;
@@ -519,6 +543,20 @@ mod tests {
         .unwrap();
         let err = Project::discover(dir.path(), None).unwrap_err();
         assert!(err.contains("two checks are named `x`"), "{err}");
+        for input in ["../up", "/abs", "", "a/../b", "./a"] {
+            std::fs::write(
+                &cfg,
+                format!(
+                    "[[lab.checks]]\nname = \"x\"\nrun = [\"a\"]\nuncommitted_inputs = [\"{input}\"]\n"
+                ),
+            )
+            .unwrap();
+            let err = Project::discover(dir.path(), None).unwrap_err();
+            assert!(
+                err.contains("relative path below the project root"),
+                "{input}: {err}"
+            );
+        }
         for bad in [
             "[lab.evaluate]\nmin_session = 3\n",
             "[lab.evaluate]\nalpha = 1.5\n",
