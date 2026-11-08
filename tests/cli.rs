@@ -214,6 +214,60 @@ fn retro_counts_agent_findings_once_per_session_group() {
     );
 }
 
+/// Runs `lab check` and returns the header of the run it stored.
+fn check_header(d: &Path) -> serde_json::Value {
+    let dir = d.join(".research/lab/checks");
+    let runs = || -> std::collections::BTreeSet<std::path::PathBuf> {
+        std::fs::read_dir(&dir)
+            .map(|r| r.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default()
+    };
+    let before = runs();
+    let out = lab(d, &["check"]);
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    let new: Vec<_> = runs().difference(&before).cloned().collect();
+    assert_eq!(new.len(), 1, "{new:?}");
+    let text = std::fs::read_to_string(&new[0]).unwrap();
+    serde_json::from_str(text.lines().next().unwrap()).unwrap()
+}
+
+fn git(d: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .current_dir(d)
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?}: {}", stderr(&out));
+    stdout(&out).trim().to_string()
+}
+
+#[test]
+fn check_runs_record_the_commit_and_a_dirty_work_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    project(d);
+    std::fs::write(d.join("f.jsonl"), "").unwrap();
+    let outside = check_header(d);
+    assert!(
+        outside["commit"].is_null() && outside["dirty"].is_null(),
+        "{outside}"
+    );
+
+    git(d, &["init", "-q"]);
+    git(d, &["add", "-A"]);
+    git(d, &["commit", "-qm", "init"]);
+    let head = git(d, &["rev-parse", "HEAD"]);
+    // Runs stored after the commit are untracked but lab's own state, not a change.
+    check_header(d);
+    let clean = check_header(d);
+    assert_eq!(clean["commit"], head.as_str());
+    assert_eq!(clean["dirty"], false, "{clean}");
+
+    std::fs::write(d.join("f.jsonl"), "\n").unwrap();
+    assert_eq!(check_header(d)["dirty"], true);
+}
+
 #[test]
 fn a_bare_relative_config_works() {
     let dir = tempfile::tempdir().unwrap();

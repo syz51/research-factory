@@ -481,6 +481,8 @@ mod tests {
             header: RunHeader {
                 schema: "rf.labcheck/1".into(),
                 at: at.into(),
+                commit: None,
+                dirty: None,
                 checks: checks
                     .iter()
                     .map(|(name, status)| CheckOutcome {

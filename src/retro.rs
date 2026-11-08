@@ -331,6 +331,8 @@ mod tests {
             header: RunHeader {
                 schema: RUN_SCHEMA.into(),
                 at: at.into(),
+                commit: None,
+                dirty: None,
                 checks: outcomes,
             },
             items,

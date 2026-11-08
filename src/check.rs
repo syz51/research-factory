@@ -39,6 +39,16 @@ impl CheckOutcome {
 pub struct RunHeader {
     pub schema: String,
     pub at: String,
+    /// The `HEAD` commit of the git repository holding the project root when
+    /// the run started; `None` outside git, before the first commit, and in
+    /// runs stored before lab 0.7.0.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Whether files under the project root differed from `commit` (tracked
+    /// changes or untracked files, leaving out lab's own stored runs), since
+    /// checks read the work tree; `None` when `commit` is.
+    #[serde(default)]
+    pub dirty: Option<bool>,
     pub checks: Vec<CheckOutcome>,
 }
 
@@ -241,6 +251,35 @@ pub struct Report {
     pub delta: BTreeMap<String, Option<Delta>>,
 }
 
+/// The `HEAD` commit of the git repository holding the project root, and
+/// whether the files under the root differ from it, leaving out lab's own
+/// stored runs; `(None, None)` when git is missing, the root is not in a
+/// repository, or the repository has no commit yet.
+fn git_state(project: &Project) -> (Option<String>, Option<bool>) {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&project.root)
+            .output()
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let Some(commit) = git(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) else {
+        return (None, None);
+    };
+    let exclude = project
+        .checks_dir()
+        .strip_prefix(&project.root)
+        .ok()
+        .map(|p| format!(":(exclude,literal){}", p.display()));
+    let mut args = vec!["status", "--porcelain", "--", "."];
+    args.extend(exclude.as_deref());
+    let dirty = git(&args).map(|s| !s.trim().is_empty());
+    (Some(commit.trim().to_string()), dirty)
+}
+
 /// The configured checks named by `--only` (all when empty); every name must exist.
 pub fn select<'a>(project: &'a Project, only: &[String]) -> Result<Vec<&'a CheckSpec>, String> {
     if project.lab.checks.is_empty() {
@@ -266,6 +305,7 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let specs = select(project, only)?;
     let baseline = Baseline::load(project)?;
     let at = finding::now();
+    let (commit, dirty) = git_state(project);
     let mut outcomes = Vec::new();
     let mut items = Vec::new();
     for spec in specs {
@@ -282,6 +322,8 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,
+        commit,
+        dirty,
         checks: outcomes,
     };
     let path = store(project, &header, &items)?;
@@ -470,6 +512,19 @@ mod tests {
     fn project(dir: &Path, checks: &str) -> Project {
         std::fs::write(dir.join("research.toml"), checks).unwrap();
         Project::discover(dir, None).unwrap()
+    }
+
+    #[test]
+    fn runs_stored_before_the_commit_fields_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"schema":"rf.labcheck/1","at":"2026-11-01T00:00:00Z","checks":[]}"#,
+        )
+        .unwrap();
+        let run = Run::load(&path).unwrap();
+        assert_eq!((run.header.commit, run.header.dirty), (None, None));
     }
 
     const FINDING_A: &str = r#"{"schema":"rf.finding/1","tool":"t","rule":"r","severity":"error","subject":"a","message":"m"}"#;
