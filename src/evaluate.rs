@@ -603,7 +603,7 @@ fn check_runs(
         .into_iter()
         .map(|i| {
             let run = &inputs.runs[i];
-            (run, measured(run, &metric.tool, required))
+            (run, measured(run, metric, required))
         })
         .collect();
     let min = inputs.settings.min_sessions;
@@ -619,9 +619,7 @@ fn check_runs(
         let Some(side) = place(&r1.header.at) else {
             continue;
         };
-        let same_unit = m1
-            .iter()
-            .all(|(check, u)| u.unit.is_some() && m0[check].unit == u.unit);
+        let same_unit = m1.iter().all(|(check, u)| m0[check].unit == u.unit);
         if !same_unit {
             continue;
         }
@@ -637,7 +635,7 @@ fn check_runs(
             version_changes += 1;
             continue;
         }
-        let unit: BTreeSet<&str> = m1.values().filter_map(|u| u.unit).collect();
+        let unit: BTreeSet<&str> = m1.values().map(|u| u.unit).collect();
         let found = introduced_count(
             &metric_items(r0, metric, required),
             &metric_items(r1, metric, required),
@@ -751,12 +749,20 @@ fn known_versions<'r>(
         .collect()
 }
 
-/// The units one check measured for a tool in one run, merged over its
-/// `rf.measure/1` records.
+/// The unit a check-run lesson counts when its check prints several, by the
+/// metric's tool and rule: rules that fire on text without a citation count
+/// uncited sentences, since their new text adds no citing sentence. Other
+/// rules count the first unit the check printed.
+const RULE_UNITS: &[(&str, &str, &str)] = &[
+    ("claimcheck", "uncited-claim", "uncited-sentence"),
+    ("claimcheck", "evidence-label", "uncited-sentence"),
+];
+
+/// The units one check measured for a tool in one run, in the unit the
+/// metric counts, merged over the `rf.measure/1` records in that unit.
 #[derive(Debug)]
 struct Units<'r> {
-    /// `None` when the records name more than one unit.
-    unit: Option<&'r str>,
+    unit: &'r str,
     count: u64,
     /// `None` when a record has no keys.
     keys: Option<BTreeSet<&'r str>>,
@@ -765,24 +771,36 @@ struct Units<'r> {
 /// Per required check, its units.
 type Measured<'r> = BTreeMap<&'r str, Units<'r>>;
 
-/// What each required check measured for `tool` in `run`. A check that
-/// measured nothing is missing.
-fn measured<'r>(run: &'r Run, tool: &str, required: &BTreeSet<&str>) -> Measured<'r> {
-    let mut out: Measured = BTreeMap::new();
-    for m in run
+/// What each required check measured for `metric`'s tool in `run`, in the
+/// unit `RULE_UNITS` gives its rule when the check printed it, otherwise the
+/// first unit the check printed. A check that measured nothing is missing.
+fn measured<'r>(run: &'r Run, metric: &Metric, required: &BTreeSet<&str>) -> Measured<'r> {
+    let preferred = RULE_UNITS
+        .iter()
+        .find(|(tool, rule, _)| *tool == metric.tool && *rule == metric.rule)
+        .map(|&(_, _, unit)| unit);
+    let records: Vec<_> = run
         .measures
         .iter()
-        .filter(|m| m.measure.tool == tool && required.contains(m.check.as_str()))
+        .filter(|m| m.measure.tool == metric.tool && required.contains(m.check.as_str()))
+        .collect();
+    let mut units: BTreeMap<&str, &str> = BTreeMap::new();
+    for m in &records {
+        let unit = units.entry(m.check.as_str()).or_insert(&m.measure.unit);
+        if preferred == Some(m.measure.unit.as_str()) {
+            *unit = &m.measure.unit;
+        }
+    }
+    let mut out: Measured = BTreeMap::new();
+    for m in records
+        .into_iter()
+        .filter(|m| units[m.check.as_str()] == m.measure.unit)
     {
-        let unit = m.measure.unit.as_str();
         let u = out.entry(m.check.as_str()).or_insert(Units {
-            unit: Some(unit),
+            unit: &m.measure.unit,
             count: 0,
             keys: Some(BTreeSet::new()),
         });
-        if u.unit != Some(unit) {
-            u.unit = None;
-        }
         u.count += m.measure.count;
         match (&mut u.keys, &m.measure.keys) {
             (Some(keys), Some(more)) => keys.extend(more.iter().map(String::as_str)),
@@ -2572,18 +2590,20 @@ mod tests {
             r
         };
         let required: BTreeSet<&str> = ["claims"].into();
+        let metric: Metric = "claimcheck:source-text-missing".parse().unwrap();
         let (a, b) = (run(&["aa", "bb"]), run(&["aa", "cc"]));
         let (ma, mb) = (
-            measured(&a, "claimcheck", &required),
-            measured(&b, "claimcheck", &required),
+            measured(&a, &metric, &required),
+            measured(&b, &metric, &required),
         );
         assert_eq!(new_units(&ma, &mb), 1);
         // Without keys on both sides, only the count's increase is new.
         let mut c = run(&["aa", "cc"]);
         c.measures[0].measure.keys = None;
-        let mc = measured(&c, "claimcheck", &required);
+        let mc = measured(&c, &metric, &required);
         assert_eq!(new_units(&ma, &mc), 0);
-        assert!(measured(&c, "othertool", &required).is_empty());
+        let other: Metric = "othertool:x".parse().unwrap();
+        assert!(measured(&c, &other, &required).is_empty());
     }
 
     #[test]
@@ -2606,11 +2626,84 @@ mod tests {
                 ),
             "{reason}"
         );
-        // A check measuring two units in one run ends no interval.
-        let mut runs = three_and_three(1, 1);
-        runs[6].measures.push(measure_item("sentence", 1, None));
-        let e = eval_min(&runs, 3);
-        assert_eq!((e.before.n, e.after.n), (3, 2));
+    }
+
+    /// `runs` with every finding under `rule` and, after each run's
+    /// `citing-sentence` record, an `uncited-sentence` one counting `uncited`.
+    fn with_uncited(mut runs: Vec<Run>, rule: &str, uncited: &[u64]) -> Vec<Run> {
+        for (r, &n) in runs.iter_mut().zip(uncited) {
+            for item in &mut r.items {
+                item.finding.rule = rule.into();
+            }
+            r.measures.push(measure_item("uncited-sentence", n, None));
+        }
+        runs
+    }
+
+    fn eval_rule(runs: &[Run], rule: &str) -> Evaluation {
+        let cfg = EvaluateConfig {
+            min_sessions: 3,
+            ..EvaluateConfig::default()
+        };
+        evaluate(
+            &lesson(&format!("claimcheck:{rule}"), "2026-11-03"),
+            &Inputs {
+                runs,
+                configured: &["claims"],
+                findings: &[],
+                sessions: Err("none"),
+                settings: &cfg,
+            },
+            utc_date,
+        )
+    }
+
+    #[test]
+    fn the_metric_rule_picks_the_unit_when_a_check_prints_several() {
+        // Citing sentences grow by 100 a run; uncited ones by 10 before
+        // adoption and 1000 after.
+        let uncited = [0, 10, 20, 30, 1030, 2030, 3030];
+        for (rule, unit, units) in [
+            ("uncited-claim", "uncited-sentence", (30, 3000)),
+            ("evidence-label", "uncited-sentence", (30, 3000)),
+            ("source-text-missing", "citing-sentence", (300, 300)),
+        ] {
+            let runs = with_uncited(three_and_three(1, 1), rule, &uncited);
+            let e = eval_rule(&runs, rule);
+            assert_eq!(e.measure.as_deref(), Some(unit), "{rule}");
+            assert_eq!(
+                (e.before.n, e.after.n, e.before.new_units, e.after.new_units),
+                (3, 3, Some(units.0), Some(units.1)),
+                "{rule}"
+            );
+        }
+        // Runs from before the second unit, with only `citing-sentence`,
+        // still form intervals for any rule.
+        let runs: Vec<Run> = three_and_three(1, 1)
+            .into_iter()
+            .map(|mut r| {
+                for item in &mut r.items {
+                    item.finding.rule = "uncited-claim".into();
+                }
+                r
+            })
+            .collect();
+        let e = eval_rule(&runs, "uncited-claim");
+        assert_eq!(
+            (e.measure.as_deref(), e.before.n, e.after.n),
+            (Some("citing-sentence"), 3, 3)
+        );
+        // A switch to the rule's unit starts a new baseline: the intervals
+        // in the older unit are left out.
+        let mut runs = with_uncited(three_and_three(1, 1), "uncited-claim", &uncited);
+        for r in &mut runs[..3] {
+            r.measures.pop();
+        }
+        let e = eval_rule(&runs, "uncited-claim");
+        assert_eq!(
+            (e.measure.as_deref(), e.before.n, e.after.n),
+            (Some("uncited-sentence"), 0, 3)
+        );
     }
 
     #[test]

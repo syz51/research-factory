@@ -1,6 +1,6 @@
 [package]
 name = "research-factory"
-version = "0.9.1"
+version = "0.9.2"
 edition = "2024"
 rust-version = "1.99"
 description = "lab: quality gate, lessons ledger and retrospectives for agent-driven research projects"
