@@ -70,33 +70,66 @@ pub fn commits(root: &Path, revs: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// The committer times, as RFC 3339 UTC timestamps the way a replay dates
-/// its runs, of the commits on any branch, tag or remote-tracking branch, or
-/// at `HEAD`, that changed something under the project root (`root`).
-/// `None` when git history cannot be read: git missing, no repository, a
-/// repository without commits, or git failing.
-pub fn commit_times(root: &Path) -> Option<Vec<String>> {
-    let listed = git_ok(
-        root,
-        &[
-            "log",
-            "--format=%ct",
-            "--branches",
-            "--tags",
-            "--remotes",
-            "HEAD",
-            "--",
-            ".",
-        ],
-    )
-    .ok()?;
-    listed
-        .lines()
-        .map(|line| {
-            let seconds = line.parse::<i64>().ok()?;
-            Some(jiff::Timestamp::from_second(seconds).ok()?.to_string())
-        })
-        .collect()
+/// A commit's time as a replay dates its run: its committer time, `%ct`.
+fn committed_at(commit: &str, seconds: &str) -> Result<jiff::Timestamp, String> {
+    seconds
+        .parse::<i64>()
+        .map_err(|e| e.to_string())
+        .and_then(|s| jiff::Timestamp::from_second(s).map_err(|e| e.to_string()))
+        .map_err(|e| format!("commit {commit}: its time `{seconds}`: {e}"))
+}
+
+/// The committer times of every commit a replay can check that changed
+/// something under the project root (`root`): reachable from any ref or
+/// reflog entry. `None` when git history cannot be read, or is incomplete
+/// in a shallow clone; a failure other than git missing or no repository is
+/// reported on stderr.
+pub fn commit_times(root: &Path) -> Option<Vec<jiff::Timestamp>> {
+    let read = || -> Result<Option<Vec<jiff::Timestamp>>, String> {
+        let shallow = match git(root, &["rev-parse", "--is-shallow-repository"]) {
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim() == "true"
+            }
+            // No git, or no repository: nothing to report.
+            Err(_) => return Ok(None),
+            Ok(out) if String::from_utf8_lossy(&out.stderr).contains("not a git repository") => {
+                return Ok(None);
+            }
+            Ok(out) => return Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+        };
+        if shallow {
+            eprintln!(
+                "lab: a shallow clone does not hold every commit before adoption; \
+                 `git fetch --unshallow` lets `lab evaluate` see them"
+            );
+            return Ok(None);
+        }
+        // `rev-list` prints no signatures, whatever `log.showSignature` says.
+        let listed = git_ok(
+            root,
+            &[
+                "rev-list",
+                "--all",
+                "--reflog",
+                "--format=%H %ct",
+                "--",
+                ".",
+            ],
+        )?;
+        listed
+            .lines()
+            .filter(|l| !l.starts_with("commit "))
+            .map(|l| {
+                let (commit, seconds) = l.split_once(' ').unwrap_or((l, ""));
+                committed_at(commit, seconds)
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
+    };
+    read().unwrap_or_else(|e| {
+        eprintln!("lab: could not read the git history, so the replay advice stays: {e}");
+        None
+    })
 }
 
 /// The administrative directory git keeps for the worktree at `path`, found
@@ -313,12 +346,8 @@ pub fn replay(
     remove_leftovers(root)?;
     let mut replayed = 0;
     for commit in commits {
-        let seconds: i64 = git_ok(root, &["show", "-s", "--format=%ct", &commit])?
-            .parse()
-            .map_err(|e| format!("commit {commit}: its time: {e}"))?;
-        let at = jiff::Timestamp::from_second(seconds)
-            .map_err(|e| format!("commit {commit}: its time: {e}"))?
-            .to_string();
+        let seconds = git_ok(root, &["show", "-s", "--format=%ct", &commit])?;
+        let at = committed_at(&commit, &seconds)?.to_string();
         let tree = Worktree::add(root, &commit)?;
         let replay_root = tree.path.join(&prefix);
         if !replay_root.is_dir() {

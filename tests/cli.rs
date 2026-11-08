@@ -656,18 +656,57 @@ fn evaluate_says_when_no_commit_predates_adoption() {
     );
     assert!(!reason.contains("lab check --at"), "{reason}");
 
-    // A commit ten days before adoption is in the window: a replay of it
-    // can supply a baseline.
+    // Ten days before adoption is in the window. A commit then outside the
+    // project does not count; one on another branch does.
     let ago = jiff::Timestamp::now()
         .checked_sub(jiff::SignedDuration::from_hours(240))
         .unwrap()
         .to_string();
+    std::fs::write(top.join("README"), "another project").unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    commit_at(top, ceiling, &ago, "outside");
+    let reason = evaluation();
+    assert!(reason.ends_with("so no replay can supply one"), "{reason}");
+    git(top, ceiling, &["switch", "-q", "-c", "side"]);
     std::fs::write(d.join("notes.md"), "older text").unwrap();
     git(top, ceiling, &["add", "-A"]);
     commit_at(top, ceiling, &ago, "older");
+    git(top, ceiling, &["switch", "-q", "-"]);
     let advice = "(`lab check --at` can replay commits before adoption)";
     let reason = evaluation();
     assert!(reason.ends_with(advice), "{reason}");
+
+    // A shallow clone of the current branch lacks that commit, so its
+    // history counts as unread: the advice stays, with a note.
+    let shallow = &ceiling.join("shallow");
+    let url = format!("file://{}", top.display());
+    git(
+        ceiling,
+        ceiling,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &url,
+            shallow.to_str().unwrap(),
+        ],
+    );
+    let copied = Command::new("cp")
+        .args(["-R", ".research"])
+        .arg(shallow.join("proj"))
+        .current_dir(d)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let out = lab_in(&shallow.join("proj"), ceiling, tmp, &["evaluate"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(advice), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("git fetch --unshallow"),
+        "{}",
+        stderr(&out)
+    );
 
     // When git history cannot be read, the advice stays.
     std::fs::rename(top.join(".git"), top.join("git-moved")).unwrap();
