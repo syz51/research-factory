@@ -97,6 +97,18 @@ fn command(argv: &[String]) -> String {
 }
 
 /// The numbers of an evaluation, as Markdown lines.
+/// A paragraph naming a checker version change between the runs introduced
+/// findings are counted from, or nothing.
+fn version_note(i: &crate::evaluate::Introduced) -> String {
+    i.version_text().map_or_else(String::new, |v| {
+        format!(
+            "\nNote: {v}. Fix the findings that new text caused; `lab lesson review` records \
+             all listed findings at once, so run it only when every remaining one comes from \
+             the update or cannot be fixed.\n\n"
+        )
+    })
+}
+
 fn measured(e: &Evaluation) -> String {
     let mut out = String::new();
     let unit = e.unit.map_or("observation", |u| u.as_str());
@@ -289,10 +301,11 @@ pub fn derive(
                     "Its metric is lower since adoption. Read the numbers, then mark it verified:\n\n\
                      ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n{}",
                     open.map(|i| format!(
-                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n",
+                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n{}",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
-                        e.introduced_lines().join("\n")
+                        e.introduced_lines().join("\n"),
+                        version_note(i)
                     ))
                     .unwrap_or_default()
                 ),
@@ -337,13 +350,14 @@ pub fn derive(
                         format!("Review findings introduced since lesson {id} was adopted")
                     },
                     format!(
-                        "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
+                        "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n{}\
                          Fix each, or show that the finding is wrong. When `lab evaluate` lists only findings that cannot be fixed, such as those in append-only files, record their review with their count:\n\n\
                          ```sh\nlab lesson review {id} --count <n> --note \"<what was found>\"\n```\n\n\
                          If such findings keep appearing, revise the rule in `{file}` or retire the lesson. {next}\n",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
-                        e.introduced_lines().join("\n")
+                        e.introduced_lines().join("\n"),
+                        version_note(i)
                     ),
                 )
             }
@@ -361,7 +375,21 @@ pub fn derive(
                     .iter()
                     .map(|f| format!("+{} {}", f.added, f.message))
                     .collect();
-                format!("introduced since {}: {}", i.since, keys.join("; "))
+                let versions: Vec<String> = i
+                    .version_changed
+                    .iter()
+                    .map(|(check, [old, new])| format!("{check} {old}→{new}"))
+                    .collect();
+                let versions = if versions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (checker {})", versions.join(", "))
+                };
+                format!(
+                    "introduced since {}{versions}: {}",
+                    i.since,
+                    keys.join("; ")
+                )
             }
             (v, _) => v.as_str().to_string(),
         };
@@ -671,6 +699,7 @@ mod tests {
                     subjects: vec!["a.md:1".into()],
                     more: 0,
                 }],
+                version_changed: Default::default(),
             }),
             measure: None,
         };
@@ -697,6 +726,24 @@ mod tests {
             after.body.contains("lab lesson review q --count <n>"),
             "{}",
             after.body
+        );
+        // A checker update between the two runs is named in the body.
+        assert!(!before.body.contains("version changed"), "{}", before.body);
+        let mut changed = eval("2026-11-01T00:00:00Z", None);
+        if let Some(i) = &mut changed.introduced {
+            i.version_changed = [("claims".to_string(), ["v1".into(), "v2".into()])].into();
+        }
+        let s = one(changed);
+        assert_eq!(s.kind, "lesson-introduced");
+        // The change alone is news: it changes the detail.
+        assert_ne!(s.detail, before.detail);
+        assert!(
+            s.body.contains(
+                "Note: the checker version changed since that run (claims v1 → v2), so the \
+                 update alone can add or remove findings"
+            ) && s.body.contains("records all listed findings at once"),
+            "{}",
+            s.body
         );
 
         // Measured intervals: an inconclusive verdict still lists the

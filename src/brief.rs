@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::check::{CheckOutcome, Run};
-use crate::evaluate::{Evaluation, Method, Verdict, p_label};
+use crate::evaluate::{Evaluation, Introduced, Method, Verdict, p_label};
 use crate::finding::Severity;
 use crate::lesson_loop::{Record, SendStatus};
 use crate::lessons::{Kind, Lesson, Status};
@@ -187,6 +187,16 @@ fn age(d: jiff::SignedDuration) -> String {
     }
 }
 
+/// "; checker claims changed v1 → v2", when a required checker's version
+/// changed since the run introduced findings are counted from: the update
+/// alone can add findings, or remove some and hide new ones.
+fn checker_changed(i: &Introduced) -> String {
+    i.version_changed
+        .iter()
+        .map(|(check, [old, new])| format!("; checker {check} changed {old} → {new}"))
+        .collect()
+}
+
 /// One lesson's verdict, as short as the brief needs.
 /// `status` and `reviewed` are the lesson's current ones, which can be newer
 /// than the loop's record.
@@ -212,13 +222,15 @@ fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> Strin
                 "reviewed after the last `lab loop`; `lab evaluate` gives the current count".into()
             }
             Some(i) if i.count > 0 => format!(
-                "{} introduced since {} → review (`lab evaluate`)",
+                "{} introduced since {} → review (`lab evaluate`){}",
                 i.count,
-                i.since_text(e.adopted.as_deref())
+                i.since_text(e.adopted.as_deref()),
+                checker_changed(i)
             ),
             Some(i) => format!(
-                "none introduced since {}",
-                i.since_text(e.adopted.as_deref())
+                "none introduced since {}{}",
+                i.since_text(e.adopted.as_deref()),
+                checker_changed(i)
             ),
             None => "no complete check run since adoption".into(),
         };
@@ -638,6 +650,7 @@ mod tests {
             reviewed: None,
             count: 2,
             findings: vec![],
+            version_changed: Default::default(),
         });
         assert_eq!(
             verdict_line(&e, Status::Adopted, None),
@@ -654,6 +667,20 @@ mod tests {
             verdict_line(&e, Status::Adopted, None),
             "improved p=0.004 → verify; 2 introduced since the first complete run after \
              adoption, on 2026-11-01 → review (`lab evaluate`)"
+        );
+        // A checker update is named, also when nothing was introduced, since
+        // it can remove findings and hide new ones.
+        if let Some(i) = &mut e.introduced {
+            i.count = 0;
+            i.version_changed = [("claims".to_string(), ["v1".into(), "v2".into()])].into();
+        }
+        assert!(
+            verdict_line(&e, Status::Adopted, None).ends_with(
+                "none introduced since the first complete run after adoption, on 2026-11-01; \
+                 checker claims changed v1 → v2"
+            ),
+            "{}",
+            verdict_line(&e, Status::Adopted, None)
         );
         // Without a run since adoption the brief still names intervals.
         e.verdict = Verdict::Collecting;
