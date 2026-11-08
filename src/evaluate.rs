@@ -8,7 +8,10 @@
 //! test on per-session indicators and a numeric session field by the van
 //! Elteren test; with them, both by a stratified cluster permutation test.
 //! Check runs repeat the same backlog and are not independent observations,
-//! so they are only described: the findings introduced since adoption.
+//! so they are described by the findings introduced since adoption, and
+//! judged only through intervals between clean, measured runs on consecutive
+//! commits: findings introduced per new unit of checked text, compared by the
+//! exact conditional binomial test.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -33,11 +36,11 @@ const NEEDED_LIMIT: u64 = 1_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
-    /// Fewer than `min_sessions` observations on a side. For check runs
-    /// (`Method::Descriptive`) it is permanent: they are described by
-    /// `introduced`, never judged.
+    /// Fewer than `min_sessions` observations on a side. Check runs without
+    /// measured intervals (`Method::Descriptive`) stay here: they are
+    /// described by `introduced`.
     Collecting,
-    /// Lower after adoption: `p_lower < alpha/2`. Never for check runs.
+    /// Lower after adoption: `p_lower < alpha/2`.
     Improved,
     /// Higher after adoption.
     Worse,
@@ -68,6 +71,8 @@ pub enum Unit {
     #[serde(rename = "session-group")]
     SessionGroup,
     Run,
+    /// The text between two clean, measured check runs on consecutive commits.
+    Interval,
 }
 
 impl Unit {
@@ -76,6 +81,7 @@ impl Unit {
             Self::Session => "session",
             Self::SessionGroup => "session group",
             Self::Run => "run",
+            Self::Interval => "interval",
         }
     }
 }
@@ -87,6 +93,9 @@ pub enum Method {
     VanElteren,
     /// Check runs: introduced findings, without a test or verdict.
     Descriptive,
+    /// Check-run intervals: introduced findings per new unit, the after
+    /// side's count binomial given the total and the share of new units.
+    ConditionalBinomial,
     /// Whole session groups permuted between the sides (agent sessions
     /// with subagents).
     ClusterPermutation,
@@ -106,6 +115,13 @@ pub struct Side {
     pub rate: Option<f64>,
     pub mean: Option<f64>,
     pub median: Option<f64>,
+    /// Check-run intervals: the findings introduced in them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub findings: Option<u64>,
+    /// Check-run intervals: the new units of checked text in them; `rate`
+    /// is `findings` per new unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_units: Option<u64>,
 }
 
 /// A stratum that contributes to the test: observations before and after.
@@ -146,6 +162,10 @@ pub struct Evaluation {
     /// Check-run metrics: findings introduced since adoption.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub introduced: Option<Introduced>,
+    /// Check-run intervals: the `rf.measure/1` unit they count, such as
+    /// `citing-sentence`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measure: Option<String>,
 }
 
 /// Findings of the metric's rule in the latest complete check run beyond
@@ -233,6 +253,7 @@ impl Evaluation {
             alpha: settings.alpha,
             baseline_days: settings.baseline_days,
             introduced: None,
+            measure: None,
         }
     }
 
@@ -257,7 +278,16 @@ impl Evaluation {
         let (b, a) = (&self.before, &self.after);
         if self.unit.is_some() && (b.n > 0 || a.n > 0) {
             let unit = self.unit.map_or("", Unit::as_str);
-            if b.rate.is_some() || a.rate.is_some() {
+            if self.unit == Some(Unit::Interval) {
+                let per = |s: &Side| num(s.rate.map(|r| r * 100.0));
+                let _ = write!(
+                    out,
+                    "{} → {} introduced per 100 new {}s",
+                    per(b),
+                    per(a),
+                    self.measure.as_deref().unwrap_or("unit")
+                );
+            } else if b.rate.is_some() || a.rate.is_some() {
                 let pct = |s: &Side| {
                     s.rate
                         .map_or_else(|| "-".into(), |r| format!("{:.1}%", r * 100.0))
@@ -276,6 +306,11 @@ impl Evaluation {
                 let _ = write!(out, "{} → {} per {unit}", num(b.mean), num(a.mean));
             }
             let _ = write!(out, " (n {} → {}", b.n, a.n);
+            if let (Some(fb), Some(ub), Some(fa), Some(ua)) =
+                (b.findings, b.new_units, a.findings, a.new_units)
+            {
+                let _ = write!(out, " {unit}s: {fb} in {ub} → {fa} in {ua} new units");
+            }
             if let (Some(sb), Some(sa)) = (b.sessions, a.sessions) {
                 let _ = write!(out, " {unit}s from {sb} → {sa} sessions");
             }
@@ -440,13 +475,12 @@ pub fn evaluate(
     ))
 }
 
-/// Check-run findings introduced since adoption, described without a verdict.
+/// Check-run findings introduced since adoption, and a verdict from the
+/// intervals between clean, measured runs.
 ///
 /// A run counts when every configured check that has reported the metric's
 /// tool ran to completion in it, so a failed or partial (`--only`) run is
-/// not mistaken for a clean one. The means per run before and after adoption
-/// are kept as context only: they move with checker scope and with backlog
-/// work, and runs repeat the same backlog, so they are not compared.
+/// not mistaken for a clean one.
 ///
 /// Findings are keyed by message and data (the rule is the metric's), not by
 /// fingerprint, whose file path makes moved text look new; a checker's data
@@ -459,9 +493,11 @@ pub fn evaluate(
 /// The baseline plays no part, so a finding stays introduced after
 /// `lab baseline set` accepts it.
 ///
-/// `improved` would need a denominator (such as new citing sentences) and
-/// runs on enough distinct commits; lab records neither, so the verdict
-/// stays `collecting`. Consumers tell this apart by `Method::Descriptive`.
+/// The verdict compares findings introduced per new unit of checked text
+/// (see `intervals`). Without measured intervals the runs are only
+/// described: the means per run before and after adoption are kept as
+/// context, since they move with checker scope and backlog work, and the
+/// verdict stays `collecting` with `Method::Descriptive`.
 fn check_runs(
     mut e: Evaluation,
     metric: &Metric,
@@ -480,7 +516,9 @@ fn check_runs(
     let mut reviewed_run: Option<&Run> = None;
     let mut last: Option<&Run> = None;
     let mut observed = false;
-    for run in inputs.runs {
+    // Clean, measured runs: the last one on each commit.
+    let mut by_commit: BTreeMap<&str, (usize, Measured)> = BTreeMap::new();
+    for (index, run) in inputs.runs.iter().enumerate() {
         let complete = required
             .iter()
             .all(|name| run.header.checks.iter().any(|c| c.name == *name && c.ran()));
@@ -501,6 +539,11 @@ fn check_runs(
             Some(false) => before.push(count as f64),
             None => {}
         }
+        if let (Some(commit), Some(false)) = (run.header.commit.as_deref(), run.header.dirty)
+            && let Some(m) = measured(run, &metric.tool, required)
+        {
+            by_commit.insert(commit, (index, m));
+        }
     }
     e.before = describe(&before);
     e.after = describe(&after);
@@ -511,37 +554,194 @@ fn check_runs(
         ));
     }
     e.verdict = Verdict::Collecting;
-    let (Some(first), Some(last)) = (first, last) else {
-        e.reason = Some("no complete check run since adoption".into());
-        return e;
-    };
-    let first = reviewed_run.unwrap_or(first);
-    let mut reason = format!(
-        "descriptive: a verdict needs a denominator, such as new citing sentences, \
-         and runs on {} or more commits; lab records neither",
-        inputs.settings.min_sessions
-    );
     // A missing reviewed run (deleted, or not a complete run since adoption)
     // falls back to the adoption baseline, which shows more, not less.
-    if let (Some(r), None) = (reviewed, reviewed_run) {
-        let _ = write!(
-            reason,
-            "; the reviewed run `{r}` is not a stored complete run since adoption, \
-             so findings count from the first one"
+    let mut note = String::new();
+    if let (Some(first), Some(last)) = (first, last) {
+        if let (Some(r), None) = (reviewed, reviewed_run) {
+            note = format!(
+                "; the reviewed run `{r}` is not a stored complete run since adoption, \
+                 so findings count from the first one"
+            );
+        }
+        let first = reviewed_run.unwrap_or(first);
+        let mut found = introduced(
+            &metric_items(first, metric, required),
+            &metric_items(last, metric, required),
         );
+        found.since = first.header.at.clone();
+        found.since_date = date_of(&first.header.at).map(|d| d.to_string());
+        found.latest = last.header.at.clone();
+        found.latest_run = last.name();
+        found.reviewed = reviewed_run.map(Run::name);
+        e.introduced = Some(found);
     }
-    let mut found = introduced(
-        &metric_items(first, metric, required),
-        &metric_items(last, metric, required),
-    );
-    found.since = first.header.at.clone();
-    found.since_date = date_of(&first.header.at).map(|d| d.to_string());
-    found.latest = last.header.at.clone();
-    found.latest_run = last.name();
-    found.reviewed = reviewed_run.map(Run::name);
-    e.introduced = Some(found);
-    e.reason = Some(reason);
+
+    let mut points: Vec<(usize, Measured)> = by_commit.into_values().collect();
+    points.sort_by(|(a, _), (b, _)| {
+        let at = |i: usize| inputs.runs[i].header.at.as_str();
+        at(*a).cmp(at(*b)).then(a.cmp(b))
+    });
+    let units: BTreeSet<&str> = points
+        .iter()
+        .flat_map(|(i, _)| inputs.runs[*i].measures.iter())
+        .filter(|m| m.measure.tool == metric.tool && required.contains(m.check.as_str()))
+        .map(|m| m.measure.unit.as_str())
+        .collect();
+    let min = inputs.settings.min_sessions;
+    if units.len() > 1 {
+        e.reason = Some(format!(
+            "`{}` measures more than one unit ({}); a rate per new unit needs one{note}",
+            metric.tool,
+            units.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+        return e;
+    }
+    let Some(unit) = units.first() else {
+        let why = if e.introduced.is_some() {
+            "descriptive: no measured interval yet"
+        } else {
+            "no complete check run since adoption"
+        };
+        e.reason = Some(format!(
+            "{why}; a verdict needs {min} or more intervals on each side between clean runs \
+             (no uncommitted changes) on consecutive commits whose checks print `rf.measure/1` \
+             (`--measure`){note}"
+        ));
+        return e;
+    };
+    let mut sides = [IntervalSide::default(); 2];
+    for pair in points.windows(2) {
+        let ((i0, m0), (i1, m1)) = (&pair[0], &pair[1]);
+        let (r0, r1) = (&inputs.runs[*i0], &inputs.runs[*i1]);
+        let Some(side) = place(&r1.header.at) else {
+            continue;
+        };
+        let new_units = new_units(m0, m1);
+        if new_units == 0 {
+            continue;
+        }
+        let found = introduced(
+            &metric_items(r0, metric, required),
+            &metric_items(r1, metric, required),
+        );
+        let s = &mut sides[usize::from(side)];
+        s.n += 1;
+        s.findings += found.count as u64;
+        s.new_units += new_units;
+    }
+    let [b, a] = sides;
+    if b.n + a.n == 0 {
+        e.reason = Some(format!(
+            "descriptive: no measured interval with new {unit}s yet; a verdict needs {min} or \
+             more on each side{note}"
+        ));
+        return e;
+    }
+    e.unit = Some(Unit::Interval);
+    e.method = Some(Method::ConditionalBinomial);
+    e.measure = Some((*unit).to_string());
+    e.before = b.side();
+    e.after = a.side();
+    if b.n < min {
+        e.reason = Some(format!(
+            "no baseline: {} of {min} measured intervals before adoption, {} of {min} after; \
+             the rate after adoption has nothing to compare with yet{note}",
+            b.n, a.n
+        ));
+        return e;
+    }
+    if a.n < min {
+        e.reason = Some(format!(
+            "{} of {min} measured intervals after adoption, {} of {min} before{note}",
+            a.n, b.n
+        ));
+        return e;
+    }
+    let share = a.new_units as f64 / (a.new_units + b.new_units) as f64;
+    let (lo, up) = stats::conditional_binomial(a.findings, a.findings + b.findings, share);
+    e.p_lower = Some(lo);
+    e.p_upper = Some(up);
+    let half = inputs.settings.alpha / 2.0;
+    e.verdict = if lo < half {
+        Verdict::Improved
+    } else if up < half {
+        Verdict::Worse
+    } else {
+        Verdict::Inconclusive
+    };
     e
+}
+
+/// The units one check measured for a tool in one run, merged over its
+/// `rf.measure/1` records.
+#[derive(Debug)]
+struct Units<'r> {
+    count: u64,
+    /// `None` when a record has no keys.
+    keys: Option<BTreeSet<&'r str>>,
+}
+
+/// Per required check, its units.
+type Measured<'r> = BTreeMap<&'r str, Units<'r>>;
+
+/// What each required check measured for `tool` in `run`; `None` when one
+/// of them measured nothing. The caller refuses a rate when the records
+/// name more than one unit, so merging them here does no harm.
+fn measured<'r>(run: &'r Run, tool: &str, required: &BTreeSet<&str>) -> Option<Measured<'r>> {
+    let mut out: Measured = BTreeMap::new();
+    for m in run
+        .measures
+        .iter()
+        .filter(|m| m.measure.tool == tool && required.contains(m.check.as_str()))
+    {
+        let u = out.entry(m.check.as_str()).or_insert(Units {
+            count: 0,
+            keys: Some(BTreeSet::new()),
+        });
+        u.count += m.measure.count;
+        match (&mut u.keys, &m.measure.keys) {
+            (Some(keys), Some(more)) => keys.extend(more.iter().map(String::as_str)),
+            (keys, None) => *keys = None,
+            (None, Some(_)) => {}
+        }
+    }
+    (out.len() == required.len()).then_some(out)
+}
+
+/// New units from `earlier` to `later`: per check, the keys `later` has and
+/// `earlier` lacks, or without keys on both sides the count's increase.
+fn new_units(earlier: &Measured, later: &Measured) -> u64 {
+    later
+        .iter()
+        .map(|(check, l)| {
+            let e = &earlier[check];
+            match (&e.keys, &l.keys) {
+                (Some(ek), Some(lk)) => lk.difference(ek).count() as u64,
+                _ => l.count.saturating_sub(e.count),
+            }
+        })
+        .sum()
+}
+
+/// Intervals on one side of adoption.
+#[derive(Debug, Clone, Copy, Default)]
+struct IntervalSide {
+    n: usize,
+    findings: u64,
+    new_units: u64,
+}
+
+impl IntervalSide {
+    fn side(self) -> Side {
+        Side {
+            n: self.n,
+            rate: (self.new_units > 0).then(|| self.findings as f64 / self.new_units as f64),
+            findings: Some(self.findings),
+            new_units: Some(self.new_units),
+            ..Side::default()
+        }
+    }
 }
 
 /// A run's findings of the metric's rule from the required checks.
@@ -631,6 +831,8 @@ fn describe(values: &[f64]) -> Side {
         sessions: None,
         positives: None,
         rate: None,
+        findings: None,
+        new_units: None,
         mean: (n > 0).then(|| sorted.iter().sum::<f64>() / n as f64),
         median: (n > 0).then(|| {
             if n % 2 == 1 {
@@ -651,6 +853,8 @@ fn indicator_side(values: &[f64]) -> Side {
         rate: (!values.is_empty()).then(|| positives as f64 / values.len() as f64),
         mean: None,
         median: None,
+        findings: None,
+        new_units: None,
     }
 }
 
@@ -973,7 +1177,10 @@ fn sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::{CheckOutcome, ITEM_SCHEMA, Item, RUN_SCHEMA, RunHeader};
+    use crate::check::{
+        CheckOutcome, ITEM_SCHEMA, Item, MEASURE_ITEM_SCHEMA, Measure, MeasureItem, RUN_SCHEMA,
+        RunHeader,
+    };
     use crate::finding::{self, Severity};
     use crate::lessons::{Kind, Meta};
 
@@ -1590,6 +1797,7 @@ mod tests {
                 checks: outcomes,
             },
             items,
+            measures: Vec::new(),
         }
     }
 
@@ -1631,9 +1839,10 @@ mod tests {
             (e.before.n, e.after.n, e.verdict),
             (2, 0, Verdict::Collecting)
         );
-        assert_eq!(
-            e.reason.as_deref(),
-            Some("no complete check run since adoption")
+        let reason = e.reason.unwrap();
+        assert!(
+            reason.starts_with("no complete check run since adoption; a verdict needs 2"),
+            "{reason}"
         );
         assert_eq!(e.introduced, None);
         // Once `thesis` is no longer configured, it is not required.
@@ -1861,7 +2070,7 @@ mod tests {
             "{line}"
         );
         assert!(
-            line.contains("collecting (descriptive: a verdict needs a denominator"),
+            line.contains("collecting (descriptive: no measured interval yet; a verdict needs 2"),
             "{line}"
         );
         assert_eq!(
@@ -1949,6 +2158,262 @@ mod tests {
             e.line().contains("on 2026-11-10 (adopted 2026-11-03)"),
             "{}",
             e.line()
+        );
+    }
+
+    fn measure_item(unit: &str, count: u64, keys: Option<&[&str]>) -> MeasureItem {
+        MeasureItem {
+            schema: MEASURE_ITEM_SCHEMA.into(),
+            check: "claims".into(),
+            measure: Measure {
+                schema: "rf.measure/1".into(),
+                tool: "claimcheck".into(),
+                unit: unit.into(),
+                count,
+                keys: keys.map(|k| k.iter().map(|k| (*k).to_string()).collect()),
+            },
+        }
+    }
+
+    /// Clean, measured `claims` runs, one per commit: (date, citing
+    /// sentences so far, findings so far, each with its own sentence).
+    fn measured_runs(steps: &[(&str, u64, usize)]) -> Vec<Run> {
+        steps
+            .iter()
+            .enumerate()
+            .map(|(i, &(day, units, found))| {
+                let sentences: Vec<String> = (0..found).map(|k| format!("s{k}")).collect();
+                let findings: Vec<(&str, &str, &str)> = sentences
+                    .iter()
+                    .map(|s| ("a.md:1", OLD, s.as_str()))
+                    .collect();
+                let mut run = run_with(&format!("{day}T00:00:00Z"), &findings);
+                run.path = format!("{day}-{i}.jsonl").into();
+                run.header.commit = Some(format!("c{i}"));
+                run.header.dirty = Some(false);
+                run.measures = vec![measure_item("citing-sentence", units, None)];
+                run
+            })
+            .collect()
+    }
+
+    fn eval_min(runs: &[Run], min_sessions: usize) -> Evaluation {
+        let cfg = EvaluateConfig {
+            min_sessions,
+            ..EvaluateConfig::default()
+        };
+        evaluate(
+            &lesson("claimcheck:source-text-missing", "2026-11-03"),
+            &Inputs {
+                runs,
+                configured: &["claims"],
+                findings: &[],
+                sessions: Err("none"),
+                settings: &cfg,
+            },
+            utc_date,
+        )
+    }
+
+    /// Three intervals of 100 new sentences on each side of adoption
+    /// (2026-11-03), with `before` and `after` findings introduced in each.
+    fn three_and_three(before: usize, after: usize) -> Vec<Run> {
+        let mut steps = Vec::new();
+        let mut found = 0;
+        for (i, day) in ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]
+            .into_iter()
+            .enumerate()
+        {
+            found += if i == 0 { 0 } else { before };
+            steps.push((day, 100 * i as u64, found));
+        }
+        for (i, day) in ["2026-11-03", "2026-11-04", "2026-11-05"]
+            .into_iter()
+            .enumerate()
+        {
+            found += after;
+            steps.push((day, 400 + 100 * i as u64, found));
+        }
+        measured_runs(&steps)
+    }
+
+    #[test]
+    fn fewer_findings_per_new_sentence_after_adoption_is_improved() {
+        let e = eval_min(&three_and_three(10, 0), 3);
+        assert_eq!(
+            (e.unit, e.method, e.measure.as_deref()),
+            (
+                Some(Unit::Interval),
+                Some(Method::ConditionalBinomial),
+                Some("citing-sentence")
+            )
+        );
+        assert_eq!(
+            (
+                e.before.n,
+                e.before.findings,
+                e.before.new_units,
+                e.before.rate
+            ),
+            (3, Some(30), Some(300), Some(0.1))
+        );
+        assert_eq!(
+            (e.after.n, e.after.findings, e.after.new_units),
+            (3, Some(0), Some(300))
+        );
+        // Binomial(30, 1/2): P(X ≤ 0) = 2^-30.
+        assert!((e.p_lower.unwrap() - 0.5f64.powi(30)).abs() < 1e-15);
+        assert_eq!((e.verdict, e.reason.as_deref()), (Verdict::Improved, None));
+        // The introduced findings are still described.
+        assert_eq!(e.introduced.as_ref().map(|i| i.count), Some(0));
+        let line = e.line();
+        assert!(
+            line.contains("10 → 0 introduced per 100 new citing-sentences (n 3 → 3 intervals: 30 in 300 → 0 in 300 new units"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn more_findings_per_new_sentence_after_adoption_is_worse() {
+        let e = eval_min(&three_and_three(0, 10), 3);
+        assert_eq!(e.verdict, Verdict::Worse);
+        assert!((e.p_upper.unwrap() - 0.5f64.powi(30)).abs() < 1e-15);
+        assert_eq!(e.introduced.as_ref().map(|i| i.count), Some(20));
+    }
+
+    #[test]
+    fn the_same_rate_on_both_sides_is_inconclusive() {
+        let e = eval_min(&three_and_three(1, 1), 3);
+        assert_eq!(e.verdict, Verdict::Inconclusive);
+        // Binomial(6, 1/2): P(X ≤ 3) = P(X ≥ 3) = 42/64.
+        assert!((e.p_lower.unwrap() - 42.0 / 64.0).abs() < 1e-12);
+        assert!((e.p_upper.unwrap() - 42.0 / 64.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn intervals_after_adoption_alone_name_the_missing_baseline() {
+        let runs = three_and_three(1, 1);
+        let e = eval_min(&runs[3..], 3);
+        assert_eq!(
+            (e.verdict, e.method, e.before.n, e.after.n),
+            (Verdict::Collecting, Some(Method::ConditionalBinomial), 0, 3)
+        );
+        let reason = e.reason.unwrap();
+        assert!(
+            reason.starts_with(
+                "no baseline: 0 of 3 measured intervals before adoption, 3 of 3 after"
+            ),
+            "{reason}"
+        );
+        // Too few after adoption is collecting too.
+        let e = eval_min(&runs, 4);
+        assert_eq!(e.verdict, Verdict::Collecting);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "no baseline: 3 of 4 measured intervals before adoption, 3 of 4 after; the rate after adoption has nothing to compare with yet"
+            )
+        );
+        let mut runs = runs;
+        // One more commit before adoption, with sentences of its own.
+        runs[0].measures[0].measure.count = 50;
+        runs.insert(0, measured_runs(&[("2026-09-30", 0, 0)]).remove(0));
+        runs[0].header.commit = Some("early".into());
+        let e = eval_min(&runs, 4);
+        assert_eq!(e.before.n, 4);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("3 of 4 measured intervals after adoption, 4 of 4 before")
+        );
+    }
+
+    #[test]
+    fn only_the_last_clean_measured_run_on_each_commit_counts() {
+        let mut runs = three_and_three(1, 1);
+        // An earlier run on c3, a dirty run, a run without a commit and an
+        // unmeasured run, all full of findings: none forms an interval.
+        let noisy = |at: &str| {
+            let sentences: Vec<String> = (0..50).map(|k| format!("x{k}")).collect();
+            let f: Vec<(&str, &str, &str)> = sentences
+                .iter()
+                .map(|s| ("b.md:1", NEW, s.as_str()))
+                .collect();
+            let mut r = run_with(at, &f);
+            r.header.commit = Some("c3".into());
+            r.header.dirty = Some(false);
+            r.measures = vec![measure_item("citing-sentence", 5000, None)];
+            r
+        };
+        let early = noisy("2026-10-03T12:00:00Z");
+        let mut dirty = noisy("2026-10-03T13:00:00Z");
+        dirty.header.commit = Some("c9".into());
+        dirty.header.dirty = Some(true);
+        let mut old = noisy("2026-10-03T14:00:00Z");
+        (old.header.commit, old.header.dirty) = (None, None);
+        let mut unmeasured = noisy("2026-10-03T15:00:00Z");
+        unmeasured.header.commit = Some("c8".into());
+        unmeasured.measures.clear();
+        // A commit with no new sentences is left out.
+        let mut same = measured_runs(&[("2026-11-05", 600, 6)]).remove(0);
+        same.header.at = "2026-11-05T01:00:00Z".into();
+        same.header.commit = Some("c-same".into());
+        for (i, r) in [early, dirty, old, unmeasured].into_iter().enumerate() {
+            runs.insert(3 + i, r);
+        }
+        runs.push(same);
+        let e = eval_min(&runs, 3);
+        assert_eq!(
+            (e.before.n, e.before.findings, e.before.new_units),
+            (3, Some(3), Some(300))
+        );
+        assert_eq!(
+            (e.after.n, e.after.findings, e.after.new_units),
+            (3, Some(3), Some(300))
+        );
+        assert_eq!(e.verdict, Verdict::Inconclusive);
+    }
+
+    #[test]
+    fn keys_count_text_that_replaced_deleted_text_as_new() {
+        let run = |keys: &[&str]| {
+            let mut r = run_with("2026-11-04T00:00:00Z", &[]);
+            r.measures = vec![measure_item(
+                "citing-sentence",
+                keys.len() as u64,
+                Some(keys),
+            )];
+            r
+        };
+        let required: BTreeSet<&str> = ["claims"].into();
+        let (a, b) = (run(&["aa", "bb"]), run(&["aa", "cc"]));
+        let (ma, mb) = (
+            measured(&a, "claimcheck", &required).unwrap(),
+            measured(&b, "claimcheck", &required).unwrap(),
+        );
+        assert_eq!(new_units(&ma, &mb), 1);
+        // Without keys on both sides, only the count's increase is new.
+        let mut c = run(&["aa", "cc"]);
+        c.measures[0].measure.keys = None;
+        let mc = measured(&c, "claimcheck", &required).unwrap();
+        assert_eq!(new_units(&ma, &mc), 0);
+        assert!(measured(&c, "othertool", &required).is_none());
+    }
+
+    #[test]
+    fn two_units_get_no_rate() {
+        let mut runs = three_and_three(1, 1);
+        runs[2].measures[0].measure.unit = "sentence".into();
+        let e = eval_min(&runs, 3);
+        assert_eq!(
+            (e.verdict, e.method),
+            (Verdict::Collecting, Some(Method::Descriptive))
+        );
+        let reason = e.reason.unwrap();
+        assert!(
+            reason.starts_with(
+                "`claimcheck` measures more than one unit (citing-sentence, sentence)"
+            ),
+            "{reason}"
         );
     }
 }

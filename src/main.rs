@@ -520,6 +520,20 @@ fn check(
         failing_items.extend(errors);
         failing |= failing_items.len() > before || !c.ran();
     }
+    for m in &run.measures {
+        println!(
+            "{} measured {} {}(s) for {}{}",
+            m.check,
+            m.measure.count,
+            m.measure.unit,
+            m.measure.tool,
+            if m.measure.keys.is_some() {
+                ", with keys"
+            } else {
+                ""
+            }
+        );
+    }
     if new_only && !no_baseline.is_empty() {
         println!(
             "No baseline for {}: every error counts as new. Accept the current findings with \
@@ -866,12 +880,15 @@ fn evaluate(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     }
     let s = &project.lab.evaluate;
     println!(
-        "\nVerdicts need {} session groups on each side and p below {} in one direction \
+        "\nVerdicts need {} observations (session groups, or check-run intervals) on each side and p below {} in one direction \
          (alpha {} two-sided); p↓ tests for fewer findings since adoption, p↑ for more. \
          The comparison is observational: other changes since adoption can explain a difference, \
          and with {} lessons measured some will cross the threshold by chance. \
-         Check runs are described, not judged: \"introduced\" counts findings in the latest \
-         complete run beyond the count of the same message and data in the first complete run since adoption, or in the run of the last `lab lesson review`.",
+         For check runs, \"introduced\" counts findings in the latest complete run beyond the count \
+         of the same message and data in the first complete run since adoption, or in the run of the \
+         last `lab lesson review`; a verdict compares findings introduced per new unit of checked text \
+         over intervals between clean runs (no uncommitted changes) on consecutive commits whose checks \
+         print `rf.measure/1`, each interval counting as one observation.",
         s.min_sessions,
         s.alpha / 2.0,
         s.alpha,

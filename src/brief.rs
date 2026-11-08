@@ -193,9 +193,25 @@ fn age(d: jiff::SignedDuration) -> String {
 fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> String {
     let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     let unit = e.unit.map_or("session", |u| u.as_str());
-    // Check runs get no verdict; their introduced findings are the news.
-    if e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting {
-        return match &e.introduced {
+    // A check-run lesson without a verdict: its introduced findings are the news.
+    if e.introduced.is_some() && matches!(e.verdict, Verdict::Collecting | Verdict::Inconclusive)
+        || e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting
+    {
+        let min = e.min_sessions;
+        let prefix = match (e.method, e.verdict) {
+            (Some(Method::ConditionalBinomial), Verdict::Collecting) if e.before.n < min => {
+                format!(
+                    "collecting {}/{min} {unit}s after, {}/{min} before; ",
+                    e.after.n, e.before.n
+                )
+            }
+            (Some(Method::ConditionalBinomial), Verdict::Collecting) => {
+                format!("collecting {}/{min} {unit}s after; ", e.after.n)
+            }
+            (_, Verdict::Inconclusive) => format!("inconclusive{}; ", p(e.p_lower)),
+            _ => String::new(),
+        };
+        let text: String = match &e.introduced {
             Some(i) if reviewed.is_some() && i.reviewed.as_deref() != reviewed => {
                 "reviewed after the last `lab loop`; `lab evaluate` gives the current count".into()
             }
@@ -210,6 +226,7 @@ fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> Strin
             ),
             None => "no complete check run since adoption".into(),
         };
+        return prefix + &text;
     }
     match e.verdict {
         Verdict::Collecting => {
@@ -506,6 +523,7 @@ mod tests {
                     finding: Finding::lab(rule, Severity::Error, "s", "m".into()),
                 })
                 .collect(),
+            measures: Vec::new(),
         }
     }
 
@@ -590,7 +608,41 @@ mod tests {
             alpha: 0.05,
             baseline_days: 90,
             introduced: None,
+            measure: None,
         }
+    }
+
+    #[test]
+    fn a_check_run_lesson_shows_its_intervals_with_the_introduced_findings() {
+        use crate::evaluate::{Introduced, Method, Unit};
+        let mut e = evaluation("c", Verdict::Collecting);
+        e.unit = Some(Unit::Interval);
+        e.method = Some(Method::ConditionalBinomial);
+        e.before.n = 0;
+        e.introduced = Some(Introduced {
+            since: "2026-11-01T00:00:00Z".into(),
+            since_date: Some("2026-11-01".into()),
+            latest: "2026-11-05T00:00:00Z".into(),
+            latest_run: "r5.jsonl".into(),
+            reviewed: None,
+            count: 2,
+            findings: vec![],
+        });
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "collecting 3/10 intervals after, 0/10 before; 2 introduced since the first \
+             complete run after adoption, on 2026-11-01 → review (`lab evaluate`)"
+        );
+        e.verdict = Verdict::Inconclusive;
+        assert!(
+            verdict_line(&e, Status::Adopted, None)
+                .starts_with("inconclusive p=0.004; 2 introduced")
+        );
+        e.verdict = Verdict::Improved;
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "improved p=0.004 → verify"
+        );
     }
 
     #[test]

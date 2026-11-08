@@ -82,6 +82,46 @@ fn hypergeometric(total: u64, successes: u64, draws: u64) -> Dist {
     Dist { offset: lo, pmf: w }
 }
 
+/// The pmf of X ~ Binomial(`trials`, `p`), built like `hypergeometric`.
+fn binomial(trials: u64, p: f64) -> Dist {
+    if p <= 0.0 || p >= 1.0 {
+        let at = if p <= 0.0 { 0 } else { trials };
+        return Dist {
+            offset: at,
+            pmf: vec![1.0],
+        };
+    }
+    let n = trials as f64;
+    let mode = (((trials + 1) as f64 * p).floor() as u64).min(trials);
+    let odds = p / (1.0 - p);
+    let mut w = vec![0.0; trials as usize + 1];
+    w[mode as usize] = 1.0;
+    // P(x + 1) / P(x) = (n - x) / (x + 1) × p / (1 - p).
+    for x in mode..trials {
+        let xf = x as f64;
+        w[x as usize + 1] = w[x as usize] * (n - xf) / (xf + 1.0) * odds;
+    }
+    for x in (1..=mode).rev() {
+        let xf = x as f64;
+        w[x as usize - 1] = w[x as usize] * xf / (n - xf + 1.0) / odds;
+    }
+    let sum: f64 = w.iter().sum();
+    for v in &mut w {
+        *v /= sum;
+    }
+    Dist { offset: 0, pmf: w }
+}
+
+/// One-sided p-values of the exact conditional test of two Poisson rates.
+///
+/// Given `total` events, of which `after` fall on a side whose exposure is the
+/// share `p` of the whole, adoption changing nothing makes the after count
+/// Binomial(`total`, `p`); `p_lower = P(X ≤ after)`, `p_upper = P(X ≥ after)`.
+pub fn conditional_binomial(after: u64, total: u64, p: f64) -> (f64, f64) {
+    let dist = binomial(total, p);
+    (dist.cdf_le(after), dist.sf_ge(after))
+}
+
 /// One stratum of per-session indicators: sessions and positives before and after.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Counts {
@@ -395,6 +435,29 @@ mod tests {
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol
+    }
+
+    #[test]
+    fn conditional_binomial_matches_exact_values() {
+        // Binomial(10, 1/2): P(X ≤ 2) = P(X ≥ 8) = 56/1024.
+        let (lo, up) = conditional_binomial(2, 10, 0.5);
+        assert!(close(lo, 56.0 / 1024.0, 1e-12) && close(up, 1013.0 / 1024.0, 1e-12));
+        let (lo, up) = conditional_binomial(8, 10, 0.5);
+        assert!(close(up, 56.0 / 1024.0, 1e-12) && close(lo, 1013.0 / 1024.0, 1e-12));
+        // Binomial(5, 0.3): P(X ≤ 0) = 0.7^5.
+        assert!(close(
+            conditional_binomial(0, 5, 0.3).0,
+            0.7f64.powi(5),
+            1e-12
+        ));
+        // No events: neither direction is shown.
+        assert_eq!(conditional_binomial(0, 0, 0.4), (1.0, 1.0));
+        // Large counts stay finite; the tails overlap in P(X = 1000).
+        let (lo, up) = conditional_binomial(1000, 2000, 0.5);
+        assert!(
+            close(lo, up, 1e-12) && close(lo + up - 1.0, 0.017_839_011_145_854_32, 1e-9),
+            "{lo}"
+        );
     }
 
     #[test]
