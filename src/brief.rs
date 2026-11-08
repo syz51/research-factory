@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::path::Path;
 
 use crate::check::{CheckOutcome, Run};
 use crate::evaluate::{Evaluation, Introduced, Method, Verdict, p_label};
@@ -275,17 +276,32 @@ fn verdict_text(e: &Evaluation, status: Status) -> String {
     }
 }
 
+/// The `## Lesson measurements` section when no loop record applies; `note`
+/// says why.
+pub fn no_measurements(note: &str) -> String {
+    format!("\n## Lesson measurements\n\n{note}\n")
+}
+
 /// The `## Lesson measurements` section of a project with `[lab.loop]`:
 /// when the loop last ran, each active lesson's verdict from that run, and
-/// what failed or waits to be sent.
+/// what failed or waits to be sent. `main` is the main checkout whose record
+/// it is, when `lab brief` runs in a linked git worktree.
 pub fn measurements(
     record: Result<Option<Record>, String>,
+    main: Option<&Path>,
     now: jiff::Timestamp,
     tz: &jiff::tz::TimeZone,
     lessons: &[Lesson],
     tags: &[String],
 ) -> String {
     let mut out = String::from("\n## Lesson measurements\n\n");
+    if let Some(main) = main {
+        let _ = writeln!(
+            out,
+            "This is a linked git worktree: the loop runs for the main checkout {}, and these are its results.\n",
+            main.display()
+        );
+    }
     let r = match record {
         Err(e) => {
             let _ = writeln!(
@@ -726,7 +742,7 @@ mod tests {
         };
         let tz = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
         let now: jiff::Timestamp = "2026-11-07T02:00:10Z".parse().unwrap();
-        let text = measurements(Ok(Some(record.clone())), now, &tz, &lessons, &[]);
+        let text = measurements(Ok(Some(record.clone())), None, now, &tz, &lessons, &[]);
         assert!(
             text.starts_with(
                 "\n## Lesson measurements\n\nLast measured 2026-11-07 09:00 (2 h ago).\n\n"
@@ -746,12 +762,12 @@ mod tests {
         }
         assert!(!text.contains("hooks"), "{text}");
         let later: jiff::Timestamp = "2026-11-09T00:00:10Z".parse().unwrap();
-        let stale = measurements(Ok(Some(record)), later, &tz, &lessons, &[]);
+        let stale = measurements(Ok(Some(record)), None, later, &tz, &lessons, &[]);
         assert!(
             stale.contains("(2 days ago). That is over a day: the hooks"),
             "{stale}"
         );
-        let never = measurements(Ok(None), now, &tz, &lessons, &[]);
+        let never = measurements(Ok(None), None, now, &tz, &lessons, &[]);
         assert!(never.ends_with("The loop has never run: run `lab loop`.\n"));
         let with = render(
             "demo",

@@ -571,11 +571,46 @@ fn a_loop_in_a_linked_worktree_runs_for_the_main_checkout() {
     assert!(!stdout(&again).contains("worktree"), "{}", stdout(&again));
     assert_eq!(sent(&m).len(), 3, "nothing sent twice");
 
-    // Without the project in the main checkout, the worktree's loop does nothing.
+    // The worktree's brief shows the main checkout's record, not a stale one
+    // left in the worktree by an older lab.
+    let mut stale = last(&m);
+    stale["finished"] = "2026-01-01T00:00:00Z".into();
+    stale["evaluations"] = serde_json::json!([]);
+    write(&w, ".research/lab/loop/last.json", &stale.to_string());
+    let brief = lab(&w, &["brief"]);
+    assert_eq!(brief.status.code(), Some(0), "{}", stderr(&brief));
+    let text = stdout(&brief);
+    let main_root = m.canonicalize().unwrap();
+    assert!(
+        text.contains(&format!(
+            "## Lesson measurements\n\nThis is a linked git worktree: the loop runs for the \
+             main checkout {}, and these are its results.\n\nLast measured ",
+            main_root.display()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("- `never-seen`: unmeasurable"), "{text}");
+    assert!(!text.contains("not measured yet"), "{text}");
+    assert!(!text.contains("over a day"), "{text}");
+    let text = stdout(&lab(&m, &["brief"]));
+    assert!(text.contains("- `never-seen`: unmeasurable"), "{text}");
+    assert!(!text.contains("worktree"), "{text}");
+    std::fs::remove_dir_all(w.join(".research")).unwrap();
+
+    // Without the project in the main checkout, the worktree's loop does nothing,
+    // and its brief says there is nothing to show.
     std::fs::remove_file(m.join("research.toml")).unwrap();
     let out = lab(&w, &["loop"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stdout(&out).contains("did nothing"), "{}", stdout(&out));
     assert!(!w.join(".research").exists());
     assert_eq!(sent(&m).len(), 3);
+    let text = stdout(&lab(&w, &["brief"]));
+    assert!(
+        text.contains("is a linked git worktree, and the main checkout has no ")
+            && text.contains(
+                "; the loop runs only in a main checkout, so there are no measurements to show.\n"
+            ),
+        "{text}"
+    );
 }

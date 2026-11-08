@@ -301,16 +301,28 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             };
             // With [lab.loop], the loop's last results replace the reminder to evaluate.
-            let measurements = match &project.lab.lesson_loop {
-                None => None,
-                Some(_) => Some(brief::measurements(
-                    lesson_loop::read_record(&project),
-                    jiff::Timestamp::now(),
-                    &project.tz,
-                    &lessons,
-                    &tags,
-                )),
-            };
+            // In a linked git worktree they are the main checkout's, where the loop runs.
+            let measurements = project.lab.lesson_loop.as_ref().map(|_| {
+                let now = jiff::Timestamp::now();
+                let show = |record, main| {
+                    brief::measurements(record, main, now, &project.tz, &lessons, &tags)
+                };
+                match lesson_loop::checkout(&project, cli.config.as_deref()) {
+                    Ok(lesson_loop::Checkout::This) => {
+                        show(lesson_loop::read_record(&project), None)
+                    }
+                    Ok(lesson_loop::Checkout::Main(main)) => {
+                        show(lesson_loop::read_record(&main), Some(&main.root))
+                    }
+                    Ok(lesson_loop::Checkout::Skip(reason)) => brief::no_measurements(&format!(
+                        "{reason}; the loop runs only in a main checkout, so there are no \
+                         measurements to show."
+                    )),
+                    Err(e) => brief::no_measurements(&format!(
+                        "Cannot find the checkout the loop runs for: {e}."
+                    )),
+                }
+            });
             print!(
                 "{}{}",
                 brief::render(
@@ -352,7 +364,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             {
                 lesson_loop::Checkout::This => (project, None),
                 lesson_loop::Checkout::Main(main) => (*main, Some(project.root)),
-                lesson_loop::Checkout::Skip(message) => {
+                lesson_loop::Checkout::Skip(reason) => {
+                    let message = format!(
+                        "{reason}; `lab loop` runs only in a main checkout, so it did nothing."
+                    );
                     if format == Format::Jsonl {
                         eprintln!("{message}");
                     } else {

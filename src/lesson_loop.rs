@@ -367,8 +367,8 @@ pub enum Checkout {
     /// The same project in the main checkout of the linked worktree `lab`
     /// started in.
     Main(Box<Project>),
-    /// A linked worktree whose main checkout has no such project; the message
-    /// says so.
+    /// A linked worktree whose main checkout has no such project, or of a bare
+    /// repository; the message says which, without saying what is skipped.
     Skip(String),
 }
 
@@ -428,16 +428,14 @@ pub fn checkout(project: &Project, config: Option<&Path>) -> Result<Checkout, St
         Some(p) if !main.lines().any(|l| l == "bare") => Path::new(p).join(prefix),
         _ => {
             return Ok(Checkout::Skip(format!(
-                "{here} is a linked git worktree of a bare repository; `lab loop` runs only \
-                 in a main checkout, so it did nothing."
+                "{here} is a linked git worktree of a bare repository"
             )));
         }
     };
     let file = path.join(name);
     if !file.is_file() {
         return Ok(Checkout::Skip(format!(
-            "{here} is a linked git worktree, and the main checkout has no {}; `lab loop` \
-             runs only in the main checkout, so it did nothing.",
+            "{here} is a linked git worktree, and the main checkout has no {}",
             file.display()
         )));
     }
