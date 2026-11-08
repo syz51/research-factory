@@ -365,7 +365,7 @@ recurrence = 3
 
 # How `lab evaluate` decides whether a lesson helped (these are the defaults).
 # [lab.evaluate]
-# min_sessions = 10     # session groups needed on each side of the adoption date
+# min_sessions = 10     # session groups, or check-run intervals, needed on each side of the adoption date
 # alpha = 0.05          # two-sided; each direction is tested at alpha/2
 # baseline_days = 90    # compare with this many days before adoption; 0 = all earlier sessions
 

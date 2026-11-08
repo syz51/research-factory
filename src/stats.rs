@@ -1,9 +1,11 @@
 //! The tests `lab evaluate` uses: an exact stratified hypergeometric test for
 //! per-session indicators, the van Elteren stratified Wilcoxon rank-sum test
 //! for numeric session fields, and a stratified cluster permutation test for
-//! either when sessions come in groups that are not independent.
+//! either when sessions come in groups that are not independent; and the
+//! exact conditional binomial test for check-run intervals, comparing
+//! findings per new unit of text.
 //!
-//! Both answer one question per lesson: is the after-adoption group lower
+//! All answer one question per lesson: is the after-adoption group lower
 //! (`p_lower`) or higher (`p_upper`) than the before group would make likely
 //! by chance, comparing like with like within each stratum?
 

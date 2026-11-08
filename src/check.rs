@@ -35,11 +35,7 @@ impl Measure {
     /// Checks a checker's `rf.measure/1` record.
     fn parse(value: serde_json::Value) -> Result<Self, String> {
         let m: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
-        let major = m
-            .schema
-            .strip_prefix("rf.measure/")
-            .map(|v| v.split('.').next());
-        if major != Some(Some("1")) {
+        if !finding::version_1(&m.schema, "rf.measure/") {
             return Err(format!("unsupported schema `{}`", m.schema));
         }
         if m.tool.is_empty() || m.unit.is_empty() {
@@ -216,17 +212,24 @@ fn run_order(path: &Path) -> (String, u32) {
     }
 }
 
-/// One stdout line of a checker: a finding or a measure.
-fn parse_line(line: &str) -> Result<Result<Finding, Measure>, String> {
-    let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
-    let measure = value
-        .get("schema")
-        .and_then(|s| s.as_str())
-        .is_some_and(|s| s.starts_with("rf.measure/"));
-    if measure {
-        Measure::parse(value).map(Err)
-    } else {
-        Finding::parse(line).map(Ok)
+/// One stdout line of a checker.
+enum Line {
+    Finding(Finding),
+    Measure(Measure),
+}
+
+impl Line {
+    fn parse(line: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| e.to_string())?;
+        let measure = value
+            .get("schema")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| s.starts_with("rf.measure/"));
+        if measure {
+            Measure::parse(value).map(Self::Measure)
+        } else {
+            Finding::from_value(value).map(Self::Finding)
+        }
     }
 }
 
@@ -274,9 +277,9 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>, 
         if line.is_empty() {
             continue;
         }
-        match parse_line(line) {
-            Ok(Ok(f)) => findings.push(f),
-            Ok(Err(m)) => measures.push(m),
+        match Line::parse(line) {
+            Ok(Line::Finding(f)) => findings.push(f),
+            Ok(Line::Measure(m)) => measures.push(m),
             Err(e) => {
                 outcome.unparsed += 1;
                 first_unparsed.get_or_insert((i + 1, e));
@@ -319,6 +322,10 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>, 
         ));
     }
     outcome.findings = findings.len();
+    // A check that did not run to completion measured an unknown part.
+    if !outcome.ran() {
+        measures.clear();
+    }
     (outcome, findings, measures)
 }
 
@@ -469,6 +476,13 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
             finding: f,
         }));
         outcomes.push(outcome);
+    }
+    // Only a clean run can end an interval, so only it keeps the keys,
+    // which can be most of a run file.
+    if dirty != Some(false) {
+        for m in &mut measures {
+            m.measure.keys = None;
+        }
     }
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
@@ -684,6 +698,7 @@ mod tests {
         )
         .unwrap();
         let run = Run::load(&path).unwrap();
+        assert!(run.measures.is_empty());
         assert_eq!((run.header.commit, run.header.dirty), (None, None));
     }
 
@@ -785,9 +800,23 @@ mod tests {
             (MEASURE_ITEM_SCHEMA, "x")
         );
         assert_eq!((m.measure.unit.as_str(), m.measure.count), ("sentence", 3));
-        assert_eq!(m.measure.keys.as_ref().map(Vec::len), Some(2));
-        // Runs stored before measures existed load without any.
-        assert!(history(&p).unwrap().iter().all(|r| r.items.len() == 1));
+        assert_eq!(m.measure.keys, None);
+        // The temporary directory is not a git repository, so the run is
+        // not clean and keeps no keys.
+        assert_eq!(report.run.header.dirty, None);
+    }
+
+    #[test]
+    fn a_failed_check_stores_no_measure() {
+        let dir = tempfile::tempdir().unwrap();
+        let measure = r#"{"schema":"rf.measure/1","tool":"t","unit":"sentence","count":3}"#;
+        let p = project(
+            dir.path(),
+            &emit_script(dir.path(), &[FINDING_B, measure], 2, false),
+        );
+        let report = run(&p, &[]).unwrap();
+        assert!(!report.run.header.checks[0].ran());
+        assert!(report.run.measures.is_empty());
     }
 
     #[test]

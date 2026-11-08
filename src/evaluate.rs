@@ -104,7 +104,8 @@ pub enum Method {
 /// One side of the adoption date.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Side {
-    /// Observations: session groups, sessions (version 1) or check runs.
+    /// Observations: session groups, sessions (version 1), check runs or
+    /// check-run intervals.
     pub n: usize,
     /// The agent sessions in the `n` session groups; `None` for other units.
     #[serde(default)]
@@ -261,6 +262,11 @@ impl Evaluation {
         self.verdict = Verdict::Unmeasurable;
         self.reason = Some(why.into());
         self
+    }
+
+    /// A check-run lesson: described by `introduced`, judged over intervals.
+    pub fn is_check_run(&self) -> bool {
+        matches!(self.unit, Some(Unit::Run | Unit::Interval))
     }
 
     /// One line of `lab evaluate` text output.
@@ -517,7 +523,7 @@ fn check_runs(
     let mut last: Option<&Run> = None;
     let mut observed = false;
     // Clean, measured runs: the last one on each commit.
-    let mut by_commit: BTreeMap<&str, (usize, Measured)> = BTreeMap::new();
+    let mut by_commit: BTreeMap<&str, usize> = BTreeMap::new();
     for (index, run) in inputs.runs.iter().enumerate() {
         let complete = required
             .iter()
@@ -539,10 +545,17 @@ fn check_runs(
             Some(false) => before.push(count as f64),
             None => {}
         }
+        let measures_all = || {
+            required.iter().all(|name| {
+                run.measures
+                    .iter()
+                    .any(|m| m.check == *name && m.measure.tool == metric.tool)
+            })
+        };
         if let (Some(commit), Some(false)) = (run.header.commit.as_deref(), run.header.dirty)
-            && let Some(m) = measured(run, &metric.tool, required)
+            && measures_all()
         {
-            by_commit.insert(commit, (index, m));
+            by_commit.insert(commit, index);
         }
     }
     e.before = describe(&before);
@@ -577,70 +590,83 @@ fn check_runs(
         e.introduced = Some(found);
     }
 
-    let mut points: Vec<(usize, Measured)> = by_commit.into_values().collect();
-    points.sort_by(|(a, _), (b, _)| {
+    let mut ends: Vec<usize> = by_commit.into_values().collect();
+    ends.sort_by(|&a, &b| {
         let at = |i: usize| inputs.runs[i].header.at.as_str();
-        at(*a).cmp(at(*b)).then(a.cmp(b))
+        at(a).cmp(at(b)).then(a.cmp(&b))
     });
-    let units: BTreeSet<&str> = points
-        .iter()
-        .flat_map(|(i, _)| inputs.runs[*i].measures.iter())
-        .filter(|m| m.measure.tool == metric.tool && required.contains(m.check.as_str()))
-        .map(|m| m.measure.unit.as_str())
+    let points: Vec<(&Run, Measured)> = ends
+        .into_iter()
+        .map(|i| {
+            let run = &inputs.runs[i];
+            (run, measured(run, &metric.tool, required))
+        })
         .collect();
     let min = inputs.settings.min_sessions;
-    if units.len() > 1 {
-        e.reason = Some(format!(
-            "`{}` measures more than one unit ({}); a rate per new unit needs one{note}",
-            metric.tool,
-            units.into_iter().collect::<Vec<_>>().join(", ")
-        ));
-        return e;
+    // Each interval: its side, its unit (the required checks' units, joined
+    // by `+`), findings introduced and new units. An interval across a
+    // change of a check's unit is left out, since its counts do not compare.
+    let mut intervals: Vec<(bool, String, u64, u64)> = Vec::new();
+    for pair in points.windows(2) {
+        let ((r0, m0), (r1, m1)) = (&pair[0], &pair[1]);
+        let Some(side) = place(&r1.header.at) else {
+            continue;
+        };
+        let same_unit = m1
+            .iter()
+            .all(|(check, u)| u.unit.is_some() && m0[check].unit == u.unit);
+        if !same_unit {
+            continue;
+        }
+        let new_units = new_units(m0, m1);
+        if new_units == 0 {
+            continue;
+        }
+        let unit: BTreeSet<&str> = m1.values().filter_map(|u| u.unit).collect();
+        let found = introduced_count(
+            &metric_items(r0, metric, required),
+            &metric_items(r1, metric, required),
+        );
+        let unit = unit.into_iter().collect::<Vec<_>>().join("+");
+        intervals.push((side, unit, found, new_units));
     }
-    let Some(unit) = units.first() else {
+    // Only the latest unit counts: a checker that renamed or changed its
+    // unit gets a baseline again from runs in the new unit.
+    let Some(unit) = intervals.last().map(|i| i.1.clone()) else {
         let why = if e.introduced.is_some() {
             "descriptive: no measured interval yet"
         } else {
             "no complete check run since adoption"
         };
         e.reason = Some(format!(
-            "{why}; a verdict needs {min} or more intervals on each side between clean runs \
-             (no uncommitted changes) on consecutive commits whose checks print `rf.measure/1` \
-             (`--measure`){note}"
+            "{why}; a verdict needs {min} or more intervals with new units on each side, \
+             between clean runs (no uncommitted changes) on consecutive commits whose checks \
+             print `rf.measure/1` (`--measure`){note}"
         ));
         return e;
     };
     let mut sides = [IntervalSide::default(); 2];
-    for pair in points.windows(2) {
-        let ((i0, m0), (i1, m1)) = (&pair[0], &pair[1]);
-        let (r0, r1) = (&inputs.runs[*i0], &inputs.runs[*i1]);
-        let Some(side) = place(&r1.header.at) else {
-            continue;
-        };
-        let new_units = new_units(m0, m1);
-        if new_units == 0 {
+    let mut other_unit = 0;
+    for (side, u, found, new_units) in &intervals {
+        if *u != unit {
+            other_unit += 1;
             continue;
         }
-        let found = introduced(
-            &metric_items(r0, metric, required),
-            &metric_items(r1, metric, required),
-        );
-        let s = &mut sides[usize::from(side)];
+        let s = &mut sides[usize::from(*side)];
         s.n += 1;
-        s.findings += found.count as u64;
+        s.findings += found;
         s.new_units += new_units;
     }
-    let [b, a] = sides;
-    if b.n + a.n == 0 {
-        e.reason = Some(format!(
-            "descriptive: no measured interval with new {unit}s yet; a verdict needs {min} or \
-             more on each side{note}"
-        ));
-        return e;
+    if other_unit > 0 {
+        let _ = write!(
+            note,
+            "; {other_unit} interval(s) measured in another unit than `{unit}` left out"
+        );
     }
+    let [b, a] = sides;
     e.unit = Some(Unit::Interval);
     e.method = Some(Method::ConditionalBinomial);
-    e.measure = Some((*unit).to_string());
+    e.measure = Some(unit);
     e.before = b.side();
     e.after = a.side();
     if b.n < min {
@@ -670,6 +696,8 @@ fn check_runs(
     } else {
         Verdict::Inconclusive
     };
+    // A verdict has no reason, but a missing reviewed run is still said.
+    e.reason = note.strip_prefix("; ").map(Into::into);
     e
 }
 
@@ -677,6 +705,8 @@ fn check_runs(
 /// `rf.measure/1` records.
 #[derive(Debug)]
 struct Units<'r> {
+    /// `None` when the records name more than one unit.
+    unit: Option<&'r str>,
     count: u64,
     /// `None` when a record has no keys.
     keys: Option<BTreeSet<&'r str>>,
@@ -685,20 +715,24 @@ struct Units<'r> {
 /// Per required check, its units.
 type Measured<'r> = BTreeMap<&'r str, Units<'r>>;
 
-/// What each required check measured for `tool` in `run`; `None` when one
-/// of them measured nothing. The caller refuses a rate when the records
-/// name more than one unit, so merging them here does no harm.
-fn measured<'r>(run: &'r Run, tool: &str, required: &BTreeSet<&str>) -> Option<Measured<'r>> {
+/// What each required check measured for `tool` in `run`. A check that
+/// measured nothing is missing.
+fn measured<'r>(run: &'r Run, tool: &str, required: &BTreeSet<&str>) -> Measured<'r> {
     let mut out: Measured = BTreeMap::new();
     for m in run
         .measures
         .iter()
         .filter(|m| m.measure.tool == tool && required.contains(m.check.as_str()))
     {
+        let unit = m.measure.unit.as_str();
         let u = out.entry(m.check.as_str()).or_insert(Units {
+            unit: Some(unit),
             count: 0,
             keys: Some(BTreeSet::new()),
         });
+        if u.unit != Some(unit) {
+            u.unit = None;
+        }
         u.count += m.measure.count;
         match (&mut u.keys, &m.measure.keys) {
             (Some(keys), Some(more)) => keys.extend(more.iter().map(String::as_str)),
@@ -706,7 +740,7 @@ fn measured<'r>(run: &'r Run, tool: &str, required: &BTreeSet<&str>) -> Option<M
             (None, Some(_)) => {}
         }
     }
-    (out.len() == required.len()).then_some(out)
+    out
 }
 
 /// New units from `earlier` to `later`: per check, the keys `later` has and
@@ -759,19 +793,34 @@ fn metric_items<'r>(run: &'r Run, metric: &Metric, required: &BTreeSet<&str>) ->
 /// Subjects kept per introduced key.
 const INTRODUCED_SUBJECTS: usize = 10;
 
+/// What introduced findings are counted by: message and data.
+fn finding_key(i: &Item) -> (String, String) {
+    (
+        i.finding.message.clone(),
+        i.finding
+            .data
+            .as_ref()
+            .map(|d| d.to_string())
+            .unwrap_or_default(),
+    )
+}
+
+/// `introduced(first, last).count`, without the subjects.
+fn introduced_count(first: &[&Item], last: &[&Item]) -> u64 {
+    let mut net: BTreeMap<(String, String), i64> = BTreeMap::new();
+    for i in first {
+        *net.entry(finding_key(i)).or_default() -= 1;
+    }
+    for i in last {
+        *net.entry(finding_key(i)).or_default() += 1;
+    }
+    net.values().map(|&n| n.max(0) as u64).sum()
+}
+
 /// The findings of `last` beyond their key's count in `first`, keyed by
 /// message and data.
 fn introduced(first: &[&Item], last: &[&Item]) -> Introduced {
-    let key = |i: &Item| {
-        (
-            i.finding.message.clone(),
-            i.finding
-                .data
-                .as_ref()
-                .map(|d| d.to_string())
-                .unwrap_or_default(),
-        )
-    };
+    let key = finding_key;
     let mut base: BTreeMap<(String, String), usize> = BTreeMap::new();
     for i in first {
         *base.entry(key(i)).or_default() += 1;
@@ -2387,33 +2436,72 @@ mod tests {
         let required: BTreeSet<&str> = ["claims"].into();
         let (a, b) = (run(&["aa", "bb"]), run(&["aa", "cc"]));
         let (ma, mb) = (
-            measured(&a, "claimcheck", &required).unwrap(),
-            measured(&b, "claimcheck", &required).unwrap(),
+            measured(&a, "claimcheck", &required),
+            measured(&b, "claimcheck", &required),
         );
         assert_eq!(new_units(&ma, &mb), 1);
         // Without keys on both sides, only the count's increase is new.
         let mut c = run(&["aa", "cc"]);
         c.measures[0].measure.keys = None;
-        let mc = measured(&c, "claimcheck", &required).unwrap();
+        let mc = measured(&c, "claimcheck", &required);
         assert_eq!(new_units(&ma, &mc), 0);
-        assert!(measured(&c, "othertool", &required).is_none());
+        assert!(measured(&c, "othertool", &required).is_empty());
     }
 
     #[test]
-    fn two_units_get_no_rate() {
+    fn only_intervals_in_the_latest_unit_count() {
         let mut runs = three_and_three(1, 1);
-        runs[2].measures[0].measure.unit = "sentence".into();
+        // The checker renamed its unit after the fourth run.
+        for r in &mut runs[..4] {
+            r.measures[0].measure.unit = "sentence".into();
+        }
         let e = eval_min(&runs, 3);
         assert_eq!(
-            (e.verdict, e.method),
-            (Verdict::Collecting, Some(Method::Descriptive))
+            (e.verdict, e.measure.as_deref(), e.before.n, e.after.n),
+            (Verdict::Collecting, Some("citing-sentence"), 0, 2)
         );
         let reason = e.reason.unwrap();
         assert!(
-            reason.starts_with(
-                "`claimcheck` measures more than one unit (citing-sentence, sentence)"
-            ),
+            reason.starts_with("no baseline: 0 of 3")
+                && reason.ends_with(
+                    "; 3 interval(s) measured in another unit than `citing-sentence` left out"
+                ),
             "{reason}"
+        );
+        // A check measuring two units in one run ends no interval.
+        let mut runs = three_and_three(1, 1);
+        runs[6].measures.push(measure_item("sentence", 1, None));
+        let e = eval_min(&runs, 3);
+        assert_eq!((e.before.n, e.after.n), (3, 2));
+    }
+
+    #[test]
+    fn a_missing_reviewed_run_is_named_beside_a_verdict() {
+        let cfg = EvaluateConfig {
+            min_sessions: 3,
+            ..EvaluateConfig::default()
+        };
+        let mut l = lesson("claimcheck:source-text-missing", "2026-11-03");
+        l.meta.reviewed = Some("gone.jsonl".into());
+        let runs = three_and_three(10, 0);
+        let e = evaluate(
+            &l,
+            &Inputs {
+                runs: &runs,
+                configured: &["claims"],
+                findings: &[],
+                sessions: Err("none"),
+                settings: &cfg,
+            },
+            utc_date,
+        );
+        assert_eq!(e.verdict, Verdict::Improved);
+        assert!(
+            e.reason
+                .as_deref()
+                .is_some_and(|r| r.starts_with("the reviewed run `gone.jsonl` is not a stored")),
+            "{:?}",
+            e.reason
         );
     }
 }

@@ -191,27 +191,23 @@ fn age(d: jiff::SignedDuration) -> String {
 /// `status` and `reviewed` are the lesson's current ones, which can be newer
 /// than the loop's record.
 fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> String {
-    let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
     let unit = e.unit.map_or("session", |u| u.as_str());
-    // A check-run lesson without a verdict: its introduced findings are the news.
-    if e.introduced.is_some() && matches!(e.verdict, Verdict::Collecting | Verdict::Inconclusive)
-        || e.method == Some(Method::Descriptive) && e.verdict == Verdict::Collecting
-    {
+    // A check-run lesson: its verdict, if any, and its introduced findings,
+    // which are the news while there is no verdict.
+    if e.is_check_run() && e.verdict != Verdict::Unmeasurable {
         let min = e.min_sessions;
-        let prefix = match (e.method, e.verdict) {
-            (Some(Method::ConditionalBinomial), Verdict::Collecting) if e.before.n < min => {
-                format!(
-                    "collecting {}/{min} {unit}s after, {}/{min} before; ",
-                    e.after.n, e.before.n
-                )
+        let verdict = match e.verdict {
+            Verdict::Collecting if e.method == Some(Method::ConditionalBinomial) => {
+                let mut s = format!("collecting {}/{min} {unit}s after", e.after.n);
+                if e.before.n < min {
+                    let _ = write!(s, ", {}/{min} before", e.before.n);
+                }
+                s
             }
-            (Some(Method::ConditionalBinomial), Verdict::Collecting) => {
-                format!("collecting {}/{min} {unit}s after; ", e.after.n)
-            }
-            (_, Verdict::Inconclusive) => format!("inconclusive{}; ", p(e.p_lower)),
-            _ => String::new(),
+            Verdict::Collecting => String::new(),
+            _ => verdict_text(e, status),
         };
-        let text: String = match &e.introduced {
+        let introduced = match &e.introduced {
             Some(i) if reviewed.is_some() && i.reviewed.as_deref() != reviewed => {
                 "reviewed after the last `lab loop`; `lab evaluate` gives the current count".into()
             }
@@ -226,8 +222,20 @@ fn verdict_line(e: &Evaluation, status: Status, reviewed: Option<&str>) -> Strin
             ),
             None => "no complete check run since adoption".into(),
         };
-        return prefix + &text;
+        return if verdict.is_empty() {
+            introduced
+        } else {
+            format!("{verdict}; {introduced}")
+        };
     }
+    verdict_text(e, status)
+}
+
+/// A verdict as the brief shows it for agent sessions, and for a check-run
+/// lesson with a verdict.
+fn verdict_text(e: &Evaluation, status: Status) -> String {
+    let p = |p: Option<f64>| p.map(|p| format!(" {}", p_label(p))).unwrap_or_default();
+    let unit = e.unit.map_or("session", |u| u.as_str());
     match e.verdict {
         Verdict::Collecting => {
             let mut s = format!("collecting {}/{}", e.after.n, e.min_sessions);
@@ -641,7 +649,15 @@ mod tests {
         e.verdict = Verdict::Improved;
         assert_eq!(
             verdict_line(&e, Status::Adopted, None),
-            "improved p=0.004 → verify"
+            "improved p=0.004 → verify; 2 introduced since the first complete run after \
+             adoption, on 2026-11-01 → review (`lab evaluate`)"
+        );
+        // Without a run since adoption the brief still names intervals.
+        e.verdict = Verdict::Collecting;
+        e.introduced = None;
+        assert_eq!(
+            verdict_line(&e, Status::Adopted, None),
+            "collecting 3/10 intervals after, 0/10 before; no complete check run since adoption"
         );
     }
 

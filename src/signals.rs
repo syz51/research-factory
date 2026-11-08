@@ -280,13 +280,21 @@ pub fn derive(
         );
         let file = l.path.strip_prefix(root).unwrap_or(&l.path).display();
         let note = summary(e).replace('"', "'");
+        let open = e.introduced.as_ref().filter(|i| i.count > 0);
         let (kind, t, act) = match (e.verdict, l.meta.status) {
             (Verdict::Improved, Status::Adopted) => (
                 "lesson-verifiable",
                 format!("Verify lesson {id}: its metric improved"),
                 format!(
                     "Its metric is lower since adoption. Read the numbers, then mark it verified:\n\n\
-                     ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n"
+                     ```sh\nlab lesson set {id} verified --note \"lab evaluate: {note}\"\n```\n{}",
+                    open.map(|i| format!(
+                        "\n{} finding(s) of its rule were still introduced since {}; fix them too:\n\n```\n{}\n```\n",
+                        i.count,
+                        i.since_text(e.adopted.as_deref()),
+                        e.introduced_lines().join("\n")
+                    ))
+                    .unwrap_or_default()
                 ),
             ),
             (Verdict::Worse, Status::Adopted | Status::Verified) => (
@@ -309,12 +317,18 @@ pub fn derive(
                      ```sh\nlab lesson set {id} verified --force --note \"<the evidence>\"\nlab lesson set {id} retired --note \"<why>\"\n```\n"
                 ),
             ),
-            // A check-run lesson without a verdict: its introduced findings
-            // are what to act on.
-            (Verdict::Collecting | Verdict::Inconclusive, Status::Adopted | Status::Verified)
-                if e.introduced.as_ref().is_some_and(|i| i.count > 0) =>
-            {
-                let i = e.introduced.as_ref().expect("checked above");
+            // Any other check-run lesson with introduced findings, verified
+            // ones included: the findings are what to act on.
+            (verdict, Status::Adopted | Status::Verified) if open.is_some() => {
+                let i = open.expect("checked above");
+                let next = match verdict {
+                    Verdict::Inconclusive => "The measured intervals show no change in either direction yet; to verify the lesson sooner, cite other evidence with `--force`.".to_string(),
+                    Verdict::Improved => "Its metric is lower since adoption; keep it that way.".to_string(),
+                    _ => format!(
+                        "A verdict needs {} measured intervals on each side of adoption (`lab evaluate` says how many there are); to verify the lesson sooner, cite other evidence with `--force`.",
+                        e.min_sessions
+                    ),
+                };
                 (
                     "lesson-introduced",
                     if i.reviewed.is_some() {
@@ -326,8 +340,7 @@ pub fn derive(
                         "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
                          Fix each, or show that the finding is wrong. When `lab evaluate` lists only findings that cannot be fixed, such as those in append-only files, record their review with their count:\n\n\
                          ```sh\nlab lesson review {id} --count <n> --note \"<what was found>\"\n```\n\n\
-                         If such findings keep appearing, revise the rule in `{file}` or retire the lesson. \
-                         A verdict needs measured intervals on both sides of adoption (`lab evaluate` says how many); to verify the lesson sooner, cite other evidence with `--force`.\n",
+                         If such findings keep appearing, revise the rule in `{file}` or retire the lesson. {next}\n",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
                         e.introduced_lines().join("\n")
@@ -336,13 +349,13 @@ pub fn derive(
             }
             _ => continue,
         };
-        let detail = match (e.verdict, &e.introduced) {
+        let detail = match (e.verdict, open) {
             (Verdict::Unmeasurable, _) => {
                 format!("unmeasurable: {}", e.reason.as_deref().unwrap_or(""))
             }
             // A changed set of introduced findings, or a review that moved the
             // run they are counted from, is news; their subjects alone are not.
-            (Verdict::Collecting | Verdict::Inconclusive, Some(i)) => {
+            (_, Some(i)) if kind == "lesson-introduced" => {
                 let keys: Vec<String> = i
                     .findings
                     .iter()
@@ -720,6 +733,25 @@ mod tests {
         ] {
             assert!(s.body.contains(text), "{text:?} in\n{}", s.body);
         }
+        assert!(s.body.contains("were still introduced since"), "{}", s.body);
+        // A verified lesson keeps the introduced signal after an improvement.
+        let mut verified = lesson.clone();
+        verified.meta.status = Status::Verified;
+        let s = derive(
+            "p",
+            Path::new("."),
+            "now",
+            std::slice::from_ref(&verified),
+            &[interval(Verdict::Improved)],
+            &Uncovered::default(),
+            &[],
+        )
+        .remove(0);
+        assert_eq!(
+            (s.kind.as_str(), s.detail),
+            ("lesson-introduced", before.detail)
+        );
+        assert!(s.body.contains("keep it that way"), "{}", s.body);
     }
 
     #[test]

@@ -526,7 +526,7 @@ fn summary(r: &Record, sigs: &[Signal]) -> String {
     let failed = r.measure.iter().filter(|m| !m.ok).count();
     let mut verdicts: BTreeMap<&str, usize> = BTreeMap::new();
     for e in &r.evaluations {
-        // Check runs are described, never judged.
+        // Check runs without a measured interval are described, not judged.
         let label = if e.method == Some(crate::evaluate::Method::Descriptive)
             && e.verdict == crate::evaluate::Verdict::Collecting
         {
