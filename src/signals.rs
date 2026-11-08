@@ -45,8 +45,17 @@ pub struct Candidate {
     pub tool: String,
     pub rule: String,
     pub severity: String,
-    pub findings: usize,
+    /// Its count toward the threshold, as `lab retro` describes it.
+    pub count: String,
     pub sample: Vec<String>,
+}
+
+/// The recurring rules without a lesson, and why agent findings were not
+/// counted per session group, if they were not.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Uncovered {
+    pub candidates: Vec<Candidate>,
+    pub ungrouped: Option<String>,
 }
 
 /// A measure command that did not succeed.
@@ -218,7 +227,7 @@ pub fn derive(
     now: &str,
     lessons: &[Lesson],
     evaluations: &[Evaluation],
-    candidates: &[Candidate],
+    uncovered: &Uncovered,
     failures: &[MeasureFailure],
 ) -> Vec<Signal> {
     let signal =
@@ -337,6 +346,7 @@ pub fn derive(
             detail,
         ));
     }
+    let candidates = &uncovered.candidates;
     if !candidates.is_empty() {
         let mut body = format!(
             "{} recurring finding rule(s) at warn or error have no lesson measuring them:\n\n",
@@ -345,13 +355,16 @@ pub fn derive(
         for c in candidates {
             let _ = writeln!(
                 body,
-                "- {} `{}:{}`: {} distinct finding(s); e.g. {}",
+                "- {} `{}:{}`: {}; e.g. {}",
                 c.severity,
                 c.tool,
                 c.rule,
-                c.findings,
+                c.count,
                 c.sample.join(", ")
             );
+        }
+        if let Some(why) = &uncovered.ungrouped {
+            let _ = writeln!(body, "\nNote: {why}.");
         }
         body.push_str(
             "\nDraft a lesson for each as `observed`, find the cause, and replace the drafted rule with the practice that prevents it; adopt it only after reading its evidence:\n\n\
@@ -638,7 +651,7 @@ mod tests {
                 "now",
                 std::slice::from_ref(&lesson),
                 &[e],
-                &[],
+                &Uncovered::default(),
                 &[],
             )
             .remove(0)
@@ -655,6 +668,33 @@ mod tests {
             "{}",
             after.body
         );
+    }
+
+    #[test]
+    fn the_uncovered_rules_signal_says_why_findings_were_not_grouped() {
+        let candidate = Candidate {
+            tool: "agentprof".into(),
+            rule: "reread-file".into(),
+            severity: "warn".into(),
+            count: "3 distinct finding(s)".into(),
+            sample: vec!["claude:a".into()],
+        };
+        let body = |ungrouped: Option<&str>| {
+            let uncovered = Uncovered {
+                candidates: vec![candidate.clone()],
+                ungrouped: ungrouped.map(Into::into),
+            };
+            derive("p", Path::new("."), "now", &[], &[], &uncovered, &[])
+                .remove(0)
+                .body
+        };
+        let noted = body(Some("sessions file unreadable"));
+        assert!(
+            noted.contains("`agentprof:reread-file`: 3 distinct finding(s); e.g. claude:a")
+                && noted.matches("Note: sessions file unreadable.").count() == 1,
+            "{noted}"
+        );
+        assert!(!body(None).contains("Note:"));
     }
 
     fn t(h: i64) -> jiff::Timestamp {

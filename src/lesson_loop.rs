@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Project;
 use crate::evaluate::Evaluation;
 use crate::lessons::Lesson;
-use crate::signals::{self, Candidate, MeasureFailure, Signal, State};
+use crate::signals::{self, MeasureFailure, Signal, State, Uncovered};
 
 pub const SCHEMA: &str = "rf.loop/1";
 const MEASURE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -79,7 +79,7 @@ pub struct Record {
 pub struct Analysis {
     pub lessons: Vec<Lesson>,
     pub evaluations: Vec<Evaluation>,
-    pub candidates: Vec<Candidate>,
+    pub uncovered: Uncovered,
 }
 
 fn last_path(dir: &Path) -> PathBuf {
@@ -474,7 +474,7 @@ fn evaluate_and_send(
         &at,
         &analysis.lessons,
         &analysis.evaluations,
-        &analysis.candidates,
+        &analysis.uncovered,
         failures,
     );
     record.evaluations = analysis.evaluations;

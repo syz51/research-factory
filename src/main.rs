@@ -256,9 +256,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let lessons = lessons::load(&project.lessons_dir())?;
             let runs = check::history(&project)?;
             let agent = agent_findings(&project, None)?;
-            let rec = retro::recurrences(&runs, &agent.findings);
+            let (groups, ungrouped) = session_groups(&agent, || {
+                agent_sessions(&project, &agent).map(|s| retro::SessionGroups::new(&s))
+            });
+            let rec = retro::recurrences(&runs, &agent.findings, groups.as_ref());
             let n = retro::candidates(&rec, &lessons, project.lab.recurrence).len();
-            if let Some(note) = &agent.note {
+            for note in [&agent.note, &ungrouped].into_iter().flatten() {
                 eprintln!("lab: {note}");
             }
             let checks: Vec<String> = project.lab.checks.iter().map(|c| c.name.clone()).collect();
@@ -566,6 +569,9 @@ struct AgentFiles {
     path: Option<PathBuf>,
     /// Why the configured findings file was not read.
     note: Option<String>,
+    /// Whether the file was named on the command line, which makes its
+    /// sibling `sessions.jsonl` its sessions file.
+    explicit: bool,
 }
 
 /// Agent findings from `explicit` (must exist) or `[lab] agent_findings` (may
@@ -579,6 +585,7 @@ fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFil
                 findings: Vec::new(),
                 path: None,
                 note: None,
+                explicit: false,
             });
         }
     };
@@ -590,23 +597,50 @@ fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFil
                 path.display()
             )),
             path: Some(path),
+            explicit: false,
         });
     }
     Ok(AgentFiles {
         findings: retro::read_findings(&path)?,
         path: Some(path),
         note: None,
+        explicit: required,
     })
 }
 
-/// The agent sessions that measure agent-rule lessons, or why they are unavailable.
+/// The agent sessions that measure agent-rule lessons, or why they are
+/// unavailable: the sibling `sessions.jsonl` of a findings file named on the
+/// command line, else `[lab] agent_sessions`, else the configured findings
+/// file's sibling.
 fn agent_sessions(project: &Project, agent: &AgentFiles) -> Result<Vec<retro::Session>, String> {
     let path = match (&project.lab.agent_sessions, &agent.path) {
+        (_, Some(findings)) if agent.explicit => findings.with_file_name("sessions.jsonl"),
         (Some(p), _) => project.path(p),
         (None, Some(findings)) => findings.with_file_name("sessions.jsonl"),
         (None, None) => return Err("no [lab] agent_findings or agent_sessions configured".into()),
     };
     retro::read_sessions(&path)
+}
+
+/// The session groups `lab retro` counts agent findings in, read only when
+/// there are agent findings; without them, a note saying why agent findings
+/// count once per distinct finding.
+fn session_groups(
+    agent: &AgentFiles,
+    sessions: impl FnOnce() -> Result<retro::SessionGroups, String>,
+) -> (Option<retro::SessionGroups>, Option<String>) {
+    if agent.findings.is_empty() {
+        return (None, None);
+    }
+    match sessions() {
+        Ok(groups) => (Some(groups), None),
+        Err(why) => (
+            None,
+            Some(format!(
+                "agent findings count once per distinct finding, not once per session group: sessions file unreadable: {why}"
+            )),
+        ),
+    }
 }
 
 fn baseline(project: &Project, cmd: BaselineCommand) -> Result<ExitCode, String> {
@@ -664,13 +698,16 @@ fn retro_cmd(
         .filter(|r| since.is_none_or(|s| project.date_of(&r.header.at).is_ok_and(|d| d >= s)))
         .collect();
     let agent = agent_findings(project, path)?;
-    if let Some(note) = &agent.note {
+    let (groups, ungrouped) = session_groups(&agent, || {
+        agent_sessions(project, &agent).map(|s| retro::SessionGroups::new(&s))
+    });
+    for note in [&agent.note, &ungrouped].into_iter().flatten() {
         println!("{note}");
     }
-    let rec = retro::recurrences(&runs, &agent.findings);
+    let rec = retro::recurrences(&runs, &agent.findings, groups.as_ref());
     let cands = retro::candidates(&rec, &lessons, project.lab.recurrence);
     println!(
-        "{} check run(s), {} agent finding(s), {} rule(s) seen; {} recurring rule(s) without a lesson (threshold: {} distinct findings).",
+        "{} check run(s), {} agent finding(s), {} rule(s) seen; {} recurring rule(s) without a lesson (threshold: {} recurrences, each a distinct finding or the agent findings in one session group).",
         runs.len(),
         agent.findings.len(),
         rec.len(),
@@ -682,8 +719,8 @@ fn retro_cmd(
         let sev = r.severity.map_or("?", Severity::as_str);
         let sample: Vec<&str> = r.subjects.iter().take(3).map(String::as_str).collect();
         println!(
-            "- {sev} {tool}:{rule}: {} distinct finding(s), {} run(s), {} subject(s); e.g. {}",
-            r.findings(),
+            "- {sev} {tool}:{rule}: {}, {} run(s), {} subject(s); e.g. {}",
+            r.describe(),
             r.runs,
             r.subjects.len(),
             sample.join(", ")
@@ -779,21 +816,31 @@ fn analyse(project: &Project) -> Result<lesson_loop::Analysis, String> {
     let lessons = lessons::load(&project.lessons_dir())?;
     let evidence = Evidence::load(project)?;
     let evaluations = evidence.active(&lessons);
-    let rec = retro::recurrences(&evidence.runs, &evidence.agent.findings);
+    let (groups, ungrouped) = session_groups(&evidence.agent, || {
+        evidence
+            .sessions
+            .as_deref()
+            .map(retro::SessionGroups::new)
+            .map_err(Clone::clone)
+    });
+    let rec = retro::recurrences(&evidence.runs, &evidence.agent.findings, groups.as_ref());
     let candidates = retro::candidates(&rec, &lessons, project.lab.recurrence)
         .into_iter()
         .map(|((tool, rule), r)| signals::Candidate {
             tool: tool.clone(),
             rule: rule.clone(),
             severity: r.severity.map_or("?", Severity::as_str).into(),
-            findings: r.findings(),
+            count: r.describe(),
             sample: r.subjects.iter().take(3).cloned().collect(),
         })
         .collect();
     Ok(lesson_loop::Analysis {
         lessons,
         evaluations,
-        candidates,
+        uncovered: signals::Uncovered {
+            candidates,
+            ungrouped,
+        },
     })
 }
 

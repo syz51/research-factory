@@ -63,7 +63,7 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 ## 5. Agent-session records: `rf.session/1`
 
-`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab evaluate` also reads `source`, `id`, `role`, `start` and `parent_id` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). Within a stratum, the sessions below one root session (following `parent_id` up, within one `source`) form one session group, on the root's side of the adoption date; a session without a `parent_id` is a group of its own. It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out.
+`agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab retro`, `lab brief` and `lab loop` count a rule's agent findings once per session tree: a session without a `parent_id` together with every session below it, within one `source`. A finding whose `subject` is not a session in the file counts on its own. They read the sessions file only when there are agent findings, and `lab retro --agent-findings FILE` reads the `sessions.jsonl` next to FILE. Without a readable sessions file each distinct finding counts, and they say why. `lab evaluate` also reads `source`, `id`, `role`, `start` and `parent_id` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). Within a stratum, the sessions below one root session (following `parent_id` up, within one `source`) form one session group, on the root's side of the adoption date; a session without a `parent_id` is a group of its own. It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out.
 
 ## 6. Archive records and seals: front matter and `rf.archive-seal/1`
 
@@ -112,7 +112,7 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
 }
 ```
 
-## 7. Lesson evaluations and loop signals: `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
+## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 
 `lab` owns these. [factory.md](factory.md#how-a-lesson-is-evaluated) explains the method.
 
@@ -176,6 +176,34 @@ renotify_hours = 24            # at most 87600
 ```
 
 A measure's `status` is `exit N`, `killed by a signal`, `timed out after 600 s` or `could not start: …`; a signal's is `notified`, `pending` (no notify command), `failed` (retried next loop) or `unchanged`. The same directory holds `lock` (an exclusive OS file lock held while a loop runs and released when its process exits, so a loop that died never blocks the next; the file names the holder's pid) and `loop.log` (the measure commands' output and the background loop's own; moved to `loop.log.1` past 1 MiB). A measure or notify command that times out is killed with its whole process group. An error after the measure commands, such as an unreadable signal state, is recorded in `last.json`, so `--if-older` backs off and the brief shows it. `lab loop` exits 0, 1 when a measure or notify command failed, and 2 on a `lab` error.
+
+**`rf.labcheck/1`**: one file per `lab check` run in `<state_dir>/lab/checks/`, named after the time it was stored (`<YYYYMMDDTHHMMSS.mmmZ>.jsonl`, with `-1`, `-2` on a clash). The first line is the run header; each further line is an `rf.labcheck.item/1` record with the `check`, the finding's `fingerprint` and the `finding` itself. Since lab 0.7.0, readers skip a further line whose `schema` is another one, so a later version can add record kinds; older versions refuse such a run.
+
+```json
+{"schema":"rf.labcheck/1","at":"2026-11-20T03:00:00Z","commit":"04d97b1c…","dirty":false,"checks":[{"name":"claims","command":["claimcheck","check","--format","jsonl"],"exit":1,"status":"ok","findings":12,"unparsed":0,"duration_ms":5321}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `at` | UTC start time of the run |
+| `commit` | `git rev-parse HEAD` of the repository holding the project root when the run started (since lab 0.7.0); `null` outside git or before the first commit. Runs stored by older versions have neither field and load as `null` |
+| `dirty` | Whether files under the project root differed from `commit` when the run started (since lab 0.7.0): tracked changes, or untracked files that git does not ignore, whatever `status.showUntrackedFiles` says, leaving out the state directory. A project root that the repository ignores is always dirty, since no commit holds its files. Checks read the work tree, so a dirty run's findings belong to `commit` plus uncommitted text; `null` when `commit` is. lab reads both with `git --no-optional-locks status`, so a background run never holds the index lock; a git failure other than "not a git repository" is printed and leaves both `null` |
+| `checks` | Each check that ran: `name`, `command`, `exit` (`null` when it could not start or was killed), `status` (`ok` for exit 0 or 1, else `failed`), `findings`, `unparsed` (stdout lines that were not findings) and `duration_ms` |
+
+**Proposed: check-run denominators and an `improved` verdict.** Not implemented. A check-run lesson stays `collecting` because a count of introduced findings says nothing without the amount of new text it came from: ten introduced findings in one new sentence and in a thousand are different results. This is the design the implementation should follow.
+
+1. *The denominator record.* With a `--measure` flag, which `lab check` commands pass, a checker prints one `rf.measure/1` line per unit it checks beside its findings, so checkers without the flag keep their current output and other readers are not surprised:
+
+   ```json
+   {"schema":"rf.measure/1","tool":"claimcheck","unit":"citing-sentence","count":412,"keys":["5f1c09a2e4b7d013", "…"]}
+   ```
+
+   `unit` names what is counted (for claimcheck, sentences that cite a reference), `count` how many the run saw, and `keys` the sorted, distinct first 16 hex digits of the SHA-256 of each unit's normalized text. Keys are optional; they let lab count new units exactly, as it keys introduced findings by message and data rather than by path. `lab check` stores each as an `rf.labcheck.measure/1` line with its `check`, and no longer counts it as `unparsed`. lab 0.7.0 and later skip such lines; every machine that shares the run directory needs at least that version first.
+2. *New units.* Between two complete runs, the new units are the keys in the later run that the earlier one lacks; without keys on both sides, the count's increase, at least 0, which misses text that replaced deleted text.
+3. *Intervals.* Only runs with `dirty` `false` count, and only the last such run on each `commit`, so a commit is measured once and uncommitted text never is. Ordered by commit time (a replayed run's `at`, see step 5, is its commit's time, while its file name is the time it was stored), consecutive such runs form an interval with `introduced` (counted as for `introduced` above, between the interval's two runs) and `new_units`. An interval belongs to the side of adoption of its later run's date; intervals with no new units are left out. Each interval is one observation counted against `min_sessions`.
+4. *The comparison.* The rate on each side is Σ introduced / Σ new units over its intervals. Given the total introduced `N = a + b`, adoption changing nothing makes the after count `b` binomial with `N` trials and probability `U_after / (U_before + U_after)`, from the new units on each side. `p_lower` is `P(X ≤ b)` and `p_upper` is `P(X ≥ b)`; the verdict follows the session rules: `collecting` until both sides have `min_sessions` intervals, `improved` when `p_lower < alpha/2`, `worse` when `p_upper < alpha/2`, otherwise `inconclusive`. Intervals are treated as independent and findings as independent within them; when one interval holds most findings, a permutation test over whole intervals, like the session-group test, should replace the binomial one.
+5. *The pre-adoption rate.* Lessons adopted before denominators existed, such as masters' fetch-cited-texts and link-own-measurements, have no pre-adoption run with a measure. `lab check --at <commit>` should rebuild them: it checks out each past commit into a temporary git worktree, runs the configured checks there with today's checkers, and stores the run with that commit, `dirty` `false`, `at` set to the commit's time, and `"replayed": true`. Running the same checker version on both sides also removes checker changes from the comparison. A check whose inputs are not committed, such as git-ignored source texts, cannot be replayed faithfully; it should read them from the current work tree and say so, or the lesson stays `collecting` with a reason naming the missing baseline. Without replayed or recorded pre-adoption intervals, the verdict is `unmeasurable` (no baseline), as for sessions.
+6. *Limits.* Text written between adoption and the first run after it falls in an interval that straddles adoption and is assigned by its later run, so it counts as after. A checker or checker-version change between two runs moves counts by itself; the run header should record each checker's version so such intervals can be left out.
 
 ## 8. Conventions every repository follows
 

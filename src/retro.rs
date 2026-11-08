@@ -21,35 +21,80 @@ pub struct Recurrence {
     /// Distinct findings by fingerprint, so a finding left unfixed across
     /// several runs counts once.
     pub fingerprints: BTreeSet<String>,
+    /// What counts toward the recurrence threshold.
+    units: BTreeSet<Unit>,
+}
+
+/// One recurrence: a distinct finding, or the rule's agent-session findings
+/// in one session group.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Unit {
+    Finding(String),
+    Group(String),
 }
 
 impl Recurrence {
-    fn add(&mut self, f: &Finding, fingerprint: &str) {
+    fn add(&mut self, f: &Finding, fingerprint: &str, unit: Unit) {
         self.fingerprints.insert(fingerprint.to_string());
         self.subjects.insert(f.subject.clone());
+        self.units.insert(unit);
         // Keep the most severe level seen (Error < Warn < Info in the enum order).
         self.severity = Some(self.severity.map_or(f.severity, |s| s.min(f.severity)));
     }
 
-    /// Distinct findings of the rule: what counts toward the recurrence threshold.
+    /// Distinct findings of the rule.
     pub fn findings(&self) -> usize {
         self.fingerprints.len()
+    }
+
+    /// Session groups the rule's agent-session findings fell in.
+    pub fn groups(&self) -> usize {
+        self.units
+            .iter()
+            .filter(|u| matches!(u, Unit::Group(_)))
+            .count()
+    }
+
+    /// What counts toward the recurrence threshold: distinct findings, with
+    /// the agent-session findings in one session group counted once.
+    pub fn recurrences(&self) -> usize {
+        self.units.len()
+    }
+
+    /// The count, such as `2 recurrence(s) from 7 distinct finding(s), 2 of them session group(s)`.
+    pub fn describe(&self) -> String {
+        match self.groups() {
+            0 => format!("{} distinct finding(s)", self.findings()),
+            g => format!(
+                "{} recurrence(s) from {} distinct finding(s), {g} of them session group(s)",
+                self.recurrences(),
+                self.findings()
+            ),
+        }
     }
 }
 
 pub type Key = (String, String);
 
 /// Groups findings from stored check runs and from an agent-findings file.
-pub fn recurrences(runs: &[Run], agent: &[Finding]) -> BTreeMap<Key, Recurrence> {
+/// With `groups`, agent findings on a known session count once per session
+/// group; without it, and for check runs, each distinct finding counts.
+pub fn recurrences(
+    runs: &[Run],
+    agent: &[Finding],
+    groups: Option<&SessionGroups>,
+) -> BTreeMap<Key, Recurrence> {
     let mut map: BTreeMap<Key, Recurrence> = BTreeMap::new();
     for run in runs {
         let mut seen_in_run = BTreeSet::new();
         for item in &run.items {
             let f = &item.finding;
             let key = (f.tool.clone(), f.rule.clone());
-            map.entry(key.clone())
-                .or_default()
-                .add(f, &item.fingerprint);
+            map.entry(key.clone()).or_default().add(
+                f,
+                &item.fingerprint,
+                Unit::Finding(item.fingerprint.clone()),
+            );
             seen_in_run.insert(key);
         }
         for key in seen_in_run {
@@ -57,15 +102,19 @@ pub fn recurrences(runs: &[Run], agent: &[Finding]) -> BTreeMap<Key, Recurrence>
         }
     }
     for (f, fp) in agent.iter().zip(finding::fingerprints(agent)) {
+        let unit = match groups.and_then(|g| g.of(&f.subject)) {
+            Some(group) => Unit::Group(group.to_string()),
+            None => Unit::Finding(fp.clone()),
+        };
         map.entry((f.tool.clone(), f.rule.clone()))
             .or_default()
-            .add(f, &fp);
+            .add(f, &fp, unit);
     }
     map
 }
 
-/// Rules at warn or error severity with at least `threshold` distinct
-/// findings that no non-retired lesson measures.
+/// Rules at warn or error severity with at least `threshold` recurrences
+/// that no non-retired lesson measures.
 pub fn candidates<'a>(
     rec: &'a BTreeMap<Key, Recurrence>,
     lessons: &[Lesson],
@@ -82,14 +131,14 @@ pub fn candidates<'a>(
         .filter(|(key, r)| {
             !covered.contains(*key)
                 && r.severity.is_some_and(|s| s <= Severity::Warn)
-                && r.findings() >= threshold
+                && r.recurrences() >= threshold
                 && !(key.0 == "lab" && key.1.starts_with("check-"))
         })
         .collect();
     out.sort_by(|a, b| {
         a.1.severity
             .cmp(&b.1.severity)
-            .then(b.1.findings().cmp(&a.1.findings()))
+            .then(b.1.recurrences().cmp(&a.1.recurrences()))
             .then(a.0.cmp(b.0))
     });
     out
@@ -174,6 +223,57 @@ impl Session {
     }
 }
 
+/// The root of a subagent's tree: its parent's parent and so on, up to a
+/// session without a parent or a parent that `by_id` does not have; `None`
+/// for a session without a parent. The bound stops a cycle.
+pub fn root_of<'a>(by_id: &BTreeMap<(&str, &str), &'a Session>, s: &'a Session) -> Option<&'a str> {
+    let mut id = s.parent_id.as_deref()?;
+    for _ in 0..by_id.len() {
+        match by_id
+            .get(&(s.source.as_str(), id))
+            .and_then(|p| p.parent_id.as_deref())
+        {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    Some(id)
+}
+
+/// Sessions keyed by `(source, id)`, for [`root_of`].
+pub fn by_id(sessions: &[Session]) -> BTreeMap<(&str, &str), &Session> {
+    sessions
+        .iter()
+        .map(|s| ((s.source.as_str(), s.id.as_str()), s))
+        .collect()
+}
+
+/// The session group of each session's finding subject (`source:id`): the
+/// subagents below one root session and the root itself form one group; any
+/// other session is a group of its own.
+#[derive(Debug, Default)]
+pub struct SessionGroups(BTreeMap<String, String>);
+
+impl SessionGroups {
+    pub fn new(sessions: &[Session]) -> Self {
+        let by_id = by_id(sessions);
+        Self(
+            sessions
+                .iter()
+                .map(|s| {
+                    let root = root_of(&by_id, s).unwrap_or(&s.id);
+                    (s.subject(), format!("{}:{root}", s.source))
+                })
+                .collect(),
+        )
+    }
+
+    /// The group of a finding subject; `None` when it is not a known session.
+    pub fn of(&self, subject: &str) -> Option<&str> {
+        self.0.get(subject).map(String::as_str)
+    }
+}
+
 pub fn read_sessions(path: &Path) -> Result<Vec<Session>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     text.lines()
@@ -231,6 +331,8 @@ mod tests {
             header: RunHeader {
                 schema: RUN_SCHEMA.into(),
                 at: at.into(),
+                commit: None,
+                dirty: None,
                 checks: outcomes,
             },
             items,
@@ -280,7 +382,7 @@ mod tests {
             finding("reread-file", "s3", Severity::Warn),
             finding("big-output", "s1", Severity::Info),
         ];
-        let rec = recurrences(&runs, &agent);
+        let rec = recurrences(&runs, &agent, None);
         let lessons = vec![lesson("2026-11-02")];
         let names: Vec<&str> = candidates(&rec, &lessons, 3)
             .iter()
@@ -307,10 +409,72 @@ mod tests {
                 )
             })
             .collect();
-        let rec = recurrences(&runs, &[]);
+        let rec = recurrences(&runs, &[], None);
         let r = &rec[&("claimcheck".into(), "quote-not-found".into())];
         assert_eq!((r.findings(), r.runs), (1, 5));
         assert!(candidates(&rec, &[], 3).is_empty());
+    }
+
+    fn session(id: &str, parent: Option<&str>) -> Session {
+        let parent = parent.map_or("null".into(), |p| format!("\"{p}\""));
+        Session::parse(&format!(
+            r#"{{"schema":"rf.session/1","source":"claude","id":"{id}","parent_id":{parent}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_findings_recur_once_per_session_group() {
+        // root → a → a1, and root → b: one tree; s1, s2, s3 are unrelated.
+        let sessions = vec![
+            session("root", None),
+            session("a", Some("root")),
+            session("a1", Some("a")),
+            session("b", Some("root")),
+            session("s1", None),
+            session("s2", None),
+            session("s3", None),
+        ];
+        let groups = SessionGroups::new(&sessions);
+        let agent = |rule: &str, ids: &[&str]| -> Vec<Finding> {
+            ids.iter()
+                .map(|id| finding(rule, &format!("claude:{id}"), Severity::Warn))
+                .collect()
+        };
+        let mut findings = agent("clustered", &["a", "a1", "b"]);
+        findings.extend(agent("spread", &["s1", "s2", "s3"]));
+        // Subjects that are not sessions in the file count per finding.
+        findings.extend(agent("unknown", &["x1", "x2", "x3"]));
+        let runs = vec![run(
+            "2026-11-01T00:00:00Z",
+            &["quote-not-found", "quote-not-found", "quote-not-found"],
+            true,
+        )];
+        let rec = recurrences(&runs, &findings, Some(&groups));
+        let count = |rule: &str| {
+            let r = &rec[&("claimcheck".into(), rule.into())];
+            (r.recurrences(), r.findings(), r.groups())
+        };
+        assert_eq!(count("clustered"), (1, 3, 1));
+        assert_eq!(count("spread"), (3, 3, 3));
+        assert_eq!(count("unknown"), (3, 3, 0));
+        assert_eq!(count("quote-not-found"), (3, 3, 0), "check runs as before");
+        let names: Vec<&str> = candidates(&rec, &[], 3)
+            .iter()
+            .map(|(k, _)| k.1.as_str())
+            .collect();
+        assert_eq!(names, ["quote-not-found", "spread", "unknown"]);
+        assert_eq!(
+            rec[&("claimcheck".into(), "clustered".into())].describe(),
+            "1 recurrence(s) from 3 distinct finding(s), 1 of them session group(s)"
+        );
+
+        // Without the sessions file every distinct finding counts.
+        let rec = recurrences(&runs, &findings, None);
+        assert_eq!(
+            rec[&("claimcheck".into(), "clustered".into())].recurrences(),
+            3
+        );
     }
 
     #[test]

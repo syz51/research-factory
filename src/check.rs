@@ -39,6 +39,16 @@ impl CheckOutcome {
 pub struct RunHeader {
     pub schema: String,
     pub at: String,
+    /// The `HEAD` commit of the git repository holding the project root when
+    /// the run started; `None` outside git, before the first commit, and in
+    /// runs stored before lab 0.7.0.
+    #[serde(default)]
+    pub commit: Option<String>,
+    /// Whether files under the project root differed from `commit` (tracked
+    /// changes or untracked files, leaving out the state directory), since
+    /// checks read the work tree; `None` when `commit` is.
+    #[serde(default)]
+    pub dirty: Option<bool>,
     pub checks: Vec<CheckOutcome>,
 }
 
@@ -82,12 +92,18 @@ impl Run {
         if header.schema != RUN_SCHEMA {
             return Err(format!("{}:1: not a {RUN_SCHEMA} record", path.display()));
         }
-        let items = lines
-            .map(|(i, line)| {
-                serde_json::from_str::<Item>(line)
-                    .map_err(|e| format!("{}:{}: {e}", path.display(), i + 1))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Lines of another schema are records a later lab version added;
+        // skipping them keeps a shared run directory readable.
+        let mut items = Vec::new();
+        for (i, line) in lines {
+            let at = |e: serde_json::Error| format!("{}:{}: {e}", path.display(), i + 1);
+            let value: serde_json::Value = serde_json::from_str(line).map_err(at)?;
+            match value.get("schema").and_then(|s| s.as_str()) {
+                Some(ITEM_SCHEMA) => items.push(serde_json::from_value::<Item>(value).map_err(at)?),
+                Some(_) => {}
+                None => return Err(format!("{}:{}: no schema", path.display(), i + 1)),
+            }
+        }
         Ok(Self {
             path: path.to_path_buf(),
             header,
@@ -241,6 +257,92 @@ pub struct Report {
     pub delta: BTreeMap<String, Option<Delta>>,
 }
 
+/// Runs git in the project root with a stable message language. `None` when
+/// git is not installed or the root is not in a git repository.
+fn git(project: &Project, args: &[&str]) -> Result<Option<std::process::Output>, String> {
+    let out = match Command::new("git")
+        .args(args)
+        .current_dir(&project.root)
+        .env("LC_ALL", "C")
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("git: {e}")),
+    };
+    if !out.status.success()
+        && String::from_utf8_lossy(&out.stderr).contains("not a git repository")
+    {
+        return Ok(None);
+    }
+    Ok(Some(out))
+}
+
+/// The `HEAD` commit of the git repository holding the project root, and
+/// whether the files under the root differ from it, leaving out the state
+/// directory; `(None, None)` when git is missing, the root is not in a
+/// repository, or the repository has no commit yet. Any other git failure is
+/// an error, for the caller to report.
+fn git_state(project: &Project) -> Result<(Option<String>, Option<bool>), String> {
+    let failed = |args: &[&str], out: &std::process::Output| {
+        format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    };
+    // Tool-owned state, such as this run's own file, is not checked text. A
+    // state directory outside the root is outside the pathspec anyway.
+    let exclude = project
+        .state_dir
+        .strip_prefix(&project.root)
+        .ok()
+        .filter(|p| {
+            p.components().next().is_some()
+                && p.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+        })
+        .map(|p| format!(":(exclude,literal){}", p.display()));
+    // No optional locks, so a background run never blocks the user's own git
+    // commands; untracked files are listed whatever the user's config says.
+    let mut args = vec![
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "--untracked-files=normal",
+        "--",
+        ".",
+    ];
+    args.extend(exclude.as_deref());
+    let Some(out) = git(project, &args)? else {
+        return Ok((None, None));
+    };
+    if !out.status.success() {
+        return Err(failed(&args, &out));
+    }
+    let status = String::from_utf8_lossy(&out.stdout);
+    let commit = status
+        .lines()
+        .find_map(|l| l.strip_prefix("# branch.oid "))
+        .filter(|oid| *oid != "(initial)");
+    let Some(commit) = commit else {
+        return Ok((None, None));
+    };
+    let mut dirty = status.lines().any(|l| !l.starts_with('#'));
+    if !dirty {
+        // An ignored root lists no changes, yet no commit holds its files.
+        let args = ["check-ignore", "--quiet", "."];
+        let out = git(project, &args)?.ok_or("git: the repository disappeared")?;
+        dirty = match out.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            _ => return Err(failed(&args, &out)),
+        };
+    }
+    Ok((Some(commit.to_string()), Some(dirty)))
+}
+
 /// The configured checks named by `--only` (all when empty); every name must exist.
 pub fn select<'a>(project: &'a Project, only: &[String]) -> Result<Vec<&'a CheckSpec>, String> {
     if project.lab.checks.is_empty() {
@@ -266,6 +368,10 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let specs = select(project, only)?;
     let baseline = Baseline::load(project)?;
     let at = finding::now();
+    let (commit, dirty) = git_state(project).unwrap_or_else(|e| {
+        eprintln!("lab: the run records no commit: {e}");
+        (None, None)
+    });
     let mut outcomes = Vec::new();
     let mut items = Vec::new();
     for spec in specs {
@@ -282,6 +388,8 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,
+        commit,
+        dirty,
         checks: outcomes,
     };
     let path = store(project, &header, &items)?;
@@ -470,6 +578,34 @@ mod tests {
     fn project(dir: &Path, checks: &str) -> Project {
         std::fs::write(dir.join("research.toml"), checks).unwrap();
         Project::discover(dir, None).unwrap()
+    }
+
+    #[test]
+    fn runs_stored_before_the_commit_fields_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"schema":"rf.labcheck/1","at":"2026-11-01T00:00:00Z","checks":[]}"#,
+        )
+        .unwrap();
+        let run = Run::load(&path).unwrap();
+        assert_eq!((run.header.commit, run.header.dirty), (None, None));
+    }
+
+    #[test]
+    fn run_lines_of_another_schema_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.jsonl");
+        let item = format!(
+            r#"{{"schema":"{ITEM_SCHEMA}","check":"c","fingerprint":"f","finding":{FINDING_A}}}"#
+        );
+        let later = r#"{"schema":"rf.labcheck.measure/1","check":"c","count":3}"#;
+        let header = r#"{"schema":"rf.labcheck/1","at":"2026-11-01T00:00:00Z","checks":[]}"#;
+        std::fs::write(&path, [header, &item, later].join("\n")).unwrap();
+        assert_eq!(Run::load(&path).unwrap().items.len(), 1);
+        std::fs::write(&path, [header, r#"{"check":"c"}"#].join("\n")).unwrap();
+        assert!(Run::load(&path).unwrap_err().contains("no schema"));
     }
 
     const FINDING_A: &str = r#"{"schema":"rf.finding/1","tool":"t","rule":"r","severity":"error","subject":"a","message":"m"}"#;
