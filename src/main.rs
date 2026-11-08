@@ -447,6 +447,10 @@ recurrence = 3
 # path = "docs/research/START.md"
 # max_bytes = 8192
 # severity = "error"
+#
+# [[lab.archive.offloaded]]                     # files moved out; links to them are not broken
+# list = "docs/research/offloaded.txt"           # one root-relative path per line
+# location = "cloud:archive/2026-11-08/myproject/"
 "#;
 
 const LESSONS_README: &str = "# Lessons\n\nOne file per lesson, managed with `lab lesson`. \

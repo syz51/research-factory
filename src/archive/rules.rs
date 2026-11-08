@@ -2,13 +2,14 @@
 //! whose subject and message stay the same while the problem does, so its
 //! fingerprint survives unrelated edits.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::front::{self, Meta};
 use super::markdown;
 use super::seal::{Entry, Manifest, State};
 use super::{Record, Spec, Texts, read_optional};
+use crate::config::OffloadedSpec;
 use crate::finding::{Evidence, Finding, Severity};
 
 /// A problem `lab archive check` reports, before it becomes an `rf.finding/1`.
@@ -406,6 +407,51 @@ fn is_markdown(path: &Path) -> bool {
 /// Words that mark a link to an inactive record as deliberate.
 const HISTORY_WORDS: [&str; 4] = ["superseded", "historical", "rejected", "withdrawn"];
 
+/// One `[[lab.archive.offloaded]]` list: the moved paths, every directory
+/// that holds one, and how many links point into them.
+struct Offloaded<'a> {
+    spec: &'a OffloadedSpec,
+    paths: HashSet<String>,
+    dirs: HashSet<String>,
+    links: usize,
+}
+
+impl<'a> Offloaded<'a> {
+    /// Reads the list: one path per line, relative to the project root. A
+    /// missing or unreadable list is an error, since its links would
+    /// otherwise all be broken.
+    fn load(root: &Path, spec: &'a OffloadedSpec) -> Result<Self, String> {
+        let path = root.join(&spec.list);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("[[lab.archive.offloaded]] list {}: {e}", path.display()))?;
+        let mut paths = HashSet::new();
+        let mut dirs = HashSet::new();
+        for line in text.lines() {
+            let p = line.trim();
+            let p = p.strip_prefix("./").unwrap_or(p).trim_end_matches('/');
+            if p.is_empty() {
+                continue;
+            }
+            for (i, _) in p.match_indices('/') {
+                dirs.insert(p[..i].to_string());
+            }
+            paths.insert(p.to_string());
+        }
+        Ok(Self {
+            spec,
+            paths,
+            dirs,
+            links: 0,
+        })
+    }
+
+    /// Whether `rel`, a missing link target, is a moved file or a directory
+    /// that held one.
+    fn holds(&self, rel: &str) -> bool {
+        self.paths.contains(rel) || self.dirs.contains(rel)
+    }
+}
+
 fn link_problems(
     spec: &Spec,
     records: &[Record],
@@ -423,6 +469,12 @@ fn link_problems(
     let current: BTreeSet<&str> = current.iter().map(String::as_str).collect();
     let mut exists: HashMap<PathBuf, bool> = HashMap::new();
     let mut listings = Listings::default();
+    let mut offloaded = spec
+        .cfg
+        .offloaded
+        .iter()
+        .map(|o| Offloaded::load(root, o))
+        .collect::<Result<Vec<_>, _>>()?;
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -447,11 +499,19 @@ fn link_problems(
                         None => abs.exists(),
                     });
                     if !found {
-                        if check {
-                            out.push(problem(
+                        // A link to a file moved out of the project is counted
+                        // per list, not reported one by one.
+                        let moved = rel
+                            .as_deref()
+                            .and_then(|r| offloaded.iter_mut().find(|o| o.holds(r)));
+                        match moved {
+                            Some(o) if check => o.links += 1,
+                            Some(_) => {}
+                            None if check => out.push(problem(
                                 "broken-link",
                                 format!("links to `{}`, which does not exist", link.dest),
-                            ));
+                            )),
+                            None => {}
                         }
                         continue;
                     }
@@ -501,6 +561,19 @@ fn link_problems(
             }
         }
     }
+    for o in offloaded {
+        let mut p = Problem::new(
+            "archived-link",
+            Severity::Info,
+            &o.spec.list,
+            format!(
+                "{} link(s) point to files moved to {}, as this list records",
+                o.links, o.spec.location
+            ),
+        );
+        p.data = Some(serde_json::json!({"links": o.links, "location": o.spec.location}));
+        out.push(p);
+    }
     Ok(())
 }
 
@@ -545,6 +618,112 @@ fn seal_problems(spec: &Spec, sealed: &[String], out: &mut Vec<Problem>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project whose `docs/a.md` links `links`, with one offloaded list.
+    fn offloaded_project(dir: &Path, links: &[&str]) -> crate::config::Project {
+        std::fs::write(
+            dir.join("research.toml"),
+            "[lab.archive]\nlinks = [\"docs/*.md\"]\n\
+             [[lab.archive.offloaded]]\nlist = \"lists/moved.txt\"\nlocation = \"cloud:archive/day/proj/\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::create_dir_all(dir.join("lists")).unwrap();
+        let body: Vec<String> = links.iter().map(|l| format!("[x]({l})\n")).collect();
+        std::fs::write(dir.join("docs/a.md"), body.join("\n")).unwrap();
+        crate::config::Project::discover(dir, None).unwrap()
+    }
+
+    fn summary(problems: &[Problem]) -> Vec<String> {
+        problems
+            .iter()
+            .map(|p| format!("{} {} {}", p.severity.as_str(), p.rule, p.subject()))
+            .collect()
+    }
+
+    #[test]
+    fn links_to_offloaded_files_and_their_directories_are_counted_not_broken() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = offloaded_project(
+            dir.path(),
+            &[
+                "../data/run1/out.csv",
+                "../data/run1",
+                "/data/run1/log.txt",
+                "../data",
+                "../data/run2/out.csv",
+            ],
+        );
+        std::fs::write(
+            dir.path().join("lists/moved.txt"),
+            "data/run1/out.csv\r\n./data/run1/log.txt\n\n",
+        )
+        .unwrap();
+        let problems = problems(&Spec::new(&p).unwrap()).unwrap();
+        // The listed file, its directory, a listed path written from the
+        // root and an ancestor directory are archived; the typo is broken.
+        assert_eq!(
+            summary(&problems),
+            [
+                "error broken-link docs/a.md:9",
+                "info archived-link lists/moved.txt"
+            ]
+        );
+        let info = &problems[1];
+        assert_eq!(
+            info.message,
+            "4 link(s) point to files moved to cloud:archive/day/proj/, as this list records"
+        );
+        assert_eq!(
+            info.data,
+            Some(serde_json::json!({"links": 4, "location": "cloud:archive/day/proj/"}))
+        );
+    }
+
+    #[test]
+    fn a_missing_offloaded_list_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = offloaded_project(dir.path(), &["../data/run1/out.csv"]);
+        let err = problems(&Spec::new(&p).unwrap()).unwrap_err();
+        assert!(
+            err.contains("[[lab.archive.offloaded]] list") && err.contains("moved.txt"),
+            "{err}"
+        );
+        // An unreadable list, here not UTF-8, is an error too.
+        std::fs::write(dir.path().join("lists/moved.txt"), [0xff, 0xfe, b'\n']).unwrap();
+        assert!(problems(&Spec::new(&p).unwrap()).is_err());
+        // An empty list is read, and every missing target stays broken.
+        std::fs::write(dir.path().join("lists/moved.txt"), "").unwrap();
+        let problems = problems(&Spec::new(&p).unwrap()).unwrap();
+        assert_eq!(
+            summary(&problems),
+            [
+                "error broken-link docs/a.md:1",
+                "info archived-link lists/moved.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn offloaded_lists_need_a_relative_path_and_a_location() {
+        let dir = tempfile::tempdir().unwrap();
+        for (list, location) in [
+            ("../up.txt", "cloud:x/"),
+            ("/abs.txt", "cloud:x/"),
+            ("l.txt", " "),
+        ] {
+            std::fs::write(
+                dir.path().join("research.toml"),
+                format!(
+                    "[lab.archive]\n[[lab.archive.offloaded]]\nlist = \"{list}\"\nlocation = \"{location}\"\n"
+                ),
+            )
+            .unwrap();
+            let p = crate::config::Project::discover(dir.path(), None).unwrap();
+            let err = Spec::new(&p).err().unwrap();
+            assert!(err.contains("[[lab.archive.offloaded]]"), "{list}: {err}");
+        }
+    }
 
     #[test]
     fn resolves_links_relative_to_the_file() {

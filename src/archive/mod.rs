@@ -110,6 +110,20 @@ impl<'p> Spec<'p> {
                 id_from,
             });
         }
+        for o in &cfg.offloaded {
+            let path = Path::new(&o.list);
+            let relative = path.components().next().is_some()
+                && path
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)));
+            if !relative || o.location.trim().is_empty() {
+                return Err(format!(
+                    "[[lab.archive.offloaded]] `{}`: `list` must be a relative path below the \
+                     project root, without `..`, and `location` must not be empty",
+                    o.list
+                ));
+            }
+        }
         let set = |what: &str, include: &[String], exclude: &[String]| {
             FileSet::new(include, exclude).map_err(|e| err(what, e))
         };

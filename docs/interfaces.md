@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]` and `[[lab.archive.budget]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]` and `[[lab.archive.offloaded]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -111,6 +111,8 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
   ]
 }
 ```
+
+An offloaded list (`[[lab.archive.offloaded]]`, with `list` and `location`) records files moved out of the project, such as to cloud storage, that the archive still links. `list` is a committed plain-text file, relative to the project root, with one path per line, relative to the project root as well. Blank lines, a leading `./` and a trailing `/` are ignored, and the list is not compressed. `location` says where the files went, such as `cloud:archive/2026-11-08/masters/`. `lab archive check` does not report a link as `broken-link` when its missing target is a listed path or a directory that holds one. It reports one `archived-link` info finding per list instead, naming the list, with the number of such links and the location in its message and `data` (`{"links": N, "location": "…"}`). A missing target that no list holds, or one outside the project root, stays a `broken-link` error. A configured list that is missing or unreadable stops the check with an error (exit 2).
 
 ## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 

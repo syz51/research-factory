@@ -187,6 +187,22 @@ pub struct ArchiveConfig {
     pub index: Vec<IndexSpec>,
     #[serde(default)]
     pub budget: Vec<BudgetSpec>,
+    /// Lists of files moved out of the project, such as to cloud storage,
+    /// that links may still point to.
+    #[serde(default)]
+    pub offloaded: Vec<OffloadedSpec>,
+}
+
+/// `[[lab.archive.offloaded]]`: files moved to `location`, listed in `list`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OffloadedSpec {
+    /// A plain-text file, relative to the project root, with one moved path
+    /// per line, relative to the project root.
+    pub list: String,
+    /// Where the files are now, such as a `storagectl` location
+    /// (`cloud:archive/air-2026-11-08/masters/`).
+    pub location: String,
 }
 
 fn default_statuses() -> Vec<String> {
