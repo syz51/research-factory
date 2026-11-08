@@ -17,7 +17,7 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 
 - Write each fact once. Append a log entry to the current month's log file; update a record's front matter in place (status, `superseded_by`); link to a record instead of copying its notes into other files. Never edit an index: `lab archive update` generates them.
 - Take new ids from `lab archive next <PREFIX>`.
-- When you move files out of the project, such as to cloud storage, add their paths to the project's `[[lab.archive.offloaded]]` list so links to them are not reported broken. Never add a path to the list to silence a link to a file that was not moved.
+- When you move files out of the project, such as to cloud storage, add their paths to the project's `[[lab.archive.offloaded]]` list (lab 0.9.1 or later) so links to them are not reported broken. Never add a path to the list to silence a link to a file that was not moved.
 - Never edit a sealed file (the log, session reports). To correct one, append a dated correction. If an edit is unavoidable, such as removing personal data, ask a person, then record it with `lab archive seal --accept <path> --note "<why>"`.
 
 ## While working

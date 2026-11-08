@@ -430,11 +430,7 @@ fn git_state(project: &Project) -> Result<(Option<String>, Option<bool>), String
         .state_dir
         .strip_prefix(&project.root)
         .ok()
-        .filter(|p| {
-            p.components().next().is_some()
-                && p.components()
-                    .all(|c| matches!(c, std::path::Component::Normal(_)))
-        })
+        .filter(|p| crate::config::below_root(p))
         .map(|p| format!(":(exclude,literal){}", p.display()));
     // No optional locks, so a background run never blocks the user's own git
     // commands; untracked files are listed whatever the user's config says.

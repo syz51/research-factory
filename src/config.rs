@@ -398,13 +398,11 @@ impl Project {
             if c.run.is_empty() {
                 return Err(format!("[lab] check `{}` needs a non-empty `run`", c.name));
             }
-            if let Some(p) = c.uncommitted_inputs.iter().find(|p| {
-                let path = Path::new(p);
-                path.components().next().is_none()
-                    || !path
-                        .components()
-                        .all(|c| matches!(c, std::path::Component::Normal(_)))
-            }) {
+            if let Some(p) = c
+                .uncommitted_inputs
+                .iter()
+                .find(|p| !below_root(Path::new(p)))
+            {
                 return Err(format!(
                     "[lab] check `{}`: uncommitted input `{p}` must be a relative path below \
                      the project root, without `..`",
@@ -504,6 +502,15 @@ impl Project {
             .map(|t| t.to_zoned(self.tz.clone()).date())
             .map_err(|e| format!("bad timestamp `{timestamp}`: {e}"))
     }
+}
+
+/// Whether `path` is a non-empty relative path made only of plain names, so
+/// joined to a directory it stays below it: no root, `.` or `..`.
+pub fn below_root(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 #[cfg(test)]

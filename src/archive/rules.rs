@@ -24,6 +24,9 @@ pub(super) struct Problem {
     message: String,
     evidence: Vec<String>,
     data: Option<serde_json::Value>,
+    /// Shown after the message in text output only, so it can change
+    /// without changing the finding's fingerprint.
+    detail: Option<String>,
 }
 
 impl Problem {
@@ -37,6 +40,7 @@ impl Problem {
             message,
             evidence: Vec::new(),
             data: None,
+            detail: None,
         }
     }
 
@@ -54,8 +58,12 @@ impl Problem {
     }
 
     pub(super) fn text(&self) -> String {
+        let detail = self
+            .detail
+            .as_ref()
+            .map_or_else(String::new, |d| format!(" ({d})"));
         format!(
-            "{} {} {} — {}",
+            "{} {} {} — {}{detail}",
             self.severity.as_str(),
             self.rule,
             self.subject(),
@@ -426,16 +434,24 @@ impl<'a> Offloaded<'a> {
             .map_err(|e| format!("[[lab.archive.offloaded]] list {}: {e}", path.display()))?;
         let mut paths = HashSet::new();
         let mut dirs = HashSet::new();
-        for line in text.lines() {
-            let p = line.trim();
-            let p = p.strip_prefix("./").unwrap_or(p).trim_end_matches('/');
-            if p.is_empty() {
+        for (n, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
                 continue;
             }
+            // Written like a link from the root: `/`, `./` and `..` resolve
+            // the same way, and a path that leaves the root is an error.
+            let p = normalize("", line).filter(|p| !p.is_empty()).ok_or_else(|| {
+                format!(
+                    "[[lab.archive.offloaded]] list {}:{}: `{line}` is not a path below the project root",
+                    path.display(),
+                    n + 1
+                )
+            })?;
             for (i, _) in p.match_indices('/') {
                 dirs.insert(p[..i].to_string());
             }
-            paths.insert(p.to_string());
+            paths.insert(p);
         }
         Ok(Self {
             spec,
@@ -445,10 +461,13 @@ impl<'a> Offloaded<'a> {
         })
     }
 
-    /// Whether `rel`, a missing link target, is a moved file or a directory
-    /// that held one.
+    /// Whether `rel`, a missing link target, is a moved path, lies in a moved
+    /// directory, or is a directory that held a moved path.
     fn holds(&self, rel: &str) -> bool {
-        self.paths.contains(rel) || self.dirs.contains(rel)
+        self.dirs.contains(rel)
+            || std::iter::once(rel)
+                .chain(rel.match_indices('/').map(|(i, _)| &rel[..i]))
+                .any(|p| self.paths.contains(p))
     }
 }
 
@@ -501,17 +520,17 @@ fn link_problems(
                     if !found {
                         // A link to a file moved out of the project is counted
                         // per list, not reported one by one.
-                        let moved = rel
-                            .as_deref()
-                            .and_then(|r| offloaded.iter_mut().find(|o| o.holds(r)));
-                        match moved {
-                            Some(o) if check => o.links += 1,
-                            Some(_) => {}
-                            None if check => out.push(problem(
-                                "broken-link",
-                                format!("links to `{}`, which does not exist", link.dest),
-                            )),
-                            None => {}
+                        if check {
+                            match rel
+                                .as_deref()
+                                .and_then(|r| offloaded.iter_mut().find(|o| o.holds(r)))
+                            {
+                                Some(o) => o.links += 1,
+                                None => out.push(problem(
+                                    "broken-link",
+                                    format!("links to `{}`, which does not exist", link.dest),
+                                )),
+                            }
                         }
                         continue;
                     }
@@ -561,17 +580,24 @@ fn link_problems(
             }
         }
     }
+    // The count is in `data` and the text output only, so the finding keeps
+    // its fingerprint while links come and go.
     for o in offloaded {
-        let mut p = Problem::new(
-            "archived-link",
-            Severity::Info,
-            &o.spec.list,
+        let message = if o.links == 0 {
             format!(
-                "{} link(s) point to files moved to {}, as this list records",
-                o.links, o.spec.location
-            ),
-        );
+                "no link points to the files this list records as moved to {}; \
+                 the list and its entry can go",
+                o.spec.location
+            )
+        } else {
+            format!(
+                "links point to files this list records as moved to {}",
+                o.spec.location
+            )
+        };
+        let mut p = Problem::new("archived-link", Severity::Info, &o.spec.list, message);
         p.data = Some(serde_json::json!({"links": o.links, "location": o.spec.location}));
+        p.detail = Some(format!("{} link(s)", o.links));
         out.push(p);
     }
     Ok(())
@@ -647,21 +673,24 @@ mod tests {
         let p = offloaded_project(
             dir.path(),
             &[
-                "../data/run1/out.csv",
-                "../data/run1",
-                "/data/run1/log.txt",
-                "../data",
-                "../data/run2/out.csv",
+                "../lab-rf86-data/run1/out.csv",
+                "../lab-rf86-data/run1",
+                "/lab-rf86-data/run1/log.txt",
+                "../lab-rf86-data",
+                "../lab-rf86-data/run2/out.csv",
+                "../lab-rf86-data/run3/sub/x.csv",
             ],
         );
         std::fs::write(
             dir.path().join("lists/moved.txt"),
-            "data/run1/out.csv\r\n./data/run1/log.txt\n\n",
+            "\u{feff}lab-rf86-data/run1/out.csv\r\n./lab-rf86-data/run1/log.txt\n\n\
+             /lab-rf86-data//run3/\n",
         )
         .unwrap();
         let problems = problems(&Spec::new(&p).unwrap()).unwrap();
         // The listed file, its directory, a listed path written from the
-        // root and an ancestor directory are archived; the typo is broken.
+        // root, an ancestor directory and a file in a listed directory are
+        // archived; the typo is broken.
         assert_eq!(
             summary(&problems),
             [
@@ -672,11 +701,12 @@ mod tests {
         let info = &problems[1];
         assert_eq!(
             info.message,
-            "4 link(s) point to files moved to cloud:archive/day/proj/, as this list records"
+            "links point to files this list records as moved to cloud:archive/day/proj/"
         );
+        assert!(info.text().ends_with("(5 link(s))"), "{}", info.text());
         assert_eq!(
             info.data,
-            Some(serde_json::json!({"links": 4, "location": "cloud:archive/day/proj/"}))
+            Some(serde_json::json!({"links": 5, "location": "cloud:archive/day/proj/"}))
         );
     }
 
@@ -693,6 +723,12 @@ mod tests {
         std::fs::write(dir.path().join("lists/moved.txt"), [0xff, 0xfe, b'\n']).unwrap();
         assert!(problems(&Spec::new(&p).unwrap()).is_err());
         // An empty list is read, and every missing target stays broken.
+        // A line that leaves the root is an error naming the line.
+        std::fs::write(dir.path().join("lists/moved.txt"), "a.txt\n../up.txt\n").unwrap();
+        let err = problems(&Spec::new(&p).unwrap()).unwrap_err();
+        assert!(err.contains("moved.txt:2"), "{err}");
+        // An empty list is read, every missing target stays broken, and the
+        // note says the list serves no link.
         std::fs::write(dir.path().join("lists/moved.txt"), "").unwrap();
         let problems = problems(&Spec::new(&p).unwrap()).unwrap();
         assert_eq!(
@@ -702,27 +738,41 @@ mod tests {
                 "info archived-link lists/moved.txt"
             ]
         );
+        assert!(problems[1].message.starts_with("no link points"));
     }
 
     #[test]
-    fn offloaded_lists_need_a_relative_path_and_a_location() {
+    fn offloaded_lists_need_a_relative_path_a_location_and_one_entry() {
         let dir = tempfile::tempdir().unwrap();
-        for (list, location) in [
-            ("../up.txt", "cloud:x/"),
-            ("/abs.txt", "cloud:x/"),
-            ("l.txt", " "),
+        let entry = |list: &str, location: &str| {
+            format!("[[lab.archive.offloaded]]\nlist = \"{list}\"\nlocation = \"{location}\"\n")
+        };
+        for entries in [
+            entry("../up.txt", "cloud:x/"),
+            entry("/abs.txt", "cloud:x/"),
+            entry("./l.txt", "cloud:x/"),
+            entry("l.txt", " "),
+            entry("l.txt", "cloud:x/") + &entry("l.txt", "cloud:y/"),
         ] {
             std::fs::write(
                 dir.path().join("research.toml"),
-                format!(
-                    "[lab.archive]\n[[lab.archive.offloaded]]\nlist = \"{list}\"\nlocation = \"{location}\"\n"
-                ),
+                format!("[lab.archive]\n{entries}"),
             )
             .unwrap();
             let p = crate::config::Project::discover(dir.path(), None).unwrap();
             let err = Spec::new(&p).err().unwrap();
-            assert!(err.contains("[[lab.archive.offloaded]]"), "{list}: {err}");
+            assert!(
+                err.contains("[[lab.archive.offloaded]]"),
+                "{entries}: {err}"
+            );
         }
+        std::fs::write(
+            dir.path().join("research.toml"),
+            format!("[lab.archive]\n{}", entry("l.txt", "cloud:x/")),
+        )
+        .unwrap();
+        let p = crate::config::Project::discover(dir.path(), None).unwrap();
+        assert!(Spec::new(&p).is_ok());
     }
 
     #[test]
