@@ -879,6 +879,9 @@ struct Evidence<'p> {
     runs: Vec<check::Run>,
     agent: AgentFiles,
     sessions: Result<Vec<retro::Session>, String>,
+    /// The commits a replay can check, by committer time; `None` without git
+    /// history.
+    commits: Option<Vec<String>>,
 }
 
 impl<'p> Evidence<'p> {
@@ -890,6 +893,7 @@ impl<'p> Evidence<'p> {
             runs: check::history_with_replays(project)?,
             sessions: agent_sessions(project, &agent),
             agent,
+            commits: replay::commit_times(&project.root),
         })
     }
 
@@ -907,6 +911,7 @@ impl<'p> Evidence<'p> {
             findings: &self.agent.findings,
             sessions: self.sessions.as_deref().map_err(String::as_str),
             settings: &self.project.lab.evaluate,
+            commits: self.commits.as_deref(),
         };
         evaluate::evaluate(lesson, &inputs, |t| self.project.date_of(t).ok())
     }

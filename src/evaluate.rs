@@ -453,6 +453,9 @@ pub struct Inputs<'a> {
     /// Agent sessions, or why they could not be read.
     pub sessions: Result<&'a [Session], &'a str>,
     pub settings: &'a EvaluateConfig,
+    /// The committer times of the commits a replay can check, as it dates
+    /// their runs; `None` when git history cannot be read.
+    pub commits: Option<&'a [String]>,
 }
 
 /// Where an observation dated `d` falls: `Some(false)` before adoption and
@@ -739,10 +742,28 @@ fn check_runs(
     e.before = b.side();
     e.after = a.side();
     if b.n < min {
+        // A replay dates a run by its commit, so only a commit in the
+        // before-window can supply a baseline. Without git history, the
+        // advice stays.
+        let replayable = inputs
+            .commits
+            .is_none_or(|times| times.iter().any(|at| place(at) == Some(false)));
+        let advice = if replayable {
+            " (`lab check --at` can replay commits before adoption)".to_string()
+        } else {
+            let adopted = e.adopted.as_deref().unwrap_or("adoption");
+            let window = match e.baseline_days {
+                0 => format!("any time before {adopted}"),
+                days => format!("the {days} days before {adopted}"),
+            };
+            format!(
+                ", and no commit predates adoption in the before-window ({window}), so no \
+                 replay can supply one"
+            )
+        };
         e.reason = Some(format!(
             "no baseline: {} of {min} measured intervals before adoption, {} of {min} after; \
-             the rate after adoption has nothing to compare with yet (`lab check --at` can \
-             replay commits before adoption){note}",
+             the rate after adoption has nothing to compare with yet{advice}{note}",
             b.n, a.n
         ));
         return e;
@@ -1518,6 +1539,7 @@ mod tests {
             findings,
             sessions: Ok(sessions),
             settings: cfg,
+            commits: None,
         };
         evaluate(l, &inputs, utc_date)
     }
@@ -1932,6 +1954,7 @@ mod tests {
                 findings: &f,
                 sessions: Err("sessions.jsonl: not found"),
                 settings: &EvaluateConfig::default(),
+                commits: None,
             },
             utc_date,
         );
@@ -2095,6 +2118,7 @@ mod tests {
                     findings: &[],
                     sessions: Err("none"),
                     settings: &cfg,
+                    commits: None,
                 },
                 utc_date,
             )
@@ -2174,6 +2198,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commits: None,
             },
             utc_date,
         )
@@ -2468,8 +2493,21 @@ mod tests {
     }
 
     fn eval_metric(runs: &[Run], metric: &str, min_sessions: usize) -> Evaluation {
+        eval_commits(runs, metric, min_sessions, 90, None)
+    }
+
+    /// As [`eval_metric`], with `baseline_days` and the commits a replay
+    /// could check.
+    fn eval_commits(
+        runs: &[Run],
+        metric: &str,
+        min_sessions: usize,
+        baseline_days: u32,
+        commits: Option<&[String]>,
+    ) -> Evaluation {
         let cfg = EvaluateConfig {
             min_sessions,
+            baseline_days,
             ..EvaluateConfig::default()
         };
         evaluate(
@@ -2480,6 +2518,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commits,
             },
             utc_date,
         )
@@ -2595,6 +2634,70 @@ mod tests {
             e.reason.as_deref(),
             Some("3 of 4 measured intervals after adoption, 4 of 4 before")
         );
+    }
+
+    #[test]
+    fn a_baseline_without_commits_before_adoption_gets_no_replay_advice() {
+        let runs = three_and_three(1, 1);
+        let after = &runs[3..];
+        let metric = "claimcheck:source-text-missing";
+        let times = |ts: &[&str]| ts.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+        // Adopted 2026-11-03; the first commit is on the adoption date.
+        let late = times(&["2026-11-05T00:00:00Z", "2026-11-03T00:00:00Z"]);
+        let e = eval_commits(after, metric, 3, 90, Some(&late));
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "no baseline: 0 of 3 measured intervals before adoption, 3 of 3 after; the rate \
+                 after adoption has nothing to compare with yet, and no commit predates adoption \
+                 in the before-window (the 90 days before 2026-11-03), so no replay can supply one"
+            )
+        );
+        // A commit before the window does not help either; without a window,
+        // it does.
+        let old = times(&["2026-11-04T00:00:00Z", "2026-07-01T00:00:00Z"]);
+        let e = eval_commits(after, metric, 3, 90, Some(&old));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .ends_with("no replay can supply one"),
+            "{:?}",
+            e.reason
+        );
+        let e = eval_commits(after, metric, 3, 0, Some(&old));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .ends_with("(`lab check --at` can replay commits before adoption)"),
+            "{:?}",
+            e.reason
+        );
+        let e = eval_commits(after, metric, 3, 0, Some(&late));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .contains("in the before-window (any time before 2026-11-03), so no replay"),
+            "{:?}",
+            e.reason
+        );
+        // A commit on the day before adoption is in the window; so is any
+        // commit when git history cannot be read.
+        let eve = times(&["2026-11-02T23:59:59Z"]);
+        for commits in [Some(eve.as_slice()), None] {
+            let e = eval_commits(after, metric, 3, 90, commits);
+            assert_eq!(
+                e.reason.as_deref(),
+                Some(
+                    "no baseline: 0 of 3 measured intervals before adoption, 3 of 3 after; the \
+                     rate after adoption has nothing to compare with yet (`lab check --at` can \
+                     replay commits before adoption)"
+                ),
+                "{commits:?}"
+            );
+        }
     }
 
     #[test]
@@ -2716,6 +2819,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commits: None,
             },
             utc_date,
         );
@@ -3084,6 +3188,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commits: None,
             },
             utc_date,
         );

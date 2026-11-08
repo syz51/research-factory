@@ -70,6 +70,35 @@ pub fn commits(root: &Path, revs: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// The committer times, as RFC 3339 UTC timestamps the way a replay dates
+/// its runs, of the commits on any branch, tag or remote-tracking branch, or
+/// at `HEAD`, that changed something under the project root (`root`).
+/// `None` when git history cannot be read: git missing, no repository, a
+/// repository without commits, or git failing.
+pub fn commit_times(root: &Path) -> Option<Vec<String>> {
+    let listed = git_ok(
+        root,
+        &[
+            "log",
+            "--format=%ct",
+            "--branches",
+            "--tags",
+            "--remotes",
+            "HEAD",
+            "--",
+            ".",
+        ],
+    )
+    .ok()?;
+    listed
+        .lines()
+        .map(|line| {
+            let seconds = line.parse::<i64>().ok()?;
+            Some(jiff::Timestamp::from_second(seconds).ok()?.to_string())
+        })
+        .collect()
+}
+
 /// The administrative directory git keeps for the worktree at `path`, found
 /// by the directory name, which is unique to one replay.
 fn admin_dir(repo: &Path, path: &Path) -> Option<PathBuf> {
