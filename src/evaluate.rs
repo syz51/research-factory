@@ -453,21 +453,32 @@ pub struct Inputs<'a> {
     /// Agent sessions, or why they could not be read.
     pub sessions: Result<&'a [Session], &'a str>,
     pub settings: &'a EvaluateConfig,
+    /// The distinct dates, in the project's time zone and ascending, of the
+    /// commits a replay can check, as it dates their runs; `None` when git
+    /// history cannot be read. Called only when a lesson needs them.
+    pub commit_dates: &'a dyn Fn() -> Option<&'a [jiff::civil::Date]>,
 }
 
-/// Where an observation dated `d` falls: `Some(false)` before adoption and
-/// inside the before-window, `Some(true)` on or after the adoption date.
-fn side_of(
-    d: jiff::civil::Date,
+/// The adoption date and the start of the before-window.
+#[derive(Debug, Clone, Copy)]
+struct Window {
     adopted: jiff::civil::Date,
-    window_start: Option<jiff::civil::Date>,
-) -> Option<bool> {
-    if d >= adopted {
-        Some(true)
-    } else if window_start.is_none_or(|w| d >= w) {
-        Some(false)
-    } else {
-        None
+    /// `None` when `baseline_days` is 0: the window has no start.
+    start: Option<jiff::civil::Date>,
+}
+
+impl Window {
+    /// Where an observation dated `d` falls: `Some(false)` before adoption
+    /// and inside the before-window, `Some(true)` on or after the adoption
+    /// date.
+    fn side(self, d: jiff::civil::Date) -> Option<bool> {
+        if d >= self.adopted {
+            Some(true)
+        } else if self.start.is_none_or(|w| d >= w) {
+            Some(false)
+        } else {
+            None
+        }
     }
 }
 
@@ -491,14 +502,15 @@ pub fn evaluate(
         return e.unmeasurable("no adoption date");
     };
     let days = inputs.settings.baseline_days;
-    let window_start = (days > 0)
+    let start = (days > 0)
         .then(|| {
             adopted
                 .checked_sub(jiff::Span::new().days(i64::from(days)))
                 .ok()
         })
         .flatten();
-    let place = |at: &str| date_of(at).and_then(|d| side_of(d, adopted, window_start));
+    let window = Window { adopted, start };
+    let place = |at: &str| date_of(at).and_then(|d| window.side(d));
 
     if let Some(path) = metric.rule.strip_prefix(SESSION_FIELD) {
         return sessions(e, metric, Some(path), inputs, place);
@@ -512,7 +524,7 @@ pub fn evaluate(
         .collect();
     if !required.is_empty() {
         let reviewed = lesson.meta.reviewed.as_deref();
-        return check_runs(e, metric, &required, inputs, reviewed, place, &date_of);
+        return check_runs(e, metric, &required, inputs, reviewed, window, &date_of);
     }
     if inputs.findings.iter().any(|f| f.tool == metric.tool) {
         return sessions(e, metric, None, inputs, place);
@@ -552,9 +564,10 @@ fn check_runs(
     required: &BTreeSet<&str>,
     inputs: &Inputs,
     reviewed: Option<&str>,
-    place: impl Fn(&str) -> Option<bool>,
+    window: Window,
     date_of: impl Fn(&str) -> Option<jiff::civil::Date>,
 ) -> Evaluation {
+    let place = |at: &str| date_of(at).and_then(|d| window.side(d));
     e.unit = Some(Unit::Run);
     e.method = Some(Method::Descriptive);
     let (mut before, mut after) = (Vec::new(), Vec::new());
@@ -739,10 +752,40 @@ fn check_runs(
     e.before = b.side();
     e.after = a.side();
     if b.n < min {
+        // A before-interval ends at a run in the before-window. A replay
+        // dates a run by its commit, so a replay can end one only at a
+        // commit in the window, or start one before a stored run there.
+        // Without git history, the advice stays.
+        let dates = (inputs.commit_dates)();
+        let replayable = dates.is_none_or(|dates| {
+            dates.iter().any(|&d| window.side(d) == Some(false))
+                || points
+                    .iter()
+                    .any(|(run, _)| place(&run.header.at) == Some(false))
+        });
+        let advice = if replayable {
+            " (`lab check --at` can replay commits before adoption)".to_string()
+        } else {
+            let adopted = window.adopted;
+            let span = match inputs.settings.baseline_days {
+                0 => format!("any time before {adopted}"),
+                1 => format!("the day before {adopted}"),
+                days => format!("the {days} days before {adopted}"),
+            };
+            let earlier = if dates.is_some_and(|dates| dates.first().is_some_and(|&d| d < adopted))
+            {
+                "; earlier commits exist, which a larger `baseline_days` would include"
+            } else {
+                ""
+            };
+            format!(
+                ", and no commit predates adoption in the before-window ({span}), so no \
+                 replay can supply one{earlier}"
+            )
+        };
         e.reason = Some(format!(
             "no baseline: {} of {min} measured intervals before adoption, {} of {min} after; \
-             the rate after adoption has nothing to compare with yet (`lab check --at` can \
-             replay commits before adoption){note}",
+             the rate after adoption has nothing to compare with yet{advice}{note}",
             b.n, a.n
         ));
         return e;
@@ -1518,6 +1561,7 @@ mod tests {
             findings,
             sessions: Ok(sessions),
             settings: cfg,
+            commit_dates: &|| None,
         };
         evaluate(l, &inputs, utc_date)
     }
@@ -1932,6 +1976,7 @@ mod tests {
                 findings: &f,
                 sessions: Err("sessions.jsonl: not found"),
                 settings: &EvaluateConfig::default(),
+                commit_dates: &|| None,
             },
             utc_date,
         );
@@ -2095,6 +2140,7 @@ mod tests {
                     findings: &[],
                     sessions: Err("none"),
                     settings: &cfg,
+                    commit_dates: &|| None,
                 },
                 utc_date,
             )
@@ -2174,6 +2220,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commit_dates: &|| None,
             },
             utc_date,
         )
@@ -2468,8 +2515,21 @@ mod tests {
     }
 
     fn eval_metric(runs: &[Run], metric: &str, min_sessions: usize) -> Evaluation {
+        eval_commits(runs, metric, min_sessions, 90, None)
+    }
+
+    /// As [`eval_metric`], with `baseline_days` and the commits a replay
+    /// could check.
+    fn eval_commits(
+        runs: &[Run],
+        metric: &str,
+        min_sessions: usize,
+        baseline_days: u32,
+        commits: Option<&[jiff::civil::Date]>,
+    ) -> Evaluation {
         let cfg = EvaluateConfig {
             min_sessions,
+            baseline_days,
             ..EvaluateConfig::default()
         };
         evaluate(
@@ -2480,6 +2540,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commit_dates: &move || commits,
             },
             utc_date,
         )
@@ -2594,6 +2655,83 @@ mod tests {
         assert_eq!(
             e.reason.as_deref(),
             Some("3 of 4 measured intervals after adoption, 4 of 4 before")
+        );
+    }
+
+    #[test]
+    fn a_baseline_without_commits_before_adoption_gets_no_replay_advice() {
+        let metric = "claimcheck:source-text-missing";
+        let dates = |ds: &[&str]| ds.iter().map(|d| d.parse().unwrap()).collect::<Vec<_>>();
+        // Three intervals after adoption (2026-11-03), all their runs on or
+        // after it.
+        let mut runs = three_and_three(1, 1).split_off(3);
+        runs[0].header.at = "2026-11-03T00:00:00Z".into();
+        let late = dates(&["2026-11-03", "2026-11-05"]);
+        let e = eval_commits(&runs, metric, 3, 90, Some(&late));
+        assert_eq!(
+            e.reason.as_deref(),
+            Some(
+                "no baseline: 0 of 3 measured intervals before adoption, 3 of 3 after; the rate \
+                 after adoption has nothing to compare with yet, and no commit predates adoption \
+                 in the before-window (the 90 days before 2026-11-03), so no replay can supply one"
+            )
+        );
+        // A commit before the window does not help either, but a larger
+        // window would include it; without a window, it does help.
+        let old = dates(&["2026-07-01", "2026-11-04"]);
+        let e = eval_commits(&runs, metric, 3, 90, Some(&old));
+        assert!(
+            e.reason.as_deref().unwrap().ends_with(
+                "(the 90 days before 2026-11-03), so no replay can supply one; earlier commits \
+                 exist, which a larger `baseline_days` would include"
+            ),
+            "{:?}",
+            e.reason
+        );
+        let advice = "(`lab check --at` can replay commits before adoption)";
+        let e = eval_commits(&runs, metric, 3, 0, Some(&old));
+        assert!(
+            e.reason.as_deref().unwrap().ends_with(advice),
+            "{:?}",
+            e.reason
+        );
+        let e = eval_commits(&runs, metric, 3, 0, Some(&late));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .ends_with("(any time before 2026-11-03), so no replay can supply one"),
+            "{:?}",
+            e.reason
+        );
+        let e = eval_commits(&runs, metric, 3, 1, Some(&late));
+        assert!(
+            e.reason
+                .as_deref()
+                .unwrap()
+                .contains("(the day before 2026-11-03)"),
+            "{:?}",
+            e.reason
+        );
+        // A commit on the day before adoption is in the window; so is any
+        // commit when git history cannot be read.
+        let eve = dates(&["2026-11-02"]);
+        for commits in [Some(eve.as_slice()), None] {
+            let e = eval_commits(&runs, metric, 3, 90, commits);
+            assert!(
+                e.reason.as_deref().unwrap().ends_with(advice),
+                "{commits:?}"
+            );
+        }
+        // A stored run in the window can end a before-interval that starts
+        // at a replay of an older commit, from outside the window.
+        let runs = three_and_three(1, 1).split_off(3);
+        assert_eq!(runs[0].header.at, "2026-10-04T00:00:00Z");
+        let e = eval_commits(&runs, metric, 3, 90, Some(&old));
+        assert!(
+            e.reason.as_deref().unwrap().ends_with(advice),
+            "{:?}",
+            e.reason
         );
     }
 
@@ -2716,6 +2854,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commit_dates: &|| None,
             },
             utc_date,
         );
@@ -3084,6 +3223,7 @@ mod tests {
                 findings: &[],
                 sessions: Err("none"),
                 settings: &cfg,
+                commit_dates: &|| None,
             },
             utc_date,
         );

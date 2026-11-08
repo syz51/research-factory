@@ -584,6 +584,137 @@ fn lab_in(d: &Path, ceiling: &Path, tmp: &Path, args: &[&str]) -> Output {
 }
 
 #[test]
+fn evaluate_says_when_no_commit_predates_adoption() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let tmp = &ceiling.join("tmp");
+    let top = &ceiling.join("repo");
+    let d = &top.join("proj");
+    std::fs::create_dir_all(tmp).unwrap();
+    std::fs::create_dir_all(d).unwrap();
+    let lab = |args: &[&str]| lab_in(d, ceiling, tmp, args);
+    assert!(lab(&["init", "--name", "demo"]).status.success());
+    let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat m.jsonl; exit 0\"]\n\n[lab.evaluate]\nmin_sessions = 1\n";
+    std::fs::write(d.join("research.toml"), cfg).unwrap();
+    std::fs::write(d.join(".gitignore"), ".research/\n").unwrap();
+    let measure = |n: u64| {
+        format!(
+            r#"{{"schema":"rf.measure/1","tool":"claimcheck","unit":"citing-sentence","count":{n}}}"#
+        )
+    };
+    let add = lab(&[
+        "lesson",
+        "add",
+        "--id",
+        "quote-check",
+        "--title",
+        "T",
+        "--kind",
+        "bad",
+        "--rule",
+        "Check quotes.",
+        "--metric",
+        "claimcheck:quote-not-found",
+        "--status",
+        "adopted",
+    ]);
+    assert!(add.status.success(), "{}", stderr(&add));
+    // Two clean, measured runs on commits made since adoption: an interval
+    // after adoption and no commit before it.
+    git(top, ceiling, &["init", "-q"]);
+    for (ids, n) in [(&[1][..], 1), (&[1, 2][..], 3)] {
+        std::fs::write(d.join("f.jsonl"), errors(ids)).unwrap();
+        std::fs::write(d.join("m.jsonl"), measure(n)).unwrap();
+        git(top, ceiling, &["add", "-A"]);
+        git(top, ceiling, &["commit", "-qm", "text"]);
+        // Exit 1: the errors are new, but the run is stored.
+        assert_eq!(lab(&["check"]).status.code(), Some(1));
+    }
+    let evaluation = || {
+        let out = lab(&["evaluate", "--format", "jsonl"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let e: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+        assert_eq!(
+            (&e["before"]["n"], &e["after"]["n"]),
+            (&0.into(), &1.into())
+        );
+        e["reason"].as_str().unwrap().to_string()
+    };
+    let adopted = {
+        let out = lab(&["evaluate", "--format", "jsonl"]);
+        let e: serde_json::Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+        e["adopted"].as_str().unwrap().to_string()
+    };
+    let reason = evaluation();
+    assert!(
+        reason.ends_with(&format!(
+            "no commit predates adoption in the before-window (the 90 days before {adopted}), \
+             so no replay can supply one"
+        )),
+        "{reason}"
+    );
+    assert!(!reason.contains("lab check --at"), "{reason}");
+
+    // Ten days before adoption is in the window. A commit then outside the
+    // project does not count; one on another branch does.
+    let ago = jiff::Timestamp::now()
+        .checked_sub(jiff::SignedDuration::from_hours(240))
+        .unwrap()
+        .to_string();
+    std::fs::write(top.join("README"), "another project").unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    commit_at(top, ceiling, &ago, "outside");
+    let reason = evaluation();
+    assert!(reason.ends_with("so no replay can supply one"), "{reason}");
+    git(top, ceiling, &["switch", "-q", "-c", "side"]);
+    std::fs::write(d.join("notes.md"), "older text").unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    commit_at(top, ceiling, &ago, "older");
+    git(top, ceiling, &["switch", "-q", "-"]);
+    let advice = "(`lab check --at` can replay commits before adoption)";
+    let reason = evaluation();
+    assert!(reason.ends_with(advice), "{reason}");
+
+    // A shallow clone of the current branch lacks that commit, so its
+    // history counts as unread: the advice stays, with a note.
+    let shallow = &ceiling.join("shallow");
+    let url = format!("file://{}", top.display());
+    git(
+        ceiling,
+        ceiling,
+        &[
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &url,
+            shallow.to_str().unwrap(),
+        ],
+    );
+    let copied = Command::new("cp")
+        .args(["-R", ".research"])
+        .arg(shallow.join("proj"))
+        .current_dir(d)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let out = lab_in(&shallow.join("proj"), ceiling, tmp, &["evaluate"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains(advice), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("git fetch --unshallow"),
+        "{}",
+        stderr(&out)
+    );
+
+    // When git history cannot be read, the advice stays.
+    std::fs::rename(top.join(".git"), top.join("git-moved")).unwrap();
+    let reason = evaluation();
+    assert!(reason.ends_with(advice), "{reason}");
+}
+
+#[test]
 fn check_at_replays_commits_in_a_temporary_worktree() {
     let dir = tempfile::tempdir().unwrap();
     let ceiling = dir.path();

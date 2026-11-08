@@ -879,6 +879,9 @@ struct Evidence<'p> {
     runs: Vec<check::Run>,
     agent: AgentFiles,
     sessions: Result<Vec<retro::Session>, String>,
+    /// The dates of the commits a replay can check (`Inputs::commit_dates`),
+    /// read from git when a lesson first needs them.
+    commit_dates: std::cell::OnceCell<Option<Vec<jiff::civil::Date>>>,
 }
 
 impl<'p> Evidence<'p> {
@@ -890,6 +893,7 @@ impl<'p> Evidence<'p> {
             runs: check::history_with_replays(project)?,
             sessions: agent_sessions(project, &agent),
             agent,
+            commit_dates: std::cell::OnceCell::new(),
         })
     }
 
@@ -907,8 +911,20 @@ impl<'p> Evidence<'p> {
             findings: &self.agent.findings,
             sessions: self.sessions.as_deref().map_err(String::as_str),
             settings: &self.project.lab.evaluate,
+            commit_dates: &|| self.commit_dates().as_deref(),
         };
         evaluate::evaluate(lesson, &inputs, |t| self.project.date_of(t).ok())
+    }
+
+    fn commit_dates(&self) -> &Option<Vec<jiff::civil::Date>> {
+        self.commit_dates.get_or_init(|| {
+            let times = replay::commit_times(&self.project.root)?;
+            let dates: std::collections::BTreeSet<_> = times
+                .into_iter()
+                .map(|t| t.to_zoned(self.project.tz.clone()).date())
+                .collect();
+            Some(dates.into_iter().collect())
+        })
     }
 
     /// Every active lesson, measured.
