@@ -638,6 +638,7 @@ mod tests {
             reviewed: None,
             count: 2,
             findings: vec![],
+            version_changed: Default::default(),
         });
         assert_eq!(
             verdict_line(&e, Status::Adopted, None),

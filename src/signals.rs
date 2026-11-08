@@ -337,13 +337,20 @@ pub fn derive(
                         format!("Review findings introduced since lesson {id} was adopted")
                     },
                     format!(
-                        "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n\
+                        "{} finding(s) of its rule appeared since {}, by message and data, with where the new ones are:\n\n```\n{}\n```\n\n{}\
                          Fix each, or show that the finding is wrong. When `lab evaluate` lists only findings that cannot be fixed, such as those in append-only files, record their review with their count:\n\n\
                          ```sh\nlab lesson review {id} --count <n> --note \"<what was found>\"\n```\n\n\
                          If such findings keep appearing, revise the rule in `{file}` or retire the lesson. {next}\n",
                         i.count,
                         i.since_text(e.adopted.as_deref()),
-                        e.introduced_lines().join("\n")
+                        e.introduced_lines().join("\n"),
+                        i.version_text().map_or_else(String::new, |v| {
+                            format!(
+                                "Note: {v}. Check whether these findings come from the update; \
+                                 if they do and cannot be fixed, record their review with \
+                                 `lab lesson review`.\n\n"
+                            )
+                        })
                     ),
                 )
             }
@@ -671,6 +678,7 @@ mod tests {
                     subjects: vec!["a.md:1".into()],
                     more: 0,
                 }],
+                version_changed: Default::default(),
             }),
             measure: None,
         };
@@ -697,6 +705,22 @@ mod tests {
             after.body.contains("lab lesson review q --count <n>"),
             "{}",
             after.body
+        );
+        // A checker update between the two runs is named in the body.
+        assert!(!before.body.contains("version changed"), "{}", before.body);
+        let mut changed = eval("2026-11-01T00:00:00Z", None);
+        if let Some(i) = &mut changed.introduced {
+            i.version_changed = [("claims".to_string(), ["v1".into(), "v2".into()])].into();
+        }
+        let s = one(changed);
+        assert_eq!(s.kind, "lesson-introduced");
+        assert!(
+            s.body.contains(
+                "Note: the checker version changed since that run (claims v1 → v2), so the \
+                 update alone can add or remove findings."
+            ),
+            "{}",
+            s.body
         );
 
         // Measured intervals: an inconclusive verdict still lists the
