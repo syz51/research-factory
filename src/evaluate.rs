@@ -308,6 +308,20 @@ impl Evaluation {
         out
     }
 
+    /// How many findings were introduced since when, and any checker
+    /// version change since then.
+    fn introduced_text(&self, i: &Introduced) -> String {
+        let mut out = format!(
+            "{} introduced since {}",
+            i.count,
+            i.since_text(self.adopted.as_deref())
+        );
+        if let Some(v) = i.version_text() {
+            let _ = write!(out, "; {v}");
+        }
+        out
+    }
+
     /// One line of `lab evaluate` text output.
     pub fn line(&self) -> String {
         let mut out = self.lesson.clone();
@@ -363,21 +377,17 @@ impl Evaluation {
                 let _ = write!(out, "; {} in unmatched strata left out", self.excluded);
             }
             if let Some(i) = &self.introduced {
-                let _ = write!(
-                    out,
-                    "; {} introduced since {}",
-                    i.count,
-                    i.since_text(self.adopted.as_deref())
-                );
-                if let Some(v) = i.version_text() {
-                    let _ = write!(out, "; {v}");
-                }
+                let _ = write!(out, "; {}", self.introduced_text(i));
             }
             out.push(')');
             if let (Some(lo), Some(up)) = (self.p_lower, self.p_upper) {
                 let _ = write!(out, ", p↓ {} p↑ {}", p_value(lo), p_value(up));
             }
             out.push_str(": ");
+        } else if let Some(i) = &self.introduced {
+            // No interval counts, as after a checker update: the introduced
+            // findings still need review.
+            let _ = write!(out, "{}: ", self.introduced_text(i));
         }
         out.push_str(self.verdict.as_str());
         if let Some(r) = &self.reason {
@@ -733,9 +743,12 @@ fn check_runs(
     // Only the latest unit counts: a checker that renamed or changed its
     // unit gets a baseline again from runs in the new unit. Only the current
     // checker versions count too, those of the interval end stored last: an
-    // update can change what a unit counts under the same name. A version
-    // unknown on either side matches.
-    let current = newest.map(|at| &versions[at]);
+    // update can change what a unit counts under the same name. An end
+    // without a known version, as in runs stored before lab 0.9.0, takes the
+    // first one known after it, as `version_changed` does, since its checker
+    // was no newer; a check never known matches any version.
+    let filled = back_filled(&versions);
+    let current = newest.map(|at| &filled[at]);
     let Some((unit, current)) = intervals
         .last()
         .zip(current)
@@ -762,7 +775,7 @@ fn check_runs(
             other_unit += 1;
             continue;
         }
-        if conflicts(&versions[i.end], current) {
+        if conflicts(&filled[i.end], current) {
             other_version[usize::from(i.side)] += 1;
             continue;
         }
@@ -888,6 +901,19 @@ fn version_changed(
             (old != new).then(|| (check.to_string(), [old.to_string(), new.to_string()]))
         })
         .collect()
+}
+
+/// `known` (from [`known_versions`]) with each check that an end does not
+/// know yet given the first version known after it.
+fn back_filled<'r>(known: &[BTreeMap<&'r str, &'r str>]) -> Vec<BTreeMap<&'r str, &'r str>> {
+    let mut out = known.to_vec();
+    for k in (1..out.len()).rev() {
+        let (earlier, later) = out.split_at_mut(k);
+        for (check, v) in &later[0] {
+            earlier[k - 1].entry(check).or_insert(v);
+        }
+    }
+    out
 }
 
 /// At each interval end, the last known version of each required check up
@@ -2927,20 +2953,22 @@ mod tests {
     #[test]
     fn intervals_across_a_checker_version_change_are_left_out() {
         // c0 and c1 were stored before versions were recorded: unknown, so
-        // they form an interval with each other and with v1.
+        // they cross no change, and take v1, the first version known after
+        // them, against the current v2.
         let v = |s| Some(s);
         let runs = with_versions([None, None, v("v1"), v("v1"), v("v2"), v("v2"), v("v2")]);
         let e = eval_min(&runs, 1);
         assert_eq!(e.after.new_units, Some(200));
-        assert_eq!((e.before.n, e.after.n), (1, 2));
-        assert_eq!(e.verdict, Verdict::Improved);
-        assert_eq!(
-            e.reason.as_deref(),
-            Some(
-                "1 interval(s) across a checker version change left out; 2 interval(s) (2 \
+        assert_eq!((e.before.n, e.after.n), (0, 2));
+        assert_eq!(e.verdict, Verdict::Collecting);
+        assert!(
+            e.reason.as_deref().unwrap().ends_with(
+                "; 1 interval(s) across a checker version change left out; 3 interval(s) (3 \
                  before adoption, 0 after) measured with another checker version than the \
                  current one (claims v2) left out, which a replay of their commits measures again"
-            )
+            ),
+            "{:?}",
+            e.reason
         );
         // An unknown version between v1 and v2 does not hide the change: it
         // is counted in the interval that reaches v2.
