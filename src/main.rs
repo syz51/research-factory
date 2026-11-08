@@ -15,6 +15,7 @@ mod evaluate;
 mod finding;
 mod lesson_loop;
 mod lessons;
+mod replay;
 mod retro;
 mod signals;
 mod stats;
@@ -56,8 +57,12 @@ enum Command {
         #[arg(long = "only", value_name = "NAME")]
         only: Vec<String>,
         /// Fail only on error findings that are not in the baseline (`lab baseline set`).
-        #[arg(long)]
+        #[arg(long, conflicts_with = "at")]
         new_only: bool,
+        /// Replay a past commit, or each commit of a range `A..B`, in a temporary
+        /// git worktree with today's checkers, for `lab evaluate` (repeatable).
+        #[arg(long = "at", value_name = "COMMIT")]
+        at: Vec<String>,
         /// Print every finding, not only the summary.
         #[arg(long)]
         verbose: bool,
@@ -248,7 +253,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         Command::Init { .. } => unreachable!("handled above"),
         Command::Check {
             only,
+            new_only: _,
+            at,
+            verbose,
+        } if !at.is_empty() => replay(&project, &only, &at, verbose),
+        Command::Check {
+            only,
             new_only,
+            at: _,
             verbose,
         } => check(&project, &only, new_only, verbose),
         Command::Baseline(cmd) => baseline(&project, cmd),
@@ -379,6 +391,10 @@ recurrence = 3
 # Each check prints rf.finding/1 JSON Lines and exits 0 (no errors), 1 (errors) or 2 (failed).
 # Names must be unique. After the first `lab check`, accept the existing backlog with
 # `lab baseline set --note "<why>"` so that `lab check --new-only` fails only on new errors.
+# Each run records each checker's version: the first line `version` prints (default:
+# `<program> --version` for a bare program name that is not an interpreter; [] for none).
+# `lab check --at <commit>` replays past commits; `uncommitted_inputs` lists files no commit
+# holds, such as git-ignored source texts, which a replay then reads from the work tree.
 # [[lab.checks]]
 # name = "references"
 # run = ["papers", "registry", "check", "--format", "jsonl"]
@@ -571,6 +587,84 @@ fn check(
     }
     println!("stored {}", run.path.display());
     Ok(if failing {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+/// `lab check --at`: one summary line per replayed commit. Exits 1 when a
+/// check failed in a replay; findings do not fail it, since a replay measures
+/// past text rather than gating it.
+fn replay(
+    project: &Project,
+    only: &[String],
+    revs: &[String],
+    verbose: bool,
+) -> Result<ExitCode, String> {
+    let runs = replay::replay(project, only, revs)?;
+    let mut failed = false;
+    for run in &runs {
+        let h = &run.header;
+        let commit = h.commit.as_deref().unwrap_or("?");
+        let checks: Vec<String> = h
+            .checks
+            .iter()
+            .map(|c| {
+                let count = |sev| {
+                    run.items
+                        .iter()
+                        .filter(|i| i.check == c.name && i.finding.severity == sev)
+                        .count()
+                };
+                let from_work_tree = if c.uncommitted_inputs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", read {} from the work tree",
+                        c.uncommitted_inputs.join(", ")
+                    )
+                };
+                format!(
+                    "{} {} ({} errors, {} warnings, {} info{from_work_tree})",
+                    c.name,
+                    c.status,
+                    count(Severity::Error),
+                    count(Severity::Warn),
+                    count(Severity::Info)
+                )
+            })
+            .collect();
+        failed |= h.checks.iter().any(|c| !c.ran());
+        println!(
+            "replayed {} ({}): {}",
+            &commit[..commit.len().min(12)],
+            h.at,
+            checks.join("; ")
+        );
+        for m in &run.measures {
+            println!(
+                "  {} measured {} {}(s) for {}",
+                m.check, m.measure.count, m.measure.unit, m.measure.tool
+            );
+        }
+        if verbose {
+            for item in &run.items {
+                let f = &item.finding;
+                println!(
+                    "  {} {} {}:{} {}: {}",
+                    item.fingerprint,
+                    f.severity.as_str(),
+                    f.tool,
+                    f.rule,
+                    f.subject,
+                    f.message
+                );
+            }
+        }
+        println!("  stored {}", run.path.display());
+    }
+    Ok(if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -791,7 +885,8 @@ impl<'p> Evidence<'p> {
         let agent = agent_findings(project, None)?;
         Ok(Self {
             project,
-            runs: check::history(project)?,
+            // Replayed runs are interval ends for `lab evaluate`, and nothing else.
+            runs: check::history_with_replays(project)?,
             sessions: agent_sessions(project, &agent),
             agent,
         })

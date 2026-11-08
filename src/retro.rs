@@ -79,13 +79,14 @@ pub type Key = (String, String);
 /// Groups findings from stored check runs and from an agent-findings file.
 /// With `groups`, agent findings on a known session count once per session
 /// group; without it, and for check runs, each distinct finding counts.
+/// Replayed runs (`lab check --at`) are left out: they check past text again.
 pub fn recurrences(
     runs: &[Run],
     agent: &[Finding],
     groups: Option<&SessionGroups>,
 ) -> BTreeMap<Key, Recurrence> {
     let mut map: BTreeMap<Key, Recurrence> = BTreeMap::new();
-    for run in runs {
+    for run in runs.iter().filter(|r| !r.header.replayed) {
         let mut seen_in_run = BTreeSet::new();
         for item in &run.items {
             let f = &item.finding;
@@ -324,6 +325,8 @@ mod tests {
                 findings: rules.len(),
                 unparsed: 0,
                 duration_ms: 0,
+                version: None,
+                uncommitted_inputs: Vec::new(),
             });
         }
         Run {
@@ -333,6 +336,7 @@ mod tests {
                 at: at.into(),
                 commit: None,
                 dirty: None,
+                replayed: false,
                 checks: outcomes,
             },
             items,

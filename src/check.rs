@@ -79,6 +79,14 @@ pub struct CheckOutcome {
     /// `rf.measure/1` records.
     pub unparsed: usize,
     pub duration_ms: u128,
+    /// The checker's version (see `versions`), or `None` when unknown and
+    /// in runs stored before lab 0.9.0.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// A replayed run's inputs read from the current work tree, since no
+    /// commit holds them (`uncommitted_inputs` in `[[lab.checks]]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncommitted_inputs: Vec<String>,
 }
 
 impl CheckOutcome {
@@ -101,6 +109,10 @@ pub struct RunHeader {
     /// checks read the work tree; `None` when `commit` is.
     #[serde(default)]
     pub dirty: Option<bool>,
+    /// A run of a past commit by `lab check --at`, with today's checkers in
+    /// a temporary worktree; its `at` is the commit's time (since lab 0.9.0).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replayed: bool,
     pub checks: Vec<CheckOutcome>,
 }
 
@@ -179,8 +191,16 @@ impl Run {
     }
 }
 
-/// Stored runs, oldest first. A missing directory means no history.
+/// Stored runs of the work tree, oldest first, without replayed runs, which
+/// only `lab evaluate` reads. A missing directory means no history.
 pub fn history(project: &Project) -> Result<Vec<Run>, String> {
+    let mut runs = history_with_replays(project)?;
+    runs.retain(|r| !r.header.replayed);
+    Ok(runs)
+}
+
+/// Every stored run, replayed ones included, in the order they were stored.
+pub fn history_with_replays(project: &Project) -> Result<Vec<Run>, String> {
     let dir = project.checks_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -233,12 +253,19 @@ impl Line {
     }
 }
 
-/// Runs one checker and parses its stdout.
-fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>, Vec<Measure>) {
+/// Runs one checker in `root` (the project root, or a replayed commit's copy
+/// of it) and parses its stdout. Its program resolves against the project
+/// root, so a replay runs today's checker.
+fn run_one(
+    project: &Project,
+    root: &Path,
+    spec: &CheckSpec,
+    version: Option<String>,
+) -> (CheckOutcome, Vec<Finding>, Vec<Measure>) {
     let cwd = spec
         .cwd
         .as_deref()
-        .map_or_else(|| project.root.clone(), |c| project.path(c));
+        .map_or_else(|| root.to_path_buf(), |c| root.join(c));
     let program = project.program(spec);
     let started = Instant::now();
     let output = Command::new(&program)
@@ -254,6 +281,8 @@ fn run_one(project: &Project, spec: &CheckSpec) -> (CheckOutcome, Vec<Finding>, 
         findings: 0,
         unparsed: 0,
         duration_ms,
+        version,
+        uncommitted_inputs: Vec::new(),
     };
     let output = match output {
         Ok(output) => output,
@@ -450,6 +479,165 @@ pub fn select<'a>(project: &'a Project, only: &[String]) -> Result<Vec<&'a Check
         .collect())
 }
 
+/// A run's checks, before it is stored.
+pub(crate) struct Ran {
+    pub outcomes: Vec<CheckOutcome>,
+    pub items: Vec<Item>,
+    pub measures: Vec<MeasureItem>,
+}
+
+/// Runs `specs` in `root`, each with its version from `versions` and, for a
+/// replay, the uncommitted inputs linked for it.
+pub(crate) fn run_checks(
+    project: &Project,
+    root: &Path,
+    specs: &[&CheckSpec],
+    versions: &BTreeMap<String, Option<String>>,
+    linked: &BTreeMap<String, Vec<String>>,
+) -> Ran {
+    let mut ran = Ran {
+        outcomes: Vec::new(),
+        items: Vec::new(),
+        measures: Vec::new(),
+    };
+    for spec in specs {
+        let version = versions.get(&spec.name).cloned().flatten();
+        let (mut outcome, findings, measured) = run_one(project, root, spec, version);
+        outcome.uncommitted_inputs = linked.get(&spec.name).cloned().unwrap_or_default();
+        ran.measures
+            .extend(measured.into_iter().map(|measure| MeasureItem {
+                schema: MEASURE_ITEM_SCHEMA.into(),
+                check: spec.name.clone(),
+                measure,
+            }));
+        let fps = finding::fingerprints(&findings);
+        ran.items
+            .extend(findings.into_iter().zip(fps).map(|(f, fingerprint)| Item {
+                schema: ITEM_SCHEMA.into(),
+                check: spec.name.clone(),
+                fingerprint,
+                finding: f,
+            }));
+        ran.outcomes.push(outcome);
+    }
+    ran
+}
+
+/// Stores a run under a new file name and returns it. Only a clean run can
+/// end an interval, so only it keeps the measure keys, which can be most of
+/// a run file.
+pub(crate) fn store_run(project: &Project, mut header: RunHeader, ran: Ran) -> Result<Run, String> {
+    let Ran {
+        outcomes,
+        items,
+        mut measures,
+    } = ran;
+    if header.dirty != Some(false) {
+        for m in &mut measures {
+            m.measure.keys = None;
+        }
+    }
+    header.checks = outcomes;
+    let path = store(project, &header, &items, &measures)?;
+    Ok(Run {
+        path,
+        header,
+        items,
+        measures,
+    })
+}
+
+/// Longest version line kept.
+const MAX_VERSION_CHARS: usize = 200;
+/// How long a version command may run.
+const VERSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Programs whose `--version` names an interpreter, not the checker it runs.
+const INTERPRETERS: &[&str] = &[
+    "sh", "bash", "zsh", "dash", "ksh", "fish", "env", "python", "python3", "uv", "uvx", "node",
+    "bun", "bunx", "deno", "npx", "perl", "ruby", "cargo",
+];
+
+/// The command that prints a check's version: its `version`, or, when that is
+/// not set, `<program> --version` for a program named without a directory
+/// part that is not an interpreter. `None` when nothing tells the version.
+fn version_command(spec: &CheckSpec) -> Option<Vec<String>> {
+    if let Some(argv) = &spec.version {
+        return (!argv.is_empty()).then(|| argv.clone());
+    }
+    let program = &spec.run[0];
+    let bare = Path::new(program).components().count() == 1 && !program.contains('/');
+    (bare && !INTERPRETERS.contains(&program.as_str()))
+        .then(|| vec![program.clone(), "--version".into()])
+}
+
+/// Each check's version: the first line its version command prints, from
+/// the project root. A command that fails, times out or prints no short,
+/// non-JSON line gives `None`, with a warning on stderr.
+pub(crate) fn versions(
+    project: &Project,
+    specs: &[&CheckSpec],
+) -> BTreeMap<String, Option<String>> {
+    specs
+        .iter()
+        .map(|spec| {
+            let version = version_command(spec).and_then(|argv| {
+                version_of(project, &argv)
+                    .map_err(|e| {
+                        eprintln!(
+                            "lab: check `{}`: no version from `{}`: {e}; set `version` in its \
+                             [[lab.checks]] entry, or `version = []` for none",
+                            spec.name,
+                            argv.join(" ")
+                        );
+                    })
+                    .ok()
+            });
+            (spec.name.clone(), version)
+        })
+        .collect()
+}
+
+fn version_of(project: &Project, argv: &[String]) -> Result<String, String> {
+    use std::os::unix::process::CommandExt as _;
+    use std::process::Stdio;
+    let mut child = Command::new(project.resolve_program(&argv[0]))
+        .args(&argv[1..])
+        .current_dir(&project.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("could not start: {e}"))?;
+    // A version line fits in the pipe, so reading after the exit cannot block it.
+    let status = match crate::lesson_loop::wait_for(&mut child, VERSION_TIMEOUT)
+        .map_err(|e| e.to_string())?
+    {
+        crate::lesson_loop::Ended::Exit(status) => status,
+        crate::lesson_loop::Ended::TimedOut => {
+            return Err(format!("timed out after {} s", VERSION_TIMEOUT.as_secs()));
+        }
+    };
+    let mut stdout = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read as _;
+        out.read_to_string(&mut stdout)
+            .map_err(|e| format!("its output: {e}"))?;
+    }
+    if !status.success() {
+        return Err(format!("it exited with {status}"));
+    }
+    let line = stdout
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .ok_or("it printed nothing")?;
+    if line.chars().count() > MAX_VERSION_CHARS || line.starts_with('{') {
+        return Err("its first line is not a version".into());
+    }
+    Ok(line.to_string())
+}
+
 pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let specs = select(project, only)?;
     let baseline = Baseline::load(project)?;
@@ -458,46 +646,17 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         eprintln!("lab: the run records no commit: {e}");
         (None, None)
     });
-    let mut outcomes = Vec::new();
-    let mut items = Vec::new();
-    let mut measures = Vec::new();
-    for spec in specs {
-        let (outcome, findings, measured) = run_one(project, spec);
-        measures.extend(measured.into_iter().map(|measure| MeasureItem {
-            schema: MEASURE_ITEM_SCHEMA.into(),
-            check: spec.name.clone(),
-            measure,
-        }));
-        let fps = finding::fingerprints(&findings);
-        items.extend(findings.into_iter().zip(fps).map(|(f, fingerprint)| Item {
-            schema: ITEM_SCHEMA.into(),
-            check: spec.name.clone(),
-            fingerprint,
-            finding: f,
-        }));
-        outcomes.push(outcome);
-    }
-    // Only a clean run can end an interval, so only it keeps the keys,
-    // which can be most of a run file.
-    if dirty != Some(false) {
-        for m in &mut measures {
-            m.measure.keys = None;
-        }
-    }
+    let versions = versions(project, &specs);
+    let ran = run_checks(project, &project.root, &specs, &versions, &BTreeMap::new());
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,
         commit,
         dirty,
-        checks: outcomes,
+        replayed: false,
+        checks: Vec::new(),
     };
-    let path = store(project, &header, &items, &measures)?;
-    let run = Run {
-        path,
-        header,
-        items,
-        measures,
-    };
+    let run = store_run(project, header, ran)?;
     let mut delta = BTreeMap::new();
     for outcome in run.header.checks.iter().filter(|c| c.ran()) {
         let entry = baseline.checks.get(&outcome.name).map(|b| {
@@ -700,6 +859,77 @@ mod tests {
         let run = Run::load(&path).unwrap();
         assert!(run.measures.is_empty());
         assert_eq!((run.header.commit, run.header.dirty), (None, None));
+        assert!(!run.header.replayed);
+        // A check outcome stored before lab 0.9.0 has no version.
+        std::fs::write(
+            &path,
+            r#"{"schema":"rf.labcheck/1","at":"2026-11-01T00:00:00Z","checks":[{"name":"c","command":["c"],"exit":0,"status":"ok","findings":0,"unparsed":0,"duration_ms":1}]}"#,
+        )
+        .unwrap();
+        let c = &Run::load(&path).unwrap().header.checks[0];
+        assert_eq!(
+            (c.version.as_deref(), c.uncommitted_inputs.len()),
+            (None, 0)
+        );
+    }
+
+    fn spec(run: &[&str], version: Option<&[&str]>) -> CheckSpec {
+        CheckSpec {
+            name: "c".into(),
+            run: run.iter().map(|s| (*s).to_string()).collect(),
+            cwd: None,
+            version: version.map(|v| v.iter().map(|s| (*s).to_string()).collect()),
+            uncommitted_inputs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_version_command_defaults_to_a_named_programs_own_flag() {
+        let cmd = |run: &[&str], version| version_command(&spec(run, version));
+        assert_eq!(
+            cmd(&["claimcheck", "check"], None),
+            Some(vec!["claimcheck".to_string(), "--version".to_string()])
+        );
+        // A script or an interpreter does not tell the checker's version.
+        assert_eq!(cmd(&["scripts/check.sh"], None), None);
+        assert_eq!(cmd(&["/usr/local/bin/claimcheck"], None), None);
+        assert_eq!(cmd(&["sh", "-c", "claimcheck check"], None), None);
+        assert_eq!(cmd(&["claimcheck"], Some(&[])), None);
+        assert_eq!(
+            cmd(&["sh", "-c", "x"], Some(&["x", "-V"])),
+            Some(vec!["x".to_string(), "-V".to_string()])
+        );
+    }
+
+    #[test]
+    fn each_check_records_its_version_or_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let checks = emit_script(dir.path(), &[FINDING_B], 0, false);
+        let p = project(
+            dir.path(),
+            &format!(
+                "{checks}version = [\"sh\", \"-c\", \"echo; echo '  tool 1.2  '; echo more\"]\n\
+                 [[lab.checks]]\nname = \"none\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\n\
+                 [[lab.checks]]\nname = \"bad\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo 2.0; exit 3\"]\n\
+                 [[lab.checks]]\nname = \"json\"\nrun = [\"sh\", \"-c\", \"exit 0\"]\nversion = [\"sh\", \"-c\", \"echo '{{}}'\"]\n"
+            ),
+        );
+        let report = run(&p, &[]).unwrap();
+        let versions: Vec<Option<&str>> = report
+            .run
+            .header
+            .checks
+            .iter()
+            .map(|c| c.version.as_deref())
+            .collect();
+        assert_eq!(versions, [Some("tool 1.2"), None, None, None]);
+        let stored = std::fs::read_to_string(&report.run.path).unwrap();
+        let header: serde_json::Value =
+            serde_json::from_str(stored.lines().next().unwrap()).unwrap();
+        assert_eq!(header["checks"][0]["version"], "tool 1.2");
+        assert!(header["checks"][1]["version"].is_null(), "{header}");
+        assert!(header.get("replayed").is_none(), "{header}");
+        assert!(header["checks"][0].get("uncommitted_inputs").is_none());
     }
 
     #[test]

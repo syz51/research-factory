@@ -508,6 +508,7 @@ mod tests {
                 at: at.into(),
                 commit: None,
                 dirty: None,
+                replayed: false,
                 checks: checks
                     .iter()
                     .map(|(name, status)| CheckOutcome {
@@ -518,6 +519,8 @@ mod tests {
                         findings: 0,
                         unparsed: 0,
                         duration_ms: 0,
+                        version: None,
+                        uncommitted_inputs: Vec::new(),
                     })
                     .collect(),
             },

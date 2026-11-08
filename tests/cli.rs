@@ -558,3 +558,179 @@ fn evaluate_counts_a_baselined_new_finding_but_not_a_moved_one() {
         stderr(&out)
     );
 }
+
+/// Commits everything in `top` with a fixed committer time.
+fn commit_at(top: &Path, ceiling: &Path, date: &str, message: &str) -> String {
+    let out = isolated(&mut Command::new("git"), ceiling)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(["commit", "-qm", message])
+        .env("GIT_COMMITTER_DATE", date)
+        .env("GIT_AUTHOR_DATE", date)
+        .current_dir(top)
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "{}", stderr(&out));
+    git(top, ceiling, &["rev-parse", "HEAD"])
+}
+
+/// Runs `lab` with git isolated and temporary files in `tmp`.
+fn lab_in(d: &Path, ceiling: &Path, tmp: &Path, args: &[&str]) -> Output {
+    isolated(&mut Command::new(env!("CARGO_BIN_EXE_lab")), ceiling)
+        .args(args)
+        .env("TMPDIR", tmp)
+        .current_dir(d)
+        .output()
+        .expect("run lab")
+}
+
+#[test]
+fn check_at_replays_commits_in_a_temporary_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let tmp = &ceiling.join("tmp");
+    std::fs::create_dir_all(tmp).unwrap();
+    let top = &ceiling.join("repo");
+    let d = &top.join("proj");
+    std::fs::create_dir_all(top).unwrap();
+    git(top, ceiling, &["init", "-q"]);
+    std::fs::write(top.join("README"), "before the project").unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    let empty = commit_at(top, ceiling, "2026-09-30T00:00:00Z", "readme");
+
+    // The check prints the committed f.jsonl and the git-ignored source
+    // text's measure, which only the work tree holds.
+    std::fs::create_dir_all(d).unwrap();
+    assert!(lab(d, &["init", "--name", "demo"]).status.success());
+    let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat sources/m.jsonl; exit 0\"]\nversion = [\"sh\", \"-c\", \"echo claims 1.0\"]\nuncommitted_inputs = [\"sources/m.jsonl\", \"gone\"]\n";
+    std::fs::write(d.join("research.toml"), cfg).unwrap();
+    std::fs::write(d.join(".gitignore"), "sources/\n.research/\n").unwrap();
+    std::fs::create_dir_all(d.join("sources")).unwrap();
+    std::fs::write(
+        d.join("sources/m.jsonl"),
+        r#"{"schema":"rf.measure/1","tool":"claimcheck","unit":"citing-sentence","count":2,"keys":["00000000000000aa","00000000000000bb"]}"#,
+    )
+    .unwrap();
+    std::fs::write(d.join("f.jsonl"), "").unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    let first = commit_at(top, ceiling, "2026-10-01T00:00:00Z", "first");
+    std::fs::write(d.join("f.jsonl"), errors(&[1])).unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    let second = commit_at(top, ceiling, "2026-10-02T12:30:00Z", "second");
+    // Uncommitted text the replay must not see.
+    std::fs::write(d.join("f.jsonl"), errors(&[1, 2, 3])).unwrap();
+
+    // No live run yet: a replay is not one, so no baseline can come from it.
+    let out = lab_in(
+        d,
+        ceiling,
+        tmp,
+        &[
+            "check",
+            "--at",
+            &first,
+            "--at",
+            &format!("{first}..{second}"),
+        ],
+    );
+    assert!(out.status.success(), "{}{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert_eq!(text.matches("replayed ").count(), 2, "{text}");
+    assert!(
+        text.contains("read sources/m.jsonl from the work tree"),
+        "{text}"
+    );
+    assert!(
+        stderr(&out).contains("uncommitted input `gone` is missing"),
+        "{}",
+        stderr(&out)
+    );
+    let mut runs: Vec<serde_json::Value> = std::fs::read_dir(d.join(".research/lab/checks"))
+        .unwrap()
+        .map(|e| {
+            let text = std::fs::read_to_string(e.unwrap().path()).unwrap();
+            serde_json::from_str(text.lines().next().unwrap()).unwrap()
+        })
+        .collect();
+    runs.sort_by_key(|h| h["at"].as_str().unwrap().to_string());
+    let summary: Vec<_> = runs
+        .iter()
+        .map(|h| {
+            let c = &h["checks"][0];
+            (
+                h["commit"].as_str().unwrap(),
+                h["at"].as_str().unwrap(),
+                h["dirty"].as_bool(),
+                h["replayed"].as_bool(),
+                c["findings"].as_u64(),
+                c["version"].as_str(),
+                c["uncommitted_inputs"].clone(),
+            )
+        })
+        .collect();
+    let inputs = serde_json::json!(["sources/m.jsonl"]);
+    assert_eq!(
+        summary,
+        [
+            (
+                first.as_str(),
+                "2026-10-01T00:00:00Z",
+                Some(false),
+                Some(true),
+                Some(0),
+                Some("claims 1.0"),
+                inputs.clone()
+            ),
+            (
+                second.as_str(),
+                "2026-10-02T12:30:00Z",
+                Some(false),
+                Some(true),
+                Some(1),
+                Some("claims 1.0"),
+                inputs
+            ),
+        ]
+    );
+    let set = lab_in(d, ceiling, tmp, &["baseline", "set", "--note", "x"]);
+    assert!(
+        stderr(&set).contains("has no completed run"),
+        "{}",
+        stderr(&set)
+    );
+
+    // Every path removes the worktree: success, a commit without the project
+    // root, and a revision that names nothing.
+    let worktrees = || git(top, ceiling, &["worktree", "list", "--porcelain"]);
+    let tmp_entries = || std::fs::read_dir(tmp).unwrap().count();
+    assert_eq!(
+        worktrees().matches("worktree ").count(),
+        1,
+        "{}",
+        worktrees()
+    );
+    assert_eq!(tmp_entries(), 0);
+    let out = lab_in(d, ceiling, tmp, &["check", "--at", &empty]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("has no `proj`, the project root"),
+        "{}",
+        stderr(&out)
+    );
+    let out = lab_in(d, ceiling, tmp, &["check", "--at", "no-such-rev"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert_eq!(
+        worktrees().matches("worktree ").count(),
+        1,
+        "{}",
+        worktrees()
+    );
+    assert_eq!(tmp_entries(), 0);
+    // The work tree, with its uncommitted text, is untouched.
+    assert_eq!(
+        std::fs::read_to_string(d.join("f.jsonl")).unwrap(),
+        errors(&[1, 2, 3])
+    );
+    let out = lab_in(d, ceiling, tmp, &["check", "--at", &second, "--new-only"]);
+    assert_eq!(out.status.code(), Some(2), "--at conflicts with --new-only");
+}

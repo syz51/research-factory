@@ -178,7 +178,7 @@ impl Lock {
 }
 
 /// How a child process ended.
-enum Ended {
+pub(crate) enum Ended {
     Exit(std::process::ExitStatus),
     TimedOut,
 }
@@ -186,7 +186,10 @@ enum Ended {
 /// Waits for a child started in its own process group (`process_group(0)`);
 /// on timeout kills the whole group, so programs a wrapper such as `sh`
 /// started do not outlive it.
-fn wait_for(child: &mut std::process::Child, timeout: Duration) -> std::io::Result<Ended> {
+pub(crate) fn wait_for(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Ended> {
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {

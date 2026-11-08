@@ -533,7 +533,11 @@ fn check_runs(
         }
         let count = metric_items(run, metric, required).len();
         observed |= count > 0;
-        match place(&run.header.at) {
+        // A replayed run (`lab check --at`) checks past text again with
+        // today's checkers: an interval end, but not a run of the history
+        // that `introduced` and the means describe.
+        let live = !run.header.replayed;
+        match place(&run.header.at).filter(|_| live) {
             Some(true) => {
                 after.push(count as f64);
                 first.get_or_insert(run);
@@ -605,8 +609,10 @@ fn check_runs(
     let min = inputs.settings.min_sessions;
     // Each interval: its side, its unit (the required checks' units, joined
     // by `+`), findings introduced and new units. An interval across a
-    // change of a check's unit is left out, since its counts do not compare.
+    // change of a check's unit is left out, since its counts do not compare;
+    // so is one across a change of a required checker's version, counted.
     let mut intervals: Vec<(bool, String, u64, u64)> = Vec::new();
+    let mut version_changes = 0;
     for pair in points.windows(2) {
         let ((r0, m0), (r1, m1)) = (&pair[0], &pair[1]);
         let Some(side) = place(&r1.header.at) else {
@@ -622,6 +628,10 @@ fn check_runs(
         if new_units == 0 {
             continue;
         }
+        if required.iter().any(|check| version_changed(r0, r1, check)) {
+            version_changes += 1;
+            continue;
+        }
         let unit: BTreeSet<&str> = m1.values().filter_map(|u| u.unit).collect();
         let found = introduced_count(
             &metric_items(r0, metric, required),
@@ -629,6 +639,12 @@ fn check_runs(
         );
         let unit = unit.into_iter().collect::<Vec<_>>().join("+");
         intervals.push((side, unit, found, new_units));
+    }
+    if version_changes > 0 {
+        let _ = write!(
+            note,
+            "; {version_changes} interval(s) across a checker version change left out"
+        );
     }
     // Only the latest unit counts: a checker that renamed or changed its
     // unit gets a baseline again from runs in the new unit.
@@ -672,7 +688,8 @@ fn check_runs(
     if b.n < min {
         e.reason = Some(format!(
             "no baseline: {} of {min} measured intervals before adoption, {} of {min} after; \
-             the rate after adoption has nothing to compare with yet{note}",
+             the rate after adoption has nothing to compare with yet (`lab check --at` can \
+             replay commits before adoption){note}",
             b.n, a.n
         ));
         return e;
@@ -699,6 +716,19 @@ fn check_runs(
     // A verdict has no reason, but a missing reviewed run is still said.
     e.reason = note.strip_prefix("; ").map(Into::into);
     e
+}
+
+/// Whether `check` ran with a different known version in `r1` than in `r0`.
+/// An unknown version, as in runs stored before lab 0.9.0, changes nothing.
+fn version_changed(r0: &Run, r1: &Run, check: &str) -> bool {
+    let version = |r: &Run| {
+        r.header
+            .checks
+            .iter()
+            .find(|c| c.name == check)
+            .and_then(|c| c.version.clone())
+    };
+    matches!((version(r0), version(r1)), (Some(a), Some(b)) if a != b)
 }
 
 /// The units one check measured for a tool in one run, merged over its
@@ -1834,6 +1864,8 @@ mod tests {
                 findings: rules,
                 unparsed: 0,
                 duration_ms: 0,
+                version: None,
+                uncommitted_inputs: Vec::new(),
             });
         }
         Run {
@@ -1843,6 +1875,7 @@ mod tests {
                 at: at.into(),
                 commit: None,
                 dirty: None,
+                replayed: false,
                 checks: outcomes,
             },
             items,
@@ -2360,7 +2393,7 @@ mod tests {
         assert_eq!(
             e.reason.as_deref(),
             Some(
-                "no baseline: 3 of 4 measured intervals before adoption, 3 of 4 after; the rate after adoption has nothing to compare with yet"
+                "no baseline: 3 of 4 measured intervals before adoption, 3 of 4 after; the rate after adoption has nothing to compare with yet (`lab check --at` can replay commits before adoption)"
             )
         );
         let mut runs = runs;
@@ -2374,6 +2407,68 @@ mod tests {
             e.reason.as_deref(),
             Some("3 of 4 measured intervals after adoption, 4 of 4 before")
         );
+    }
+
+    #[test]
+    fn replayed_runs_are_interval_ends_but_not_the_introduced_history() {
+        // Live runs from c5 on; c0 to c4 replayed later, so stored after them.
+        let mut runs = three_and_three(10, 0);
+        let mut replayed: Vec<Run> = runs.drain(..5).collect();
+        let live_only = eval_min(&runs, 2);
+        assert_eq!((live_only.before.n, live_only.after.n), (0, 1));
+        for r in &mut replayed {
+            r.header.replayed = true;
+        }
+        runs.extend(replayed);
+        let e = eval_min(&runs, 3);
+        assert_eq!((e.before.n, e.after.n), (3, 3));
+        assert_eq!((e.verdict, e.reason.as_deref()), (Verdict::Improved, None));
+        // `introduced` runs from the first live run since adoption to the
+        // latest live one, not to the replay of c4 stored after them.
+        let found = e.introduced.unwrap();
+        assert_eq!(
+            (found.since.as_str(), found.latest_run.as_str()),
+            ("2026-11-04T00:00:00Z", "2026-11-05-6.jsonl")
+        );
+    }
+
+    #[test]
+    fn intervals_across_a_checker_version_change_are_left_out() {
+        let mut runs = three_and_three(10, 0);
+        // c0 and c1 were stored before versions were recorded: unknown, so
+        // they still form intervals with each other and with v1.
+        let versions = [
+            None,
+            None,
+            Some("v1"),
+            Some("v1"),
+            Some("v2"),
+            Some("v2"),
+            Some("v2"),
+        ];
+        for (r, v) in runs.iter_mut().zip(versions) {
+            for c in &mut r.header.checks {
+                c.version = v.map(Into::into);
+            }
+        }
+        let e = eval_min(&runs, 2);
+        assert_eq!((e.before.n, e.after.n), (3, 2));
+        assert_eq!(e.after.new_units, Some(200));
+        assert_eq!(e.verdict, Verdict::Improved);
+        assert_eq!(
+            e.reason.as_deref(),
+            Some("1 interval(s) across a checker version change left out")
+        );
+        // A change in a check the metric does not need changes nothing.
+        let mut runs = three_and_three(10, 0);
+        for (i, r) in runs.iter_mut().enumerate() {
+            let mut other = r.header.checks[0].clone();
+            other.name = "other".into();
+            other.version = Some(format!("v{i}"));
+            r.header.checks.push(other);
+        }
+        let e = eval_min(&runs, 3);
+        assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
     }
 
     #[test]
