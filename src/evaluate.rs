@@ -308,6 +308,20 @@ impl Evaluation {
         out
     }
 
+    /// How many findings were introduced since when, and any checker
+    /// version change since then.
+    fn introduced_text(&self, i: &Introduced) -> String {
+        let mut out = format!(
+            "{} introduced since {}",
+            i.count,
+            i.since_text(self.adopted.as_deref())
+        );
+        if let Some(v) = i.version_text() {
+            let _ = write!(out, "; {v}");
+        }
+        out
+    }
+
     /// One line of `lab evaluate` text output.
     pub fn line(&self) -> String {
         let mut out = self.lesson.clone();
@@ -363,21 +377,17 @@ impl Evaluation {
                 let _ = write!(out, "; {} in unmatched strata left out", self.excluded);
             }
             if let Some(i) = &self.introduced {
-                let _ = write!(
-                    out,
-                    "; {} introduced since {}",
-                    i.count,
-                    i.since_text(self.adopted.as_deref())
-                );
-                if let Some(v) = i.version_text() {
-                    let _ = write!(out, "; {v}");
-                }
+                let _ = write!(out, "; {}", self.introduced_text(i));
             }
             out.push(')');
             if let (Some(lo), Some(up)) = (self.p_lower, self.p_upper) {
                 let _ = write!(out, ", p↓ {} p↑ {}", p_value(lo), p_value(up));
             }
             out.push_str(": ");
+        } else if let Some(i) = &self.introduced {
+            // No interval counts, as after a checker update: the introduced
+            // findings still need review.
+            let _ = write!(out, "{}: ", self.introduced_text(i));
         }
         out.push_str(self.verdict.as_str());
         if let Some(r) = &self.reason {
@@ -663,6 +673,7 @@ fn check_runs(
         .enumerate()
         .max_by_key(|(_, (i, _))| *i)
         .map(|(at, _)| at);
+    let stored: Vec<usize> = ends.iter().map(|(i, _)| *i).collect();
     let points: Vec<(&Run, Measured)> = ends
         .into_iter()
         .map(|(i, m)| (&inputs.runs[i], m))
@@ -677,10 +688,8 @@ fn check_runs(
         unit: String,
         found: u64,
         new_units: u64,
-        /// Indexes `versions` at the later end: the versions known there,
-        /// which the earlier end shares where it knows one, since the
-        /// interval crosses no change, and takes where it knows none.
-        end: usize,
+        /// The stored indexes of its runs, earlier end first.
+        runs: [usize; 2],
     }
     let mut intervals: Vec<Interval> = Vec::new();
     let mut version_changes = 0;
@@ -715,7 +724,7 @@ fn check_runs(
             unit,
             found,
             new_units,
-            end: i + 1,
+            runs: [stored[i], stored[i + 1]],
         });
     }
     if version_changes > 0 {
@@ -733,9 +742,13 @@ fn check_runs(
     // Only the latest unit counts: a checker that renamed or changed its
     // unit gets a baseline again from runs in the new unit. Only the current
     // checker versions count too, those of the interval end stored last: an
-    // update can change what a unit counts under the same name. A version
-    // unknown on either side matches.
-    let current = newest.map(|at| &versions[at]);
+    // update can change what a unit counts under the same name. Both ends of
+    // an interval must match. A run without a recorded version, as one stored
+    // before lab 0.9.0, takes the first one a run stored after it records,
+    // since its checker was no newer; a check no later run records matches
+    // any version.
+    let filled = stored_versions(inputs.runs, required);
+    let current = newest.map(|at| &filled[stored[at]]);
     let Some((unit, current)) = intervals
         .last()
         .zip(current)
@@ -762,7 +775,7 @@ fn check_runs(
             other_unit += 1;
             continue;
         }
-        if conflicts(&versions[i.end], current) {
+        if i.runs.iter().any(|&r| conflicts(&filled[r], current)) {
             other_version[usize::from(i.side)] += 1;
             continue;
         }
@@ -888,6 +901,33 @@ fn version_changed(
             (old != new).then(|| (check.to_string(), [old.to_string(), new.to_string()]))
         })
         .collect()
+}
+
+/// For each stored run, in stored order, each required check's version: the
+/// one the run records, or else the first one a run stored after it records.
+/// A replay is stored after the live runs it predates, so stored order, not
+/// time, says which checker was no newer.
+fn stored_versions<'r>(
+    runs: &'r [Run],
+    required: &BTreeSet<&str>,
+) -> Vec<BTreeMap<&'r str, &'r str>> {
+    let mut next: BTreeMap<&'r str, &'r str> = BTreeMap::new();
+    let mut out: Vec<_> = runs
+        .iter()
+        .rev()
+        .map(|run| {
+            for c in &run.header.checks {
+                if let Some(v) = c.version.as_deref()
+                    && required.contains(c.name.as_str())
+                {
+                    next.insert(c.name.as_str(), v);
+                }
+            }
+            next.clone()
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// At each interval end, the last known version of each required check up
@@ -2824,6 +2864,9 @@ mod tests {
         };
         let plain = with(None, None).introduced.unwrap();
         let e = with(Some("claimcheck 0.1.0"), Some("claimcheck 0.2.0"));
+        // No interval counts across the update, yet the line names the
+        // introduced findings and the change.
+        assert_eq!((e.before.n, e.after.n), (0, 0));
         let i = e.introduced.as_ref().unwrap();
         assert_eq!(
             i.version_changed,
@@ -2927,19 +2970,23 @@ mod tests {
     #[test]
     fn intervals_across_a_checker_version_change_are_left_out() {
         // c0 and c1 were stored before versions were recorded: unknown, so
-        // they form an interval with each other and with v1.
+        // they cross no change, and take v1, the version of the next run
+        // stored, against the current v2.
         let v = |s| Some(s);
         let runs = with_versions([None, None, v("v1"), v("v1"), v("v2"), v("v2"), v("v2")]);
         let e = eval_min(&runs, 1);
         assert_eq!(e.after.new_units, Some(200));
-        assert_eq!((e.before.n, e.after.n), (1, 2));
-        assert_eq!(e.verdict, Verdict::Improved);
+        assert_eq!((e.before.n, e.after.n), (0, 2));
+        assert_eq!(e.verdict, Verdict::Collecting);
         assert_eq!(
             e.reason.as_deref(),
             Some(
-                "1 interval(s) across a checker version change left out; 2 interval(s) (2 \
-                 before adoption, 0 after) measured with another checker version than the \
-                 current one (claims v2) left out, which a replay of their commits measures again"
+                "no baseline: 0 of 1 measured intervals before adoption, 2 of 1 after; the rate \
+                 after adoption has nothing to compare with yet (`lab check --at` can replay \
+                 commits before adoption); 1 interval(s) across a checker version change left \
+                 out; 3 interval(s) (3 before adoption, 0 after) measured with another checker \
+                 version than the current one (claims v2) left out, which a replay of their \
+                 commits measures again"
             )
         );
         // An unknown version between v1 and v2 does not hide the change: it
@@ -3024,11 +3071,48 @@ mod tests {
                  out, which a replay of their commits measures again"
             )
         );
-        // An unknown version matches any: runs stored before lab 0.9.0 still
-        // count beside the latest version.
+        // Runs stored before lab 0.9.0 take the version of the next run
+        // stored, so they count beside it.
         let runs = with_versions([None, None, None, None, None, None, v("v2")]);
         let e = eval_min(&runs, 3);
         assert_eq!((e.before.n, e.after.n, e.reason), (3, 3, None));
+        // Stored order, not time, gives an unknown version: after runs
+        // stored before lab 0.9.0 and live v1 runs, c2 replayed with v2. The
+        // unknown runs take v1, the next stored version, not the replay's.
+        let mut runs = with_versions([None, None, None, None, v("v1"), v("v1"), v("v1")]);
+        let mut replay = with_versions([v("v2"); 7]).swap_remove(2);
+        replay.header.replayed = true;
+        replay.path = "replay-2.jsonl".into();
+        runs.push(replay);
+        let e = eval_min(&runs, 1);
+        assert_eq!((e.before.n, e.after.n), (0, 0));
+        // A dirty run records a version too: v1, stored between the unknown
+        // runs and the v2 ones, which the unknown runs take.
+        let mut runs = with_versions([None, None, None, None, v("v2"), v("v2"), v("v2")]);
+        let mut dirty = with_versions([v("v1"); 7]).swap_remove(3);
+        dirty.header.dirty = Some(true);
+        dirty.path = "dirty-3.jsonl".into();
+        runs.insert(4, dirty);
+        let e = eval_min(&runs, 1);
+        assert_eq!((e.before.n, e.after.n), (0, 2));
+        // The run stored last records no version, as when its version
+        // command failed: no current version is known, so any matches, and
+        // only the interval across v1 → v2 is left out.
+        let mut runs = with_versions([
+            v("v1"),
+            v("v1"),
+            v("v2"),
+            v("v2"),
+            v("v2"),
+            v("v2"),
+            v("v2"),
+        ]);
+        let mut replay = with_versions([None; 7]).swap_remove(0);
+        replay.header.replayed = true;
+        replay.path = "replay-0.jsonl".into();
+        runs.push(replay);
+        let e = eval_min(&runs, 1);
+        assert_eq!((e.before.n, e.after.n), (2, 3));
     }
 
     #[test]
