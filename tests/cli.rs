@@ -166,6 +166,55 @@ fn missing_agent_findings_do_not_break_the_brief() {
 }
 
 #[test]
+fn retro_counts_agent_findings_once_per_session_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    project(d);
+    let finding = |id: &str| {
+        format!(
+            r#"{{"schema":"rf.finding/1","tool":"agentprof","rule":"reread-file","severity":"warn","subject":"claude:{id}","message":"reread"}}"#
+        )
+    };
+    let session = |id: &str, parent: &str| {
+        format!(r#"{{"schema":"rf.session/1","source":"claude","id":"{id}","parent_id":{parent}}}"#)
+    };
+    std::fs::create_dir(d.join("agent")).unwrap();
+    std::fs::write(
+        d.join("agent/findings.jsonl"),
+        ["a", "b", "c"].map(finding).join("\n"),
+    )
+    .unwrap();
+    let sessions = [
+        session("root", "null"),
+        session("a", "\"root\""),
+        session("b", "\"root\""),
+        session("c", "\"b\""),
+    ];
+    std::fs::write(d.join("agent/sessions.jsonl"), sessions.join("\n")).unwrap();
+    let retro = || {
+        let out = lab(d, &["retro", "--agent-findings", "agent/findings.jsonl"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let grouped = retro();
+    assert!(
+        grouped.contains("0 recurring rule(s) without a lesson"),
+        "three subagents of one root are one recurrence: {grouped}"
+    );
+
+    std::fs::remove_file(d.join("agent/sessions.jsonl")).unwrap();
+    let ungrouped = retro();
+    assert!(
+        ungrouped.contains("not once per session group: sessions file unreadable"),
+        "{ungrouped}"
+    );
+    assert!(
+        ungrouped.contains("- warn agentprof:reread-file: 3 distinct finding(s)"),
+        "{ungrouped}"
+    );
+}
+
+#[test]
 fn a_bare_relative_config_works() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

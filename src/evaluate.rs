@@ -19,7 +19,7 @@ use crate::check::{Item, Run};
 use crate::config::EvaluateConfig;
 use crate::finding::Finding;
 use crate::lessons::{Lesson, Metric, Status};
-use crate::retro::Session;
+use crate::retro::{self, Session};
 use crate::stats;
 
 pub const SCHEMA: &str = "rf.evaluation/2";
@@ -675,23 +675,6 @@ const ROUNDS: u32 = 20_000;
 /// Fixed so that `lab evaluate` gives the same p-values on the same data.
 const SEED: u64 = 0x5EED_1E55_0000_0001;
 
-/// The root of a subagent's tree: its parent's parent and so on, up to a
-/// session without a parent or a parent that `by_id` does not have; `None`
-/// for a session without a parent. The bound stops a cycle.
-fn root_of<'a>(by_id: &BTreeMap<(&str, &str), &'a Session>, s: &'a Session) -> Option<&'a str> {
-    let mut id = s.parent_id.as_deref()?;
-    for _ in 0..by_id.len() {
-        match by_id
-            .get(&(s.source.as_str(), id))
-            .and_then(|p| p.parent_id.as_deref())
-        {
-            Some(parent) => id = parent,
-            None => break,
-        }
-    }
-    Some(id)
-}
-
 /// Per-session evaluation in session groups: a finding rule as a 0/1
 /// indicator per session (`field` is `None`), or a numeric field of the
 /// session record.
@@ -719,11 +702,8 @@ fn sessions(
         .filter(|f| f.tool == metric.tool && f.rule == metric.rule)
         .map(|f| f.subject.as_str())
         .collect();
-    let by_id: BTreeMap<(&str, &str), &Session> = sessions
-        .iter()
-        .map(|s| ((s.source.as_str(), s.id.as_str()), s))
-        .collect();
-    let root = |s| root_of(&by_id, s);
+    let by_id = retro::by_id(sessions);
+    let root = |s| retro::root_of(&by_id, s);
     // A tree's start: its root's, or its earliest member's when the file
     // does not have the root.
     let mut tree_start: BTreeMap<(&str, &str), &str> = BTreeMap::new();

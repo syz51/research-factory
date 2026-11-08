@@ -45,8 +45,17 @@ pub struct Candidate {
     pub tool: String,
     pub rule: String,
     pub severity: String,
-    pub findings: usize,
+    /// Its count toward the threshold, as `lab retro` describes it.
+    pub count: String,
     pub sample: Vec<String>,
+}
+
+/// The recurring rules without a lesson, and why agent findings were not
+/// counted per session group, if they were not.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Uncovered {
+    pub candidates: Vec<Candidate>,
+    pub ungrouped: Option<String>,
 }
 
 /// A measure command that did not succeed.
@@ -218,7 +227,7 @@ pub fn derive(
     now: &str,
     lessons: &[Lesson],
     evaluations: &[Evaluation],
-    candidates: &[Candidate],
+    uncovered: &Uncovered,
     failures: &[MeasureFailure],
 ) -> Vec<Signal> {
     let signal =
@@ -337,6 +346,7 @@ pub fn derive(
             detail,
         ));
     }
+    let candidates = &uncovered.candidates;
     if !candidates.is_empty() {
         let mut body = format!(
             "{} recurring finding rule(s) at warn or error have no lesson measuring them:\n\n",
@@ -345,13 +355,16 @@ pub fn derive(
         for c in candidates {
             let _ = writeln!(
                 body,
-                "- {} `{}:{}`: {} distinct finding(s); e.g. {}",
+                "- {} `{}:{}`: {}; e.g. {}",
                 c.severity,
                 c.tool,
                 c.rule,
-                c.findings,
+                c.count,
                 c.sample.join(", ")
             );
+        }
+        if let Some(why) = &uncovered.ungrouped {
+            let _ = writeln!(body, "\nNote: {why}.");
         }
         body.push_str(
             "\nDraft a lesson for each as `observed`, find the cause, and replace the drafted rule with the practice that prevents it; adopt it only after reading its evidence:\n\n\
@@ -638,7 +651,7 @@ mod tests {
                 "now",
                 std::slice::from_ref(&lesson),
                 &[e],
-                &[],
+                &Uncovered::default(),
                 &[],
             )
             .remove(0)
