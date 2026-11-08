@@ -377,61 +377,19 @@ pub enum Checkout {
 /// signal state per project keep the worktrees from measuring nothing and
 /// signalling apart. `config` is the `--config` path, if any.
 pub fn checkout(project: &Project, config: Option<&Path>) -> Result<Checkout, String> {
-    let git = |args: &[&str]| -> Result<Option<String>, String> {
-        let out = match Command::new("git")
-            .args(args)
-            .current_dir(&project.root)
-            .env("LC_ALL", "C")
-            .output()
-        {
-            Ok(out) => out,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("git: {e}")),
-        };
-        let err = String::from_utf8_lossy(&out.stderr);
-        if out.status.success() {
-            Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
-        } else if err.contains("not a git repository") {
-            Ok(None)
-        } else {
-            Err(format!("git {}: {}", args.join(" "), err.trim()))
-        }
-    };
-    let Some(dirs) = git(&[
-        "rev-parse",
-        "--path-format=absolute",
-        "--git-dir",
-        "--git-common-dir",
-        "--show-prefix",
-    ])?
-    else {
-        return Ok(Checkout::This);
-    };
-    let mut lines = dirs.lines();
-    let (Some(git_dir), Some(common)) = (lines.next(), lines.next()) else {
-        return Err(format!("git rev-parse printed too little: {dirs:?}"));
-    };
-    if Path::new(git_dir) == Path::new(common) {
-        return Ok(Checkout::This);
-    }
-    // The project's directory below the top of the work tree, empty at the top.
-    let prefix = lines.next().unwrap_or("");
-    let list = git(&["worktree", "list", "--porcelain"])?.unwrap_or_default();
-    // The first entry is the main worktree.
-    let main = list.split("\n\n").next().unwrap_or("");
-    let path = main.lines().find_map(|l| l.strip_prefix("worktree "));
-    let name = config
-        .and_then(Path::file_name)
-        .unwrap_or(crate::config::CONFIG_FILE.as_ref());
     let here = project.root.display();
-    let path = match path {
-        Some(p) if !main.lines().any(|l| l == "bare") => Path::new(p).join(prefix),
-        _ => {
+    let path = match crate::worktree::locate(&project.root)? {
+        crate::worktree::Location::NotLinked => return Ok(Checkout::This),
+        crate::worktree::Location::Bare => {
             return Ok(Checkout::Skip(format!(
                 "{here} is a linked git worktree of a bare repository"
             )));
         }
+        crate::worktree::Location::Linked { main, .. } => main,
     };
+    let name = config
+        .and_then(Path::file_name)
+        .unwrap_or(crate::config::CONFIG_FILE.as_ref());
     let file = path.join(name);
     if !file.is_file() {
         return Ok(Checkout::Skip(format!(

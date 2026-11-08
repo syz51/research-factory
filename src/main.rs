@@ -19,6 +19,7 @@ mod replay;
 mod retro;
 mod signals;
 mod stats;
+mod worktree;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -715,12 +716,35 @@ struct AgentFiles {
     explicit: bool,
 }
 
+/// A configured file of gitignored state, such as `agentprof scan` output. A
+/// new linked git worktree has none, so when the worktree lacks it and git
+/// ignores it there, it is the main checkout's file, read-only.
+fn state_file(project: &Project, rel: &str) -> Result<PathBuf, String> {
+    let path = project.path(rel);
+    if path.exists() || !config::below_root(Path::new(rel)) {
+        return Ok(path);
+    }
+    let Some(fallback) = worktree::Fallback::find(&project.root)? else {
+        return Ok(path);
+    };
+    Ok(match fallback.file(rel)? {
+        Some(main) => {
+            eprintln!(
+                "lab: this linked git worktree has no {rel}, which git ignores; reading the main checkout's {}",
+                main.display()
+            );
+            main
+        }
+        None => path,
+    })
+}
+
 /// Agent findings from `explicit` (must exist) or `[lab] agent_findings` (may
 /// be missing, for example before the first `agentprof scan`, with a note).
 fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFiles, String> {
     let (path, required) = match (explicit, &project.lab.agent_findings) {
         (Some(p), _) => (p.to_path_buf(), true),
-        (None, Some(p)) => (project.path(p), false),
+        (None, Some(p)) => (state_file(project, p)?, false),
         (None, None) => {
             return Ok(AgentFiles {
                 findings: Vec::new(),
@@ -756,7 +780,7 @@ fn agent_findings(project: &Project, explicit: Option<&Path>) -> Result<AgentFil
 fn agent_sessions(project: &Project, agent: &AgentFiles) -> Result<Vec<retro::Session>, String> {
     let path = match (&project.lab.agent_sessions, &agent.path) {
         (_, Some(findings)) if agent.explicit => findings.with_file_name("sessions.jsonl"),
-        (Some(p), _) => project.path(p),
+        (Some(p), _) => state_file(project, p)?,
         (None, Some(findings)) => findings.with_file_name("sessions.jsonl"),
         (None, None) => return Err("no [lab] agent_findings or agent_sessions configured".into()),
     };

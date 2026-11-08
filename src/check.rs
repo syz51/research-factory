@@ -271,23 +271,68 @@ impl Line {
     }
 }
 
+/// A check's arguments, with each that names a gitignored file a linked git
+/// worktree lacks replaced by the main checkout's path, such as a downloaded
+/// manifest; and the replacements, as (main checkout path, argument). Only an
+/// argument with a directory part counts as a path, so `jsonl` stays a word.
+fn main_checkout_args(
+    spec: &CheckSpec,
+    cwd: &Path,
+    fallback: &crate::worktree::Fallback,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut args = spec.run[1..].to_vec();
+    let mut swapped = Vec::new();
+    for arg in &mut args {
+        if !arg.contains('/') || cwd.join(&*arg).exists() {
+            continue;
+        }
+        let rel = match &spec.cwd {
+            Some(c) => format!("{}/{arg}", c.trim_end_matches('/')),
+            None => arg.clone(),
+        };
+        if !crate::config::below_root(Path::new(&rel)) {
+            continue;
+        }
+        match fallback.file(&rel) {
+            Ok(Some(main)) => {
+                let main = main.to_string_lossy().into_owned();
+                eprintln!(
+                    "lab: check `{}`: this linked git worktree has no {rel}, which git ignores; \
+                     using the main checkout's {main}",
+                    spec.name
+                );
+                swapped.push((main.clone(), std::mem::replace(arg, main)));
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("lab: check `{}`: {rel}: {e}", spec.name),
+        }
+    }
+    (args, swapped)
+}
+
 /// Runs one checker in `root` (the project root, or a replayed commit's copy
 /// of it) and parses its stdout. Its program resolves against the project
-/// root, so a replay runs today's checker.
+/// root, so a replay runs today's checker. With `fallback`, the root is a
+/// linked git worktree whose main checkout supplies missing ignored files.
 fn run_one(
     project: &Project,
     root: &Path,
     spec: &CheckSpec,
     version: Option<String>,
+    fallback: Option<&crate::worktree::Fallback>,
 ) -> (CheckOutcome, Vec<Finding>, Vec<Measure>) {
     let cwd = spec
         .cwd
         .as_deref()
         .map_or_else(|| root.to_path_buf(), |c| root.join(c));
     let program = project.program(spec);
+    let (args, swapped) = match fallback {
+        Some(f) => main_checkout_args(spec, &cwd, f),
+        None => (spec.run[1..].to_vec(), Vec::new()),
+    };
     let started = Instant::now();
     let output = Command::new(&program)
-        .args(&spec.run[1..])
+        .args(&args)
         .current_dir(&cwd)
         .output();
     let duration_ms = started.elapsed().as_millis();
@@ -325,7 +370,17 @@ fn run_one(
             continue;
         }
         match Line::parse(line) {
-            Ok(Line::Finding(f)) => findings.push(f),
+            Ok(Line::Finding(mut f)) => {
+                // Written as the check names it, so the fingerprint matches a main checkout's.
+                for (main, arg) in &swapped {
+                    f.subject = f.subject.replace(main.as_str(), arg);
+                    f.message = f.message.replace(main.as_str(), arg);
+                    for e in &mut f.evidence {
+                        e.path = e.path.replace(main.as_str(), arg);
+                    }
+                }
+                findings.push(f)
+            }
             Ok(Line::Measure(m)) => measures.push(m),
             Err(e) => {
                 outcome.unparsed += 1;
@@ -508,6 +563,7 @@ pub(crate) fn run_checks(
     specs: &[&CheckSpec],
     versions: &BTreeMap<String, Option<String>>,
     linked: &BTreeMap<String, Vec<String>>,
+    fallback: Option<&crate::worktree::Fallback>,
 ) -> Ran {
     let mut ran = Ran {
         outcomes: Vec::new(),
@@ -516,7 +572,7 @@ pub(crate) fn run_checks(
     };
     for spec in specs {
         let version = versions.get(&spec.name).cloned().flatten();
-        let (mut outcome, findings, measured) = run_one(project, root, spec, version);
+        let (mut outcome, findings, measured) = run_one(project, root, spec, version, fallback);
         outcome.uncommitted_inputs = linked.get(&spec.name).cloned().unwrap_or_default();
         ran.measures
             .extend(measured.into_iter().map(|measure| MeasureItem {
@@ -675,7 +731,19 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         (None, None)
     });
     let versions = versions(project, &project.root, &specs);
-    let ran = run_checks(project, &project.root, &specs, &versions, &BTreeMap::new());
+    // A linked git worktree lacks the main checkout's ignored files, such as downloads.
+    let fallback = crate::worktree::Fallback::find(&project.root).unwrap_or_else(|e| {
+        eprintln!("lab: ignored files are not looked up in a main checkout: {e}");
+        None
+    });
+    let ran = run_checks(
+        project,
+        &project.root,
+        &specs,
+        &versions,
+        &BTreeMap::new(),
+        fallback.as_ref(),
+    );
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,

@@ -471,6 +471,35 @@ impl<'a> Offloaded<'a> {
     }
 }
 
+/// The link targets, relative to the root, that a linked git worktree lacks
+/// but its main checkout has, where git ignores them in the worktree: data
+/// and downloads exist only in the checkout that made them. Each such target
+/// is only checked to exist in the main checkout; its anchors are not checked.
+fn in_main_checkout<'f>(
+    root: &Path,
+    files: impl Iterator<Item = &'f &'f str>,
+    texts: &mut Texts,
+    listings: &mut Listings,
+) -> Result<BTreeSet<String>, String> {
+    let Some(fallback) = crate::worktree::Fallback::find(root)? else {
+        return Ok(BTreeSet::new());
+    };
+    let mut missing = BTreeSet::new();
+    for file in files {
+        let doc = texts.doc(&root.join(file))?;
+        let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
+        for link in &doc.links {
+            if let Target::There { rel: Some(r), .. } = resolve(root, dir, &link.dest)
+                && !r.is_empty()
+                && !listings.exists(root, &r)
+            {
+                missing.insert(r);
+            }
+        }
+    }
+    fallback.resolve(missing.iter().map(String::as_str))
+}
+
 fn link_problems(
     spec: &Spec,
     records: &[Record],
@@ -494,6 +523,7 @@ fn link_problems(
         .iter()
         .map(|o| Offloaded::load(root, o))
         .collect::<Result<Vec<_>, _>>()?;
+    let in_main = in_main_checkout(root, checked.union(&current), texts, &mut listings)?;
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -514,7 +544,7 @@ fn link_problems(
                 }
                 Target::There { abs, rel, fragment } => {
                     let found = *exists.entry(abs.clone()).or_insert_with(|| match &rel {
-                        Some(r) => listings.exists(root, r),
+                        Some(r) => listings.exists(root, r) || in_main.contains(r),
                         None => abs.exists(),
                     });
                     if !found {

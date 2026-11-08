@@ -614,3 +614,68 @@ fn a_loop_in_a_linked_worktree_runs_for_the_main_checkout() {
         "{text}"
     );
 }
+
+#[test]
+fn evaluate_in_a_linked_worktree_reads_the_main_checkouts_ignored_agent_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (main, linked) = (ceiling.join("main"), ceiling.join("linked"));
+    let (m, w) = (main.join("proj"), linked.join("proj"));
+    project(&m);
+    // The agent scan is not committed, so a new worktree has none.
+    write(&main, ".gitignore", ".research/\nagent/\n");
+    git(&main, ceiling, &["init", "-q", "-b", "main"]);
+    git(&main, ceiling, &["add", "-A"]);
+    git(&main, ceiling, &["commit", "-qm", "project"]);
+    git(&main, ceiling, &["worktree", "add", "-q", "../linked"]);
+    assert!(!w.join("agent").exists());
+    let lab = |d: &Path, args: &[&str]| isolated(env!("CARGO_BIN_EXE_lab"), d, ceiling, args);
+    let verdicts = |o: &Output| -> Vec<String> {
+        stdout(o)
+            .lines()
+            .map(|l| {
+                let row: serde_json::Value = serde_json::from_str(l).unwrap();
+                row["verdict"].as_str().unwrap().to_string()
+            })
+            .collect()
+    };
+
+    let out = lab(&w, &["evaluate", "--format", "jsonl"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(verdicts(&out), ["improved", "unmeasurable"]);
+    let main_root = m.canonicalize().unwrap();
+    assert!(
+        stderr(&out).contains(&format!(
+            "this linked git worktree has no agent/findings.jsonl, which git ignores; reading \
+             the main checkout's {}",
+            main_root.join("agent/findings.jsonl").display()
+        )),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!w.join("agent").exists(), "nothing copied");
+
+    // The worktree's own scan wins over the main checkout's.
+    write(&w, "agent/findings.jsonl", "");
+    write(&w, "agent/sessions.jsonl", "");
+    let own = lab(&w, &["evaluate", "--format", "jsonl"]);
+    assert_eq!(own.status.code(), Some(0), "{}", stderr(&own));
+    assert!(!stderr(&own).contains("main checkout"), "{}", stderr(&own));
+    assert_eq!(verdicts(&own), ["unmeasurable", "unmeasurable"]);
+    std::fs::remove_dir_all(w.join("agent")).unwrap();
+
+    // A tracked file deleted in the worktree is not looked up in the main checkout.
+    write(&main, ".gitignore", ".research/\n");
+    git(&main, ceiling, &["add", "-A"]);
+    git(&main, ceiling, &["commit", "-qm", "track the scan"]);
+    git(&w, ceiling, &["merge", "-q", "--ff-only", "main"]);
+    std::fs::remove_dir_all(w.join("agent")).unwrap();
+    let tracked = lab(&w, &["evaluate", "--format", "jsonl"]);
+    assert_eq!(tracked.status.code(), Some(0), "{}", stderr(&tracked));
+    assert!(
+        !stderr(&tracked).contains("main checkout"),
+        "{}",
+        stderr(&tracked)
+    );
+    assert_eq!(verdicts(&tracked), ["unmeasurable", "unmeasurable"]);
+}
