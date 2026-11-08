@@ -11,7 +11,7 @@ use crate::config::{CheckSpec, Project};
 
 /// The prefix of a replay worktree's directory name, followed by the pid of
 /// the `lab` process that made it.
-const WORKTREE_PREFIX: &str = "lab-replay-";
+pub(crate) const WORKTREE_PREFIX: &str = "lab-replay-";
 
 /// Runs git in `dir` with a stable message language and no hooks, since a
 /// checkout would otherwise run the repository's `post-checkout` hook.
@@ -359,7 +359,7 @@ pub fn replay(
         }
         let linked = link_inputs(project, &replay_root, &specs)?;
         let versions = check::versions(project, &replay_root, &specs);
-        let ran = check::run_checks(project, &replay_root, &specs, &versions, &linked);
+        let ran = check::run_checks(project, &replay_root, &specs, &versions, &linked, None);
         drop(tree);
         let header = RunHeader {
             schema: check::RUN_SCHEMA.into(),
