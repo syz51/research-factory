@@ -1076,6 +1076,26 @@ mod tests {
     }
 
     #[test]
+    fn a_check_stores_several_units_for_one_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let citing = r#"{"schema":"rf.measure/1","tool":"t","unit":"citing-sentence","count":3}"#;
+        let uncited = r#"{"schema":"rf.measure/1","tool":"t","unit":"uncited-sentence","count":5}"#;
+        let p = project(
+            dir.path(),
+            &emit_script(dir.path(), &[FINDING_B, citing, uncited], 0, false),
+        );
+        let report = run(&p, &[]).unwrap();
+        assert_eq!(report.run.header.checks[0].unparsed, 0);
+        let stored = Run::load(&report.run.path).unwrap();
+        let units: Vec<(&str, u64)> = stored
+            .measures
+            .iter()
+            .map(|m| (m.measure.unit.as_str(), m.measure.count))
+            .collect();
+        assert_eq!(units, [("citing-sentence", 3), ("uncited-sentence", 5)]);
+    }
+
+    #[test]
     fn a_failed_check_stores_no_measure() {
         let dir = tempfile::tempdir().unwrap();
         let measure = r#"{"schema":"rf.measure/1","tool":"t","unit":"sentence","count":3}"#;
