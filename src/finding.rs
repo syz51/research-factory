@@ -53,11 +53,9 @@ pub struct Finding {
     /// Empty when the checker reported it as unknown (`null`).
     #[serde(deserialize_with = "null_as_default")]
     pub message: String,
-    #[serde(
-        default,
-        deserialize_with = "null_as_default",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    /// Always written, `[]` when there is none, so readers of stored runs
+    /// find the key in every record.
+    #[serde(default, deserialize_with = "null_as_default")]
     pub evidence: Vec<Evidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
@@ -183,6 +181,14 @@ mod tests {
         let line = r#"{"schema":"rf.finding/1","tool":"t","rule":"r","severity":"error","subject":null,"message":null,"evidence":null,"data":null,"at":null}"#;
         let f = Finding::parse(line).unwrap();
         assert!(f.subject.is_empty() && f.message.is_empty() && f.evidence.is_empty());
+    }
+
+    #[test]
+    fn evidence_is_written_even_when_empty() {
+        let line = r#"{"schema":"rf.finding/1","tool":"t","rule":"r","severity":"warn","subject":"s","message":"m"}"#;
+        let f = Finding::parse(line).unwrap();
+        let out: serde_json::Value = serde_json::to_value(&f).unwrap();
+        assert_eq!(out["evidence"], serde_json::json!([]));
     }
 
     #[test]

@@ -35,7 +35,7 @@ Every checker supports `--format jsonl` and then writes one finding per line on 
 | `severity` | `error` (a claim, record or result is wrong or unsupported), `warn` (likely problem, needs a person), `info` (measurement) |
 | `subject` | What the finding is about: `path:line`, a reference key, a session id, a run id |
 | `message` | One sentence |
-| `evidence` | Zero or more `{path, locator}` pointers; `path` is relative to the project root when inside it |
+| `evidence` | Zero or more `{path, locator}` pointers; `path` is relative to the project root when inside it. A checker may leave it out or write `null`, read as none; `lab check` stores it in every record, `[]` when empty (since lab 0.6.1) |
 | `data` | Tool-specific object; optional |
 | `at` | UTC RFC 3339 time the finding was produced |
 
