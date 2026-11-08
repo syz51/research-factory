@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]` and `[[lab.archive.budget]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]` and `[[lab.archive.offloaded]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -111,6 +111,8 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
   ]
 }
 ```
+
+An offloaded list (`[[lab.archive.offloaded]]`, since lab 0.9.1, whose older versions reject the key) records files moved out of the project, such as to cloud storage, that the archive still links. `list` is a committed plain-text file, a relative path below the project root without `.` or `..`, configured once. It holds one path per line, written like a link from the project root: a leading `/` or `./`, `.`, `..`, a trailing `/` and a byte-order mark are resolved or ignored, blank lines are skipped, and a line that leaves the root is an error. The list is not compressed. `location` says where the files went, such as `cloud:archive/2026-11-08/masters/`. `lab archive check` does not report a link as `broken-link` when its missing target is a listed path, lies in a listed directory, or is a directory that holds a listed path. It reports one `archived-link` info finding per list instead, with the list as its subject and `data` `{"links": N, "location": "…"}`. Its message names the location and changes only when the count reaches or leaves 0, so the finding keeps its fingerprint while links come and go; the text output adds the count. A missing target that no list holds, or one outside the project root, stays a `broken-link` error. A configured list that is missing or unreadable, or holds a line that leaves the root, stops the check with an error (exit 2). Only links honour the list: a sealed file moved out still fails `sealed-missing`.
 
 ## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 

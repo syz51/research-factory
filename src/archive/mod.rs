@@ -10,7 +10,7 @@ mod markdown;
 mod rules;
 mod seal;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -109,6 +109,22 @@ impl<'p> Spec<'p> {
                 files: FileSet::new(&spec.include, &spec.exclude).map_err(|e| err(&what, e))?,
                 id_from,
             });
+        }
+        let mut lists = HashSet::new();
+        for o in &cfg.offloaded {
+            let what = format!("[[lab.archive.offloaded]] `{}`", o.list);
+            if !crate::config::below_root(Path::new(&o.list)) {
+                return Err(format!(
+                    "{what}: `list` must be a relative path below the project root, without \
+                     `.` or `..`"
+                ));
+            }
+            if o.location.trim().is_empty() {
+                return Err(format!("{what}: `location` must not be empty"));
+            }
+            if !lists.insert(o.list.as_str()) {
+                return Err(format!("{what}: the list is configured twice"));
+            }
         }
         let set = |what: &str, include: &[String], exclude: &[String]| {
             FileSet::new(include, exclude).map_err(|e| err(what, e))
