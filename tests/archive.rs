@@ -634,3 +634,133 @@ fn review_cases_links_titles_and_seals() {
     assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
     assert!(!read(d, "docs/.seal.json").contains("\"note\""));
 }
+
+#[test]
+fn kept_links_cover_only_the_sealed_text_of_append_only_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let gone = "/Users/nobody/Downloads/plan.pdf";
+    let entry = |file: &str, target: &str| {
+        format!(
+            "[[lab.archive.kept_link]]\nfile = \"{file}\"\ntarget = \"{target}\"\nreason = \"quotes a past answer\"\n"
+        )
+    };
+    write(
+        d,
+        "research.toml",
+        &format!(
+            "[lab.archive]\nsealed = [\"docs/h.md\"]\nlinks = [\"docs/*.md\"]\n{}{}{}",
+            entry("docs/h.md", gone),
+            entry("docs/open.md", gone),
+            entry("docs/h.md", "nowhere.md"),
+        ),
+    );
+    write(
+        d,
+        "docs/h.md",
+        &format!("---\nstatus: current\n---\n# History\n\nThe plan was [here]({gone}).\n"),
+    );
+    write(d, "docs/open.md", &format!("[plan]({gone})\n"));
+    let lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(|l| l.split(' ').take(3).collect::<Vec<_>>().join(" "))
+            .filter(|l| l.contains("link"))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    // Not sealed yet: the link stays an error, and its message says why.
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        lines(&text),
+        [
+            "error broken-link docs/h.md:6",
+            "error broken-link docs/open.md:1",
+            "warn stale-kept-link docs/h.md"
+        ],
+        "{text}"
+    );
+    assert!(text.contains("this line is not sealed"), "{text}");
+
+    // Sealed, then the front matter changes: the kept link is a note.
+    assert_eq!(lab(d, &["archive", "seal"]).status.code(), Some(0));
+    write(
+        d,
+        "docs/h.md",
+        &read(d, "docs/h.md").replace("status: current", "status: superseded\nnote: moved on"),
+    );
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        lines(&text),
+        [
+            "error broken-link docs/open.md:1",
+            "info kept-link docs/h.md:7",
+            "warn stale-kept-link docs/h.md"
+        ],
+        "{text}"
+    );
+    assert!(text.contains("(quotes a past answer)"), "{text}");
+    let jsonl = stdout(&lab(d, &["archive", "check", "--format", "jsonl"]));
+    let kept: serde_json::Value = jsonl
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|f| f["rule"] == "kept-link")
+        .unwrap();
+    assert_eq!(kept["severity"], "info");
+    assert_eq!(
+        kept["data"],
+        serde_json::json!({"target": gone, "reason": "quotes a past answer"})
+    );
+
+    // The same link appended after the seal stays an error.
+    append(d, "docs/h.md", &format!("\nAgain: [plan]({gone}).\n"));
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    let found = lines(&text);
+    assert!(
+        found.contains(&"info kept-link docs/h.md:7".to_string())
+            && found.contains(&"error broken-link docs/h.md:9".to_string()),
+        "{text}"
+    );
+
+    // Only kept links in sealed text and no stale entry: the check passes.
+    write(
+        d,
+        "research.toml",
+        &format!(
+            "[lab.archive]\nsealed = [\"docs/h.md\"]\nlinks = [\"docs/*.md\"]\n{}",
+            entry("docs/h.md", gone)
+        ),
+    );
+    std::fs::remove_file(d.join("docs/open.md")).unwrap();
+    write(
+        d,
+        "docs/h.md",
+        &read(d, "docs/h.md").replace(&format!("\nAgain: [plan]({gone}).\n"), ""),
+    );
+    let (code, text) = check(d);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(lines(&text), ["info kept-link docs/h.md:7"], "{text}");
+
+    // An invalid entry stops the check.
+    for bad in [
+        entry("../h.md", gone),
+        entry("/docs/h.md", gone),
+        entry("docs/h.md", " "),
+        entry("docs/h.md", gone).replace("quotes a past answer", " "),
+        entry("docs/h.md", gone) + "extra = 1\n",
+        entry("docs/h.md", gone) + &entry("docs/h.md", gone),
+    ] {
+        write(d, "research.toml", &format!("[lab.archive]\n{bad}"));
+        let out = lab(d, &["archive", "check"]);
+        assert_eq!(out.status.code(), Some(2), "{bad}");
+        assert!(
+            stderr(&out).contains("kept_link") || stderr(&out).contains("extra"),
+            "{bad}: {}",
+            stderr(&out)
+        );
+    }
+}

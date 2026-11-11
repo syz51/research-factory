@@ -9,7 +9,7 @@ use super::front::{self, Meta};
 use super::markdown;
 use super::seal::{Entry, Manifest, State};
 use super::{Record, Spec, Texts, read_optional};
-use crate::config::OffloadedSpec;
+use crate::config::{KeptLinkSpec, OffloadedSpec};
 use crate::finding::{Evidence, Finding, Severity};
 
 /// A problem `lab archive check` reports, before it becomes an `rf.finding/1`.
@@ -135,8 +135,13 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
             }
         }
     }
-    link_problems(spec, &records, links, current, &mut texts, &mut out)?;
-    seal_problems(spec, sealed, &mut out)?;
+    let manifest = Manifest::load(&spec.manifest)?;
+    let seals = Seals {
+        sealed: sealed.iter().map(String::as_str).collect(),
+        manifest: &manifest,
+    };
+    link_problems(spec, &records, links, current, &seals, &mut texts, &mut out)?;
+    seal_problems(spec, sealed, &manifest, &mut out)?;
     out.sort_by(|a, b| {
         (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
     });
@@ -471,6 +476,55 @@ impl<'a> Offloaded<'a> {
     }
 }
 
+/// The append-only files and their seals.
+struct Seals<'a> {
+    /// The files that match `[lab.archive] sealed`.
+    sealed: BTreeSet<&'a str>,
+    manifest: &'a Manifest,
+}
+
+impl Seals<'_> {
+    /// Whether file line `line` (from 1) of `file`, whose content is `bytes`,
+    /// lies wholly in the text its seal covers: the file is append-only, its
+    /// seal holds, and the line ends within the sealed bytes of the body.
+    fn covers(&self, file: &str, bytes: &[u8], line: usize) -> bool {
+        if !self.sealed.contains(file) {
+            return false;
+        }
+        let entry = self.manifest.files.get(file);
+        let body = front::sealed_body(bytes);
+        if !matches!(
+            Entry::state(entry, body),
+            State::Unchanged | State::Appended
+        ) {
+            return false;
+        }
+        let Some(sealed) = entry.and_then(|e| usize::try_from(e.bytes).ok()) else {
+            return false;
+        };
+        // The body is the end of the file, so the sealed span starts where it does.
+        let sealed_end = bytes.len() - body.len() + sealed;
+        let mut start = 0;
+        for _ in 1..line {
+            match bytes[start..].iter().position(|&b| b == b'\n') {
+                Some(i) => start += i + 1,
+                None => return false,
+            }
+        }
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(bytes.len(), |i| start + i);
+        end <= sealed_end
+    }
+}
+
+/// One `[[lab.archive.kept_link]]` entry and whether a missing link matched it.
+struct Kept<'a> {
+    spec: &'a KeptLinkSpec,
+    matched: bool,
+}
+
 /// The link targets, relative to the root, that a linked git worktree lacks
 /// but its main checkout has, where git ignores them in the worktree: data
 /// and downloads exist only in the checkout that made them. Each such target
@@ -505,6 +559,7 @@ fn link_problems(
     records: &[Record],
     links: &[String],
     current: &[String],
+    seals: &Seals,
     texts: &mut Texts,
     out: &mut Vec<Problem>,
 ) -> Result<(), String> {
@@ -523,6 +578,15 @@ fn link_problems(
         .iter()
         .map(|o| Offloaded::load(root, o))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut kept: Vec<Kept> = spec
+        .cfg
+        .kept_link
+        .iter()
+        .map(|spec| Kept {
+            spec,
+            matched: false,
+        })
+        .collect();
     let in_main = in_main_checkout(root, checked.union(&current), texts, &mut listings)?;
     for file in checked.union(&current) {
         let abs_file = root.join(file);
@@ -548,19 +612,49 @@ fn link_problems(
                         None => abs.exists(),
                     });
                     if !found {
+                        if !check {
+                            continue;
+                        }
                         // A link to a file moved out of the project is counted
                         // per list, not reported one by one.
-                        if check {
-                            match rel
-                                .as_deref()
-                                .and_then(|r| offloaded.iter_mut().find(|o| o.holds(r)))
-                            {
-                                Some(o) => o.links += 1,
-                                None => out.push(problem(
-                                    "broken-link",
-                                    format!("links to `{}`, which does not exist", link.dest),
-                                )),
-                            }
+                        if let Some(o) = rel
+                            .as_deref()
+                            .and_then(|r| offloaded.iter_mut().find(|o| o.holds(r)))
+                        {
+                            o.links += 1;
+                            continue;
+                        }
+                        let message = format!("links to `{}`, which does not exist", link.dest);
+                        let Some(k) = kept
+                            .iter_mut()
+                            .find(|k| k.spec.file == *file && k.spec.target == link.dest)
+                        else {
+                            out.push(problem("broken-link", message));
+                            continue;
+                        };
+                        k.matched = true;
+                        if seals.covers(file, &texts.bytes(&abs_file)?, link.line) {
+                            let mut p = problem(
+                                "kept-link",
+                                format!(
+                                    "{message}; it is kept in sealed text by [[lab.archive.kept_link]]"
+                                ),
+                            );
+                            p.severity = Severity::Info;
+                            p.data = Some(serde_json::json!({
+                                "target": k.spec.target,
+                                "reason": k.spec.reason,
+                            }));
+                            p.detail = Some(k.spec.reason.clone());
+                            out.push(p);
+                        } else {
+                            out.push(problem(
+                                "broken-link",
+                                format!(
+                                    "{message}; [[lab.archive.kept_link]] keeps a link only in the \
+                                     sealed text of an append-only file, and this line is not sealed"
+                                ),
+                            ));
                         }
                         continue;
                     }
@@ -610,6 +704,18 @@ fn link_problems(
             }
         }
     }
+    for k in kept.iter().filter(|k| !k.matched) {
+        out.push(Problem::new(
+            "stale-kept-link",
+            Severity::Warn,
+            &k.spec.file,
+            format!(
+                "[[lab.archive.kept_link]] entry for `{}` matches no missing link in this file; \
+                 remove the entry",
+                k.spec.target
+            ),
+        ));
+    }
     // The count is in `data` and the text output only, so the finding keeps
     // its fingerprint while links come and go.
     for o in offloaded {
@@ -633,8 +739,12 @@ fn link_problems(
     Ok(())
 }
 
-fn seal_problems(spec: &Spec, sealed: &[String], out: &mut Vec<Problem>) -> Result<(), String> {
-    let manifest = Manifest::load(&spec.manifest)?;
+fn seal_problems(
+    spec: &Spec,
+    sealed: &[String],
+    manifest: &Manifest,
+    out: &mut Vec<Problem>,
+) -> Result<(), String> {
     for path in sealed {
         let bytes = std::fs::read(spec.root().join(path)).map_err(|e| format!("{path}: {e}"))?;
         match Entry::state(manifest.files.get(path), front::sealed_body(&bytes)) {

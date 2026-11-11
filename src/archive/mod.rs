@@ -126,6 +126,25 @@ impl<'p> Spec<'p> {
                 return Err(format!("{what}: the list is configured twice"));
             }
         }
+        let mut kept = HashSet::new();
+        for k in &cfg.kept_link {
+            let what = format!("[[lab.archive.kept_link]] `{}` in `{}`", k.target, k.file);
+            if !crate::config::below_root(Path::new(&k.file)) {
+                return Err(format!(
+                    "{what}: `file` must be a relative path below the project root, without \
+                     `.` or `..`"
+                ));
+            }
+            if k.target.trim().is_empty() {
+                return Err(format!("{what}: `target` must not be empty"));
+            }
+            if k.reason.trim().is_empty() {
+                return Err(format!("{what}: `reason` must say why the link is kept"));
+            }
+            if !kept.insert((k.file.as_str(), k.target.as_str())) {
+                return Err(format!("{what}: the link is configured twice"));
+            }
+        }
         let set = |what: &str, include: &[String], exclude: &[String]| {
             FileSet::new(include, exclude).map_err(|e| err(what, e))
         };

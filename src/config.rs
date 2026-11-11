@@ -191,6 +191,22 @@ pub struct ArchiveConfig {
     /// that links may still point to.
     #[serde(default)]
     pub offloaded: Vec<OffloadedSpec>,
+    /// Broken links kept on purpose in the sealed text of append-only files.
+    #[serde(default)]
+    pub kept_link: Vec<KeptLinkSpec>,
+}
+
+/// `[[lab.archive.kept_link]]`: a link in the sealed text of `file` whose
+/// missing destination `target` stays as written, for `reason`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptLinkSpec {
+    /// The file that holds the link, relative to the project root.
+    pub file: String,
+    /// The link destination exactly as written.
+    pub target: String,
+    /// Why the link stays broken.
+    pub reason: String,
 }
 
 /// `[[lab.archive.offloaded]]`: files moved to `location`, listed in `list`.
