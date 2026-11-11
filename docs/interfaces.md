@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]` and `[[lab.archive.offloaded]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]` and `[[lab.archive.kept_link]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -114,6 +114,17 @@ The seal manifest (`[lab.archive] seal_manifest`, default `<state_dir>/lab/archi
 ```
 
 An offloaded list (`[[lab.archive.offloaded]]`, since lab 0.9.1, whose older versions reject the key) records files moved out of the project, such as to cloud storage, that the archive still links. `list` is a committed plain-text file, a relative path below the project root without `.` or `..`, configured once. It holds one path per line, written like a link from the project root: a leading `/` or `./`, `.`, `..`, a trailing `/` and a byte-order mark are resolved or ignored, blank lines are skipped, and a line that leaves the root is an error. The list is not compressed. `location` says where the files went, such as `cloud:archive/2026-11-08/masters/`. `lab archive check` does not report a link as `broken-link` when its missing target is a listed path, lies in a listed directory, or is a directory that holds a listed path. It reports one `archived-link` info finding per list instead, with the list as its subject and `data` `{"links": N, "location": "…"}`. Its message names the location and changes only when the count reaches or leaves 0, so the finding keeps its fingerprint while links come and go; the text output adds the count. A missing target that no list holds, or one outside the project root, stays a `broken-link` error. A configured list that is missing or unreadable, or holds a line that leaves the root, stops the check with an error (exit 2). Only links honour the list: a sealed file moved out still fails `sealed-missing`. Since lab 0.9.10, in a linked git worktree, a missing link target below the project root that git ignores there is found when it exists in the main checkout. lab only checks that it exists there and does not check its anchors; a replay's worktree does not look there.
+
+A kept link (`[[lab.archive.kept_link]]`, since lab 0.9.11, whose older versions reject the key) records a broken link that stays in the sealed text of an append-only file, such as a quoted past answer that links a file on another machine, where no permitted edit can fix it. Each entry has three fields, and any other field is refused:
+
+```toml
+[[lab.archive.kept_link]]
+file = "docs/research/history/01-2026-10-02-start.md"  # relative to the project root
+target = "/Users/me/Downloads/plan.pdf"               # the link destination exactly as written
+reason = "quotes a past chat answer that linked a file on another machine"
+```
+
+`lab archive check` does not report a missing link target in `file` whose destination equals `target` as `broken-link` when the link's line lies wholly in the file's sealed text: the file matches `sealed`, has a seal-manifest entry whose seal still holds (unchanged or appended to), and the line ends within the entry's `bytes`, counted from the start of the body, so front matter may change. It reports one `kept-link` info finding per such link instead, with the link as its subject and `data` `{"target": "…", "reason": "…"}`; the text output adds the reason. The same link outside the sealed text, in a file that is not append-only or not sealed yet, or in text appended after the seal, stays a `broken-link` error whose message says that `kept_link` covers only sealed text. An entry that matches no missing link in a checked file, such as one whose target exists now, is a `stale-kept-link` warning with `file` as its subject. An entry with an empty `target` or `reason`, a `file` that is not a relative path below the root without `.`, `..` or empty segments, or a `file` and `target` configured twice stops the check with an error (exit 2). An offloaded list takes precedence: a target it holds is counted there.
 
 ## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 
