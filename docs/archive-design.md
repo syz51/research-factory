@@ -1,7 +1,10 @@
-# Retrieval pipeline for the research archive: design
+# Research memory: archive, board and retrieval — design
 
 Status: design, 12 November 2026. Nothing in this document is built yet. Board tasks carry the work;
 this document is the shared reference for them. Change it when an experiment decides an open point.
+
+Sections 1–6 design retrieval. Section 7 redesigns the archive itself and divides the work between
+the archive and the work board. Read section 7 first if you write records.
 
 ## 1. Purpose and principles
 
@@ -24,8 +27,9 @@ not a person. That sets the principles.
 
 ## 2. Evidence this design rests on
 
-- Use (95 masters sessions from 7 November 2026): 1 `lab archive find` call, both queries with no
-  hit; 339 shell greps over the archive; 23 repeated fetches of 7 registered papers.
+- Use (95 masters session transcripts dated 1–11 November 2026; 20 start on or after 7 November,
+  when `lab archive find` arrived): 1 `lab archive find` call, both queries with no hit; 339 shell
+  greps over the archive; 23 repeated fetches of 7 registered papers.
 - Reach: `lab archive find` matches 80 KB of index lines. The archive holds 2,291 Markdown files,
   72.8 MB. 85 of 850 registry entries have an extracted text.
 - Probe (SQLite FTS5 over the real archive): 41,293 sections and 3,584 text windows; build 2.9 s;
@@ -234,6 +238,88 @@ searches followed by a grep; hits opened per search; repeated fetches; tokens pe
 
 1. Lexical core with fields, classes, grouping, trace and `open` (usable alone).
 2. Papers guard, metadata rules, test set, paper structure and abstracts (parallel).
-3. Graph index and `related`; registry and text scopes.
+3. Graph index and `related`; registry and text scopes; archive model of section 7.
 4. E1–E3; then build what wins: dense stage, reranker, cards, structured extraction.
 5. E4; then the chosen delivery. E5 last.
+
+## 7. The archive itself, and the work board
+
+### 7.1 Question
+
+The work board started on 7 November 2026. The archive is older (first record 2 October). Could
+the board hold much of what the archive holds as files?
+
+### 7.2 Evidence
+
+Board (source of the board tool, read on 12 November):
+- A task body holds 4,000 characters, a note 800, a closing summary 800. It stores no file.
+- It runs on one server. It keeps tasks and notes, but done tasks leave the session snapshot after
+  30 days and events are kept 365 days.
+- It has what files lack: one view from every device, owners, questions to the owner, review
+  verdicts, a web view, hooks that put its state into each session.
+- For six recent history reports that name a task, the report and the task share 0–2% of their
+  8-word phrases. The board holds the request, a summary and pointers. The file holds the result.
+
+Archive (masters, read-only scans on 12 November):
+- Long, structured text: 131 of 167 history reports exceed 4,000 characters and 85 hold tables;
+  172 of 198 follow-up folders hold data that their README interprets. Internal links: 14,332.
+- Process text restates other text: 34% of month-log sentences and 25% of sealed-notes sentences
+  in the last 12 sessions, against 10% overall.
+- Reading back: 27 of 167 history reports, 6 of 198 follow-up READMEs and 3 of 41 decisions were
+  read back in the transcripts. Follow-up data files took 127 of 245 file reads.
+- Upkeep after 7 November: 3.4% of tool calls; 12 of 31 check runs failed; 13 of 44 commits touch
+  only bookkeeping files. The seal changed in most archive commits and caught no real edit.
+- 39 of 48 topic pages are historical, with a median of 29,000 characters.
+- The project has no git remote, and its ignored data files (51,153) have no copy in git.
+
+### 7.3 Decision: two memories, one index
+
+The owner's idea is right for the record of work and wrong for the record of knowledge.
+
+| Memory | Holds | Why there |
+| --- | --- | --- |
+| **Board: the record of work** | the request, who did it, state, steps, questions and answers, findings and decisions while work runs, review, the closing summary, pointers to commits and records | short text; needs owners, state and every device; the board already holds it, so files that repeat it stop |
+| **Archive: the record of knowledge** | results with their tables and data, decisions in force, the current state of each topic, sources | long and structured; needs line anchors, hashes, diffs, quote checks, links to data; must outlive any tool and work offline |
+| **Search index** | both, plus papers | one place to ask; each hit says which memory it came from |
+
+Rejected: moving records into the board (size limits, no files, no versions of text, checks that
+need paths and hashes, dependence on one server). Rejected: keeping every file type as it is
+(process files restate the board and are rarely read).
+
+### 7.4 Archive model, version 2
+
+Old records stay where they are, unchanged and indexed. The new model applies to new work.
+
+1. **One record per piece of work.** History reports and follow-up folders become one type: a folder
+   with a README and its data. Front matter adds `task` (the board task) and `kind` (result,
+   decision, survey, review). The request and the steps stay on the board; the record holds the
+   result. Decision records keep their `DR` numbers.
+2. **No month log.** New entries stop. `lab archive log` prints the timeline from record dates.
+3. **A small state layer.** The start page and the current topic pages say what is true now, each
+   within a size budget, each statement linked to a record. Historical topic pages get the class
+   `historical` and rank last.
+4. **No seal file.** A check on git history replaces the hash manifest: a finished record may only
+   grow at its end. This removes a file that changed in most commits.
+5. **Generated indexes are not committed.** Search and `lab archive index --print` replace them.
+   The start page stays a file.
+6. **One closing command.** `lab archive done` updates derived files, runs the archive checks and
+   reports what to fix, so closing a session is one call.
+7. **Both directions linked.** A task closes with the record path and commit as evidence. A record
+   names its task. `lab check` reports a record with no task and a closed research task with no
+   record.
+
+### 7.5 What the board needs
+
+Asked of the board's owner as proposals, not built here:
+- one call that lists finding and decision notes across the tasks of a board;
+- an export of tasks and notes that the search index can read;
+- a link type for an archive record (path and commit) that the web view shows.
+
+### 7.6 Checks on this decision
+
+- After four weeks: count the queries that only an old-style history report or log entry could
+  answer and that the board plus the new record could not.
+- Bookkeeping share of tool calls, check failure rate, and bookkeeping-only commits, against the
+  figures in 7.2.
+- Reverse by restoring the month-log and history rules in the project's instructions; no data is
+  lost, because old files are never removed.
