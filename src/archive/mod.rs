@@ -129,10 +129,15 @@ impl<'p> Spec<'p> {
         let mut kept = HashSet::new();
         for k in &cfg.kept_link {
             let what = format!("[[lab.archive.kept_link]] `{}` in `{}`", k.target, k.file);
-            if !crate::config::below_root(Path::new(&k.file)) {
+            // Matched as written against the checked paths, so each segment
+            // must be a plain name.
+            if k.file
+                .split('/')
+                .any(|p| p.is_empty() || p == "." || p == "..")
+            {
                 return Err(format!(
                     "{what}: `file` must be a relative path below the project root, without \
-                     `.` or `..`"
+                     `.`, `..` or empty segments"
                 ));
             }
             if k.target.trim().is_empty() {

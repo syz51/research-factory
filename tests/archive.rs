@@ -749,6 +749,9 @@ fn kept_links_cover_only_the_sealed_text_of_append_only_files() {
     for bad in [
         entry("../h.md", gone),
         entry("/docs/h.md", gone),
+        entry("docs/./h.md", gone),
+        entry("docs//h.md", gone),
+        entry("docs/h.md/", gone),
         entry("docs/h.md", " "),
         entry("docs/h.md", gone).replace("quotes a past answer", " "),
         entry("docs/h.md", gone) + "extra = 1\n",
