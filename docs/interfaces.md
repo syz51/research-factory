@@ -182,7 +182,7 @@ It checks every Markdown file that `lab archive check` scans (an index's records
 
 ```toml
 [lab.search]
-notes = ["docs/**/*.md"]             # the files of the `notes` scope; since 0.19.2 without the texts the registry lists, which are units of `texts` only
+notes = ["docs/**/*.md"]             # the files of the `notes` scope; since 0.19.2 without the texts the registry lists
 notes_exclude = ["docs/drafts/**"]
 stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
 cites = ['\[(?P<key>\d+)\]']         # since 0.15.0: more citation forms, each with a group `key`
@@ -212,7 +212,7 @@ historical = ["docs/old/**"]
 
 | Scope | Sources | Unit | Anchor | Class |
 |---|---|---|---|---|
-| `notes` | the Markdown files above | Markdown section | `path#Lstart-Lend` | by `classes` |
+| `notes` | the Markdown files above; since 0.19.2 without each text that a registry entry lists, preferred or not, because `texts` holds one text of each paper (a registry that cannot be read leaves them in and gives a notice) | Markdown section | `path#Lstart-Lend` | by `classes` |
 | `refs` | the entries of the registry (`[papers] registry`, default `references.jsonl`), and the paper cards | an entry: its `abstract` and its catalogue line (`source.path`, `source.line`); each card item | `ref:<key>`; a card item `text#Lfirst-Llast` of its quote | `paper`; a card `generated` |
 | `texts` | the extracted text of each entry | passage of about 200 words | `text#Lstart-Lend` | `paper` |
 | `files` | `files`, or else the files git tracks that are not Markdown and not notes | the file's path words, size and the record of the nearest directory that holds a note with an id | the path | by `classes` |

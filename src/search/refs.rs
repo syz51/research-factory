@@ -516,14 +516,23 @@ fn stale_why(recorded: &str, actual: &str) -> String {
 }
 
 /// Every path that an entry of the registry names as a text, preferred or
-/// not. The `notes` scope leaves these files out.
+/// not, in the form of a walked path (`./a//b.md` is `a/b.md`). The `notes`
+/// scope leaves these files out: `texts` holds one text of each paper, and
+/// another extraction of it as a note would bring the duplicate back.
 pub fn text_paths(ctx: &Context, resolver: &mut Resolver) -> Result<HashSet<String>, String> {
     Ok(Registry::read(ctx, resolver)?
         .map(|reg| {
             reg.entries
-                .into_iter()
-                .flat_map(|e| e.texts)
-                .map(|t| t.path)
+                .iter()
+                .flat_map(|e| &e.texts)
+                .map(|t| {
+                    Path::new(&t.path)
+                        .components()
+                        .filter(|c| !matches!(c, std::path::Component::CurDir))
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
                 .collect()
         })
         .unwrap_or_default())

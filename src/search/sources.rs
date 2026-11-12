@@ -5,7 +5,7 @@
 //! source whose stamp differs from the stored one. A listing that could not
 //! read everything says so; the index then keeps what it holds of that scope.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::Transaction;
@@ -188,7 +188,7 @@ impl<'a> Resolver<'a> {
 /// The sources of `scope`.
 pub fn list(ctx: &Context, scope: Scope, resolver: &mut Resolver) -> Result<Listing, String> {
     match scope {
-        Scope::Notes => notes(ctx, resolver).map(Listing::complete),
+        Scope::Notes => notes(ctx, resolver),
         Scope::Refs => refs::list_refs(ctx, resolver),
         Scope::Texts => refs::list_texts(ctx, resolver),
         Scope::Files => files(ctx, resolver).map(Listing::complete),
@@ -199,12 +199,20 @@ pub fn list(ctx: &Context, scope: Scope, resolver: &mut Resolver) -> Result<List
 
 /// The files of the `notes` scope, without generated ones and without the
 /// paper texts that the registry lists, which are units of `texts`.
-fn notes(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
+fn notes(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, String> {
     let found = crate::archive::files::walk(&ctx.project.root, &[&ctx.notes])?
         .pop()
         .unwrap_or_default();
-    let texts = refs::text_paths(ctx, resolver)?;
-    Ok(found
+    // A registry that cannot be read leaves its texts in `notes` and says
+    // so: a query of the notes alone does not fail on it.
+    let (texts, notices) = match refs::text_paths(ctx, resolver) {
+        Ok(texts) => (texts, Vec::new()),
+        Err(e) => (
+            HashSet::new(),
+            vec![format!("{e}: the paper texts are not left out of notes")],
+        ),
+    };
+    let docs = found
         .into_iter()
         .filter(|p| ctx.class_of(p) != Class::Generated && !texts.contains(p))
         .filter_map(|path| {
@@ -216,7 +224,11 @@ fn notes(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
                 what: What::Note,
             })
         })
-        .collect())
+        .collect();
+    Ok(Listing {
+        notices,
+        ..Listing::complete(docs)
+    })
 }
 
 /// The files of the `files` scope: the configured globs, or else the files
@@ -248,7 +260,7 @@ fn files(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
     // A file's unit names the record whose note lies in one of its
     // directories, so the stamps of those notes are part of its stamp.
     let mut notes_in: HashMap<String, Vec<String>> = HashMap::new();
-    for note in notes(ctx, resolver)? {
+    for note in notes(ctx, resolver)?.docs {
         let dir = note
             .key
             .rsplit_once('/')

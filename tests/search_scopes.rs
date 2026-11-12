@@ -242,6 +242,18 @@ fn a_paper_text_under_the_notes_globs_is_a_unit_of_texts_only() {
             .all(|h| h["scope"] != "notes" || h["path"] != "sources/texts/15.md"),
         "{both}"
     );
+    // A path in another form names the same file, and a text that `texts`
+    // does not prefer is no note either.
+    write(d, "sources/texts/18.md", "# Docling\n\nnumbat burrows\n");
+    write(d, "sources/texts/18-alt.md", "numbat burrows, quokka\n");
+    let entry = serde_json::json!({"key": "18", "title": "Numbat Paper",
+        "texts": [{"path": "./sources/texts/18.md", "extraction": "docling"},
+                  {"path": "sources//texts/18-alt.md", "extraction": "plain"}]});
+    let registry = std::fs::read_to_string(d.join("references.jsonl")).unwrap();
+    write(d, "references.jsonl", &format!("{registry}{entry}\n"));
+    assert_eq!(json(d, &["--in", "notes", "numbat"])["state"], "zero");
+    assert_eq!(keys(&json(d, &["--in", "texts", "numbat"])), ["18"]);
+    assert_eq!(json(d, &["--in", "texts", "quokka"])["state"], "zero");
     // Once the registry no longer lists the file, a refresh makes it a note.
     let registry = std::fs::read_to_string(d.join("references.jsonl")).unwrap();
     let kept: Vec<&str> = registry
@@ -256,6 +268,22 @@ fn a_paper_text_under_the_notes_globs_is_a_unit_of_texts_only() {
             .iter()
             .any(|h| h["path"] == "sources/texts/15.md"),
         "{notes}"
+    );
+    // A registry that cannot be read leaves the texts in `notes` and says so.
+    std::fs::write(d.join("references.jsonl"), b"\xff\xfe not text\n").unwrap();
+    let o = lab(d, &["search", "--json", "--in", "notes", "numbat"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the paper texts are not left out of notes"),
+        "{}",
+        stderr(&o)
+    );
+    let report: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert!(
+        hits(&report)
+            .iter()
+            .any(|h| h["path"] == "sources/texts/18.md"),
+        "{report}"
     );
 }
 
