@@ -36,8 +36,13 @@ pub(super) struct Miss {
 
 static BOARD_NAME: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_-]*$").expect("valid regex"));
-static ITEM: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^( *)(?:[-*+]|\d{1,9}[.)])(?: +|$)(.*)$").expect("valid regex"));
+static ITEM: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^( *)(?:[-*+]|(\d{1,9})[.)])(?: +|$)(.*)$").expect("valid regex")
+});
+/// A thematic break, such as `* * *` or `---`.
+static BREAK: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^ {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})$").expect("valid regex")
+});
 static NO_ACTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bno action:\s*\S").expect("valid regex"));
 
@@ -81,7 +86,8 @@ impl OpenItems {
         Ok(Self {
             since: spec.since.clone(),
             headings,
-            ids: Regex::new(&format!(r"\b(?:{boards})-\d+\b"))
+            // Not inside a longer name: `old-masters-3` names no `masters` task.
+            ids: Regex::new(&format!(r"(?:^|[^A-Za-z0-9_-])(?:{boards})-\d+\b"))
                 .expect("escaped names form a valid regex"),
         })
     }
@@ -198,11 +204,24 @@ impl OpenItems {
             }
             if visible.trim().is_empty() {
                 list.blank = true;
+                list.paragraph = false;
                 continue;
             }
-            if let Some(c) = ITEM.captures(&visible) {
+            // A list that interrupts a paragraph starts with `-`, `*`, `+`
+            // or `1.`, as in CommonMark; so `2026. The pool` there is text.
+            let item = ITEM.captures(&visible).filter(|c| {
+                !BREAK.is_match(&visible)
+                    && !(list.stack.is_empty()
+                        && list.paragraph
+                        && c.get(2)
+                            .is_some_and(|n| n.as_str().trim_start_matches('0') != "1"))
+            });
+            list.paragraph = item.is_none() && list.stack.is_empty();
+            if let Some(c) = item {
                 let indent = c[1].len();
-                list.push(self, section.as_ref(), &mut out, indent, lineno, &c[2]);
+                list.push(self, section.as_ref(), &mut out, indent, lineno, &c[3]);
+            } else if BREAK.is_match(&visible) {
+                list.close(self, section.as_ref(), &mut out);
             } else if list.continues(&visible) {
                 list.append(visible.trim());
             } else {
@@ -230,6 +249,8 @@ struct Item {
 struct List {
     stack: Vec<Item>,
     blank: bool,
+    /// The previous line is paragraph text outside a list.
+    paragraph: bool,
 }
 
 impl List {
@@ -366,6 +387,12 @@ mod tests {
     fn code_comments_and_ids_of_other_boards_do_not_count() {
         let body = "## Limits\n```\n- in code\n```\n<!--\n- in a comment\n-->\n- other-board-5 and research-factory-x\n";
         assert_eq!(lines(body), vec![8]);
+    }
+
+    #[test]
+    fn longer_names_breaks_and_numbered_text_are_not_items_or_ids() {
+        let body = "## Limits\n- old-masters-3 only\n- (masters-4) passes\n\n* * *\n- - -\n\nA paragraph wraps in\n2026. The pool is text.\n\n1. but this is an item\n";
+        assert_eq!(lines(body), vec![2, 11]);
     }
 
     #[test]
