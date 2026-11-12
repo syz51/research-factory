@@ -313,7 +313,7 @@ Explicit, with a file lock. Defect: a corrupt `last.json` is ignored, so "too re
 
 ### 5.4 Evaluation
 
-`Verdict` (`src/evaluate.rs:38`): `Collecting`, `Improved`, `Worse`, `Inconclusive`, `Unmeasurable`. Explicit. A lesson moves to `verified` only from `Improved`.
+`Verdict` (`src/evaluate.rs:38`): `Collecting`, `Improved`, `Worse`, `Inconclusive`, `Unmeasurable`. Explicit. A lesson moves to `verified` only from an active status (`src/lessons.rs:207`); the verdict informs that move and does not force it.
 
 ### 5.5 Check run
 
