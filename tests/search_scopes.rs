@@ -900,3 +900,83 @@ fn the_search_board_export_comes_before_the_archive_one() {
     let report = json(d, &["--in", "board", "quoll"]);
     assert_eq!(hits(&report)[0]["anchor"], "board:rf-1");
 }
+
+/// research-factory-355: each phrasing scales its scores by the lowest and
+/// highest of its own candidates, and those are the candidates of every
+/// searched scope. A board task that tops one phrasing lowers the share of
+/// the notes in it, so two notes swap although the task ranks below both.
+/// BM25 takes its statistics from the whole index, whatever `--in` searches.
+#[test]
+fn a_searched_scope_sets_the_scale_of_the_others_and_the_index_its_statistics() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    write(
+        d,
+        "research.toml",
+        &board_config(r#"["cat", "board.json"]"#, None),
+    );
+    write(d, "docs/a.md", "# A\n\nAlpha alpha alpha. Beta once.\n");
+    write(d, "docs/b.md", "# B\n\nAlpha once. Beta beta beta beta.\n");
+    write(
+        d,
+        "docs/c.md",
+        "# C\n\nAlpha and beta in a long sentence with many other words to make it weak.\n",
+    );
+    for i in 0..30 {
+        write(
+            d,
+            &format!("docs/f{i}.md"),
+            &format!("# F{i}\n\nGamma {i}.\n"),
+        );
+    }
+    write(
+        d,
+        "board.json",
+        r#"{"tasks": [{"id": "rf-1", "title": "Alpha alpha alpha alpha",
+            "body": "Alpha alpha alpha alpha alpha alpha."}]}"#,
+    );
+    let ranked = |scopes: &str| -> Vec<(String, f64)> {
+        let report = json(
+            d,
+            &["--explain", "--in", scopes, "alpha epsilon", "beta epsilon"],
+        );
+        hits(&report)
+            .iter()
+            .map(|h| {
+                let anchor = h["anchor"].as_str().unwrap();
+                (anchor.to_string(), h["explain"]["bm25"].as_f64().unwrap())
+            })
+            .collect()
+    };
+    let anchors = |r: &[(String, f64)]| r.iter().map(|h| h.0.clone()).collect::<Vec<_>>();
+    let bm25 = |r: &[(String, f64)], anchor: &str| r.iter().find(|h| h.0 == anchor).unwrap().1;
+
+    let alone = ranked("notes");
+    assert_eq!(
+        anchors(&alone),
+        ["docs/a.md#L1-L3", "docs/b.md#L1-L3", "docs/c.md#L1-L3"]
+    );
+    search(d, &["--refresh-board"]);
+    let with_board = ranked("notes,board");
+    assert_eq!(
+        anchors(&with_board),
+        [
+            "docs/b.md#L1-L3",
+            "docs/a.md#L1-L3",
+            "board:rf-1",
+            "docs/c.md#L1-L3"
+        ]
+    );
+    // Without the board in the answer the order comes back, but the index
+    // now holds the task, so the notes' BM25 scores are not the first ones.
+    let after = ranked("notes");
+    assert_eq!(anchors(&after), anchors(&alone));
+    assert_ne!(
+        bm25(&after, "docs/a.md#L1-L3"),
+        bm25(&alone, "docs/a.md#L1-L3")
+    );
+    assert_eq!(
+        bm25(&after, "docs/a.md#L1-L3"),
+        bm25(&with_board, "docs/a.md#L1-L3")
+    );
+}
