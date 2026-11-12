@@ -665,6 +665,50 @@ fn index_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Project;
+
+    fn write(root: &Path, rel: &str, text: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_refresh_on_a_connection_whose_file_a_build_replaced_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n",
+        );
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts.\n");
+        let project = Project::discover(root, None).unwrap();
+        let ctx = Context::new(&project, vec![Scope::Notes]).unwrap();
+        drop(open(&ctx, false).unwrap());
+        // This process opens the index; another one then renames a new build over it.
+        let mut held = open_current(&ctx).unwrap().unwrap();
+        let old_build = build_of(&held).unwrap();
+        assert!(build(&ctx, true).unwrap().is_some());
+        // A changed source makes the refresh write.
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts the hare.\n");
+        assert!(matches!(refresh(&ctx, &mut held), Err(Fault::Replaced)));
+        // The write did not go to the unlinked file the connection holds.
+        assert_eq!(build_of(&held).unwrap(), old_build);
+        let stamp: String = held
+            .query_row(
+                "SELECT stamp FROM files WHERE path = 'docs/a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(Some(stamp), sources::file_stamp(&root.join("docs/a.md")));
+        // `open` answers the fault by opening the new file and refreshing it.
+        let opened = open(&ctx, false).unwrap();
+        assert!(opened.stale.is_none());
+        assert_ne!(build_of(&opened.conn).unwrap(), old_build);
+        assert!(!ctx.dir.join("index.db-journal").exists());
+    }
 
     #[test]
     fn the_weights_rank_title_and_heading_first_then_body_then_ids_and_meta_then_summary() {
