@@ -165,16 +165,22 @@ fn db_path(ctx: &Context) -> PathBuf {
     ctx.dir.join("index.db")
 }
 
-/// Opens the index, building or refreshing it first as its state requires.
-/// `rebuild` builds it anew whatever its state.
-pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
-    std::fs::create_dir_all(&ctx.dir).map_err(|e| format!("{}: {e}", ctx.dir.display()))?;
-    // The directory ignores itself, so the cache stays out of git in a
-    // project that does not ignore its state directory.
-    let ignore = ctx.dir.join(".gitignore");
+/// Creates the directory of the index and the board cache. The directory
+/// ignores itself, so the cache stays out of git in a project that does not
+/// ignore its state directory.
+pub fn create_dir(dir: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let ignore = dir.join(".gitignore");
     if !ignore.exists() {
         std::fs::write(&ignore, "*\n").map_err(|e| format!("{}: {e}", ignore.display()))?;
     }
+    Ok(())
+}
+
+/// Opens the index, building or refreshing it first as its state requires.
+/// `rebuild` builds it anew whatever its state.
+pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
+    create_dir(&ctx.dir)?;
     let mut force = rebuild;
     for _ in 0..3 {
         if !force && let Some(mut conn) = open_current(ctx)? {

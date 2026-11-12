@@ -10,6 +10,8 @@ pub const CONFIG_FILE: &str = "research.toml";
 #[derive(Debug)]
 pub struct Project {
     pub root: PathBuf,
+    /// The `research.toml` read, if any.
+    pub config: Option<PathBuf>,
     pub name: String,
     /// Zone in which stored UTC times become calendar dates.
     pub tz: jiff::tz::TimeZone,
@@ -650,6 +652,15 @@ impl Project {
                 ));
             }
         }
+        if raw
+            .lab
+            .search
+            .board_export
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err("[lab.search] board_export needs a program".into());
+        }
         let e = &raw.lab.evaluate;
         if e.min_sessions == 0 {
             return Err("[lab.evaluate] min_sessions must be at least 1".into());
@@ -689,6 +700,7 @@ impl Project {
         }
         Ok(Self {
             root,
+            config,
             name,
             tz,
             state_dir,

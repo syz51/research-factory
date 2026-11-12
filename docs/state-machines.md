@@ -2,7 +2,7 @@
 
 This document models the research pipeline as state machines.
 It names each machine, its states, its transitions and the place that enforces each transition.
-It covers the tools as they are (lab 0.21.6, papers 0.12.1, claimcheck 0.12.0, prov 0.1.3, agentprof 0.4.0, the work board; a section names the version that changed a machine) and the machines that [archive-design.md](archive-design.md) adds.
+It covers the tools as they are (lab 0.22.0, papers 0.12.1, claimcheck 0.12.0, prov 0.1.3, agentprof 0.4.0, the work board; a section names the version that changed a machine) and the machines that [archive-design.md](archive-design.md) adds.
 
 An **explicit** machine has its states in code or in a config list.
 An **implicit** machine has states that exist only as a combination of files, fields or habits.
@@ -214,6 +214,33 @@ Rejections are stored. Without that state, the same alias returns at each retro.
 Experiment E1 (masters DR045) chose lexical search, so no stage loads a model.
 Since lab 0.19.0 the machine is removed and each `archive_search` result says `mode: lexical` (research-factory-295).
 
+### 3.6 Board export cache
+
+The cached output of the board export that feeds the `board` scope, one for each checkout, in `<state_dir>/lab/search/` (lab 0.22.0, research-factory-345).
+Before, each query ran the export with a limit of 15 seconds, so an export with notes (about 14 s) made every query with the board slow (research-factory-273).
+Code: `src/search/board.rs`; the query side is `list_board` in `src/search/chat.rs`.
+
+```text
+absent ──query──► absent + refreshing ──ok──► fresh
+fresh ──board_max_age passes──► stale ──query──► stale + refreshing ──ok──► fresh
+refreshing ──export fails──► the old state, with board.error
+another command configured: the cache counts as absent
+```
+
+| Transition | Trigger | Guard | Enforced by |
+|---|---|---|---|
+| absent → refreshing | a query of the `board` scope | the lock on `board.lock` is free and no refresh failed in the last 60 s; the query answers without the scope, `partial` | `list_board`, `board::start` |
+| fresh → stale | the cache file's mtime is `board_max_age` minutes old or older | checked at each query; a fresh cache answers in full | `board::read`, `list_board` |
+| stale → refreshing | a query of the `board` scope | the lock is free and no refresh failed in the last 60 s; the query answers from the stale copy, `partial`, with its age | `list_board`, `board::start` |
+| refreshing → fresh | the export prints a task array within 120 s | the cache is written to a temporary file and renamed; `board.error` is removed | `board::refresh` |
+| refreshing → old state | the export fails, prints no task array or runs past 120 s | the old cache stays; `board.error` holds the reason, which the next stale query names; its mtime holds the next detached refresh back for 60 s | `board::refresh`, `board::start` |
+| any → refreshing (foreground) | `lab search --refresh-board` | waits for the lock, then runs the export; a failure exits 2 | `board::refresh` |
+
+One refresh at a time: the query takes the lock and hands it to the detached refresh as its standard input, so the lock stays held until the refresh exits.
+A second query that finds the lock held starts none and says that a refresh is running.
+The detached refresh checks the cache again before it runs the export, so a query that looked just before the last refresh ended starts no export.
+The refresh runs in its own process group with its output in `board.log`; the export runs in a group of its own, which a timeout kills whole.
+
 ## 4. Paper machines (papers, claimcheck)
 
 ### 4.1 Paper lifecycle
@@ -414,7 +441,7 @@ task open ─► doing ─► record drafted (front matter: task, kind) ─► r
 ### 7.2 Board note and record
 
 A finding lives first as a board note (work state). When it is knowledge that outlasts the task, it moves to a record.
-`note ─► cited in a record ─► record sealed`. The board scope of `lab search` reads notes through the same export, so a note that never became a record is still found, with the source class `chat`.
+`note ─► cited in a record ─► record sealed`. The board scope of `lab search` reads notes through a board export, `[lab.search] board_export` or else the same one, cached (3.6), so a note that never became a record is still found, with the source class `chat`.
 
 ### 7.3 Experiment, decision and build
 
@@ -478,3 +505,4 @@ Covered in section 4.1 (stale derivative). The joint is between `papers` (writer
 | 29 | Worktree data | 5.6 | Fixed by 312, 316 (masters hook) |
 | 30 | Experiment call batch | 7.3 | Fixed by 224 and 322 with its sub-tasks 323, 324, 327, 332, 333 |
 | 31 | Test-set judgment pin | 7.3 | Fixed by 245, 340, 341 |
+| 32 | Board export cache | 3.6 | Built by 345 (lab 0.22.0) |

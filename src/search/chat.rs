@@ -2,25 +2,21 @@
 //! (the session list of `agentprof scan`, `rf.session/1`) and the tasks and
 //! notes of the work board (the configured board export command).
 //!
-//! Both are class `chat`. A board that cannot be read makes the answer
-//! partial, never an error (docs/state-machines.md 7.2).
+//! Both are class `chat`. A board that cannot be read, or a cached export
+//! older than `board_max_age`, makes the answer partial, never an error
+//! (docs/state-machines.md 3.6 and 7.2).
 
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use super::sources::{Doc, Listing, Loaded, Resolver, Row, What, file_stamp, sha256};
 use super::units::Unit;
-use super::{Class, Context, Scope};
+use super::{Class, Context, Scope, board};
 
 /// A message longer than this many characters is cut.
 const MESSAGE_CHARS: usize = 8000;
-/// How long the board export may take.
-const BOARD_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A session of the `sessions` scope.
 pub struct SessionDoc {
@@ -231,79 +227,75 @@ pub fn load_session(s: &SessionDoc) -> Result<Option<Loaded>, String> {
     }))
 }
 
-/// The board's tasks, or a notice why the board could not be read.
+/// The board's tasks from the cached export, or a notice why the board could
+/// not be read. A query never waits for the export: a cache older than
+/// `board_max_age`, or none, starts a detached refresh (board.rs).
 pub fn list_board(ctx: &Context) -> Listing {
     let Some(command) = &ctx.board_export else {
         return Listing::unavailable(
-            "scope `board`: no board export command is configured ([lab.archive] board_export)"
+            "scope `board`: no board export command is configured ([lab.search] board_export \
+             or [lab.archive] board_export)"
                 .into(),
         );
     };
-    // An export that names a task twice indexes it once.
-    let mut seen = HashSet::new();
-    match export(ctx, command) {
-        Ok(tasks) => Listing::complete(
-            tasks
-                .into_iter()
-                .filter_map(|t| {
-                    let id = t.get("id")?.as_str()?.to_string();
-                    seen.insert(id.clone()).then_some(())?;
-                    Some(Doc {
-                        scope: Scope::Board,
-                        key: format!("board:{id}"),
-                        stamp: sha256(t.to_string().as_bytes()),
-                        what: What::Task(Box::new(t)),
-                    })
-                })
-                .collect(),
+    let max_age = board::max_age(ctx.project);
+    let cache = board::read(&ctx.dir, command);
+    if let Some(c) = &cache
+        && c.age < max_age
+    {
+        return Listing::complete(board_docs(&c.tasks));
+    }
+    let refresh = match board::start(ctx.project, &ctx.dir) {
+        Ok(board::Refresh::Started) => "a refresh started".to_string(),
+        Ok(board::Refresh::Running) => "a refresh is running".to_string(),
+        Ok(board::Refresh::Waiting) => format!(
+            "the next refresh starts after {} from the last failure",
+            board::age_text(board::RETRY_AFTER)
         ),
-        Err(why) => Listing::unavailable(format!("scope `board`: the board was not read: {why}")),
+        Err(e) => format!("a refresh did not start: {e}"),
+    };
+    let failed = board::last_error(&ctx.dir)
+        .map(|(e, ago)| {
+            format!(
+                "; the last refresh failed {} ago: {e}",
+                board::age_text(ago)
+            )
+        })
+        .unwrap_or_default();
+    match cache {
+        Some(c) => {
+            let mut listing = Listing::complete(board_docs(&c.tasks));
+            listing.notices.push(format!(
+                "scope `board`: the board export is {} old, older than board_max_age ({}); \
+                 the answer uses it and {refresh}{failed}",
+                board::age_text(c.age),
+                board::age_text(max_age),
+            ));
+            listing
+        }
+        None => Listing::unavailable(format!(
+            "scope `board`: no board export is cached yet; {refresh} \
+             (`lab search --refresh-board` waits for it){failed}"
+        )),
     }
 }
 
-/// Runs the board export and reads its JSON: an array of tasks, or an
-/// object with a `tasks` array.
-fn export(ctx: &Context, command: &[String]) -> Result<Vec<Value>, String> {
-    let (program, args) = command.split_first().ok_or("the command is empty")?;
-    let mut child = Command::new(ctx.project.resolve_program(program))
-        .args(args)
-        .current_dir(&ctx.project.root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("`{program}` did not start: {e}"))?;
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let _ = tx.send(stdout.read_to_end(&mut text).map(|_| text));
-    });
-    let text = match rx.recv_timeout(BOARD_TIMEOUT) {
-        Ok(read) => read.map_err(|e| format!("`{program}`: {e}"))?,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "`{program}` did not finish in {} seconds",
-                BOARD_TIMEOUT.as_secs()
-            ));
-        }
-    };
-    let status = child.wait().map_err(|e| format!("`{program}`: {e}"))?;
-    if !status.success() {
-        return Err(format!("`{program}` failed ({status})"));
-    }
-    let value: Value = serde_json::from_slice(&text)
-        .map_err(|e| format!("`{program}` did not print JSON: {e}"))?;
-    match value {
-        Value::Array(list) => Ok(list),
-        Value::Object(mut map) => match map.remove("tasks") {
-            Some(Value::Array(list)) => Ok(list),
-            _ => Err(format!("`{program}` printed no array of tasks")),
-        },
-        _ => Err(format!("`{program}` printed no array of tasks")),
-    }
+/// A doc for each task; an export that names a task twice indexes it once.
+fn board_docs(tasks: &[Value]) -> Vec<Doc> {
+    let mut seen = HashSet::new();
+    tasks
+        .iter()
+        .filter_map(|t| {
+            let id = t.get("id")?.as_str()?.to_string();
+            seen.insert(id.clone()).then_some(())?;
+            Some(Doc {
+                scope: Scope::Board,
+                key: format!("board:{id}"),
+                stamp: sha256(t.to_string().as_bytes()),
+                what: What::Task(Box::new(t.clone())),
+            })
+        })
+        .collect()
 }
 
 /// A task: one unit of its title, body, acceptance and summary, and one per
