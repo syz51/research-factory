@@ -110,6 +110,41 @@ pub fn locate(dir: &Path) -> Result<Location, String> {
     }
 }
 
+/// The same directory as `dir` in each other worktree of its repository: the
+/// main checkout and the linked worktrees, without bare, prunable and replay
+/// ones. Empty outside git.
+pub fn others(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let Some(here) = git(dir, &["rev-parse", "--show-toplevel", "--show-prefix"])? else {
+        return Ok(Vec::new());
+    };
+    let mut lines = here.lines();
+    let (Some(top), prefix) = (lines.next(), lines.next().unwrap_or("")) else {
+        return Ok(Vec::new());
+    };
+    let same = |p: &Path| {
+        p == Path::new(top) || p.canonicalize().ok() == Path::new(top).canonicalize().ok()
+    };
+    let list = git(dir, &["worktree", "list", "--porcelain"])?.unwrap_or_default();
+    Ok(list
+        .split("\n\n")
+        .filter(|block| {
+            !block
+                .lines()
+                .any(|l| l == "bare" || l.starts_with("prunable"))
+        })
+        .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("worktree ")))
+        .map(Path::new)
+        .filter(|p| {
+            !same(p)
+                && !p.file_name().is_some_and(|n| {
+                    n.to_string_lossy()
+                        .starts_with(crate::replay::WORKTREE_PREFIX)
+                })
+        })
+        .map(|p| p.join(prefix))
+        .collect())
+}
+
 /// Finds gitignored files that a linked worktree lacks in its main checkout.
 pub struct Fallback {
     /// The directory in the linked worktree that paths are relative to.

@@ -104,6 +104,53 @@ fn prefix(root: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The record ids in the tree of `rev`, derived as `Spec::records` derives
+/// the work tree's: one record per index that lists a file. Empty outside a
+/// git work tree; `None` when `rev` names no commit, such as a remote branch
+/// that a prune removed.
+pub(super) fn ids_at(spec: &Spec, rev: &str) -> Result<Option<Vec<String>>, String> {
+    let root = spec.root();
+    let Some(prefix) = prefix(root) else {
+        return Ok(Some(Vec::new()));
+    };
+    let Some(rev) = commit(root, rev)? else {
+        return Ok(None);
+    };
+    let outputs: BTreeSet<&str> = spec.cfg.index.iter().map(|i| i.output.as_str()).collect();
+    let tree = output(
+        root,
+        &["ls-tree", "-r", "-z", "--name-only", "--full-tree", &rev],
+        b"",
+    )?;
+    let mut blobs = Blobs::open(root)?;
+    let mut ids = Vec::new();
+    for full in tree.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        let full = String::from_utf8_lossy(full);
+        let Some(path) = full.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if outputs.contains(path) {
+            continue;
+        }
+        let listing: Vec<_> = spec
+            .indexes
+            .iter()
+            .filter(|i| i.files.matches(path))
+            .collect();
+        if listing.is_empty() {
+            continue;
+        }
+        let Some(bytes) = blobs.get(&format!("{rev}:{full}"))? else {
+            continue;
+        };
+        for ix in listing {
+            let (meta, _) = spec.meta(Some(ix), path, &bytes, || Ok(None))?;
+            ids.extend(meta.id);
+        }
+    }
+    Ok(Some(ids))
+}
+
 /// Reads blobs through one `git cat-file --batch` process.
 struct Blobs {
     child: Child,
