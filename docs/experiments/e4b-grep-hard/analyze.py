@@ -13,6 +13,7 @@ Prints Markdown tables.
 
 import json
 import sys
+from pathlib import Path
 from statistics import mean, median
 
 from scipy.stats import binomtest, wilcoxon
@@ -47,7 +48,7 @@ def mcnemar(a: list[bool], b: list[bool]) -> tuple[int, int, float]:
 
 
 def main() -> None:
-    rows = [json.loads(line) for line in open(sys.argv[1])]
+    rows = [json.loads(line) for line in Path(sys.argv[1]).read_text().splitlines()]
     for r in rows:
         r["total_tokens"] = sum(
             r[k] for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",

@@ -76,3 +76,105 @@ This rule was written down before any round-2 session ran.
 3. **Screening.** One `cli` session per prompt, graded as above. The screening sessions are not part of the comparison.
 4. **Selection.** A topic is selected when a screening session of one of its phrasings is wrong. Its prompt is its first wrong phrasing. Topics with both phrasings wrong come first, then test-set order; the first 24 are the set. With fewer than 20, all selected topics run and the shortfall is reported.
 5. **Comparison.** Fresh sessions, as in round 1: 2 per condition per topic, the first condition alternating per topic, 4 at a time. Selection used only screening sessions, so the fresh `cli` and `mcp` sessions are both independent of it. Fresh `cli` sessions may succeed more often than in screening (regression to the mean); that affects the ceiling, not the comparison.
+
+### Screening
+
+132 `cli` sessions, all ended in success: 115 correct, 17 wrong. Rows: [raw/round2-screen.jsonl](raw/round2-screen.jsonl), start order: [raw/round2-screen-order.log](raw/round2-screen-order.log). The wrong prompts (topic-phrasing): K03-1 K08-2 K11-1 K12-1 K12-2 K17-1 K19-1 K20-1 K24-2 K25-1 K28-1 K28-2 K35-1 T02-2 T09-2 T18-1 T19-2. `screen.py select` gives 15 topics, 2 of them with both phrasings wrong: [topics-round2.txt](topics-round2.txt) (K12 1, K28 1, K03 1, K08 2, K11 1, K17 1, K19 1, K20 1, K24 2, K25 1, K35 1, T02 2, T09 2, T18 1, T19 2). That is 5 short of the 20 the task asked for; by the rule, all 15 ran. `cli` ran `lab search` in 84 of the 132 screening sessions: short prompts made it search more than the `need` did.
+
+### Comparison
+
+60 sessions (15 topics × 2 conditions × 2 replicates), all ended in success. Rows: [raw/round2-compare.jsonl](raw/round2-compare.jsonl), start order: [raw/round2-compare-order.log](raw/round2-compare-order.log), full output: [raw/round2-analysis.md](raw/round2-analysis.md).
+
+| Metric | cli | mcp | p |
+| --- | ---: | ---: | ---: |
+| correct | 6/30 | 9/30 | 0.51 (exact McNemar) |
+| strict | 4/30 | 6/30 | 1 |
+| topics with more correct answers | 3 | 5 | 1 (sign test) |
+| main tool calls (mean / median) | 3.0 / 3.0 | 5.1 / 5.0 | 7.9e-05 |
+| main context tokens (mean / median) | 47,303 / 46,679 | 47,250 / 46,902 | 1 |
+| all tokens, all calls (mean / median) | 181,118 / 174,714 | 223,328 / 217,587 | 0.050 |
+| output tokens (mean / median) | 1,211 / 1,152 | 1,132 / 1,045 | 0.79 |
+| cache-creation tokens (mean / median) | 12,272 / 11,651 | 17,214 / 18,741 | 0.0007 |
+| notional cost in USD (mean / median) | 0.156 / 0.148 | 0.202 / 0.207 | 0.0037 |
+| search share (mean / median) | 0.48 / 0.33 | 0.96 / 1.00 | 0.00065 |
+| sessions with a search | 24/30 | 30/30 | |
+
+Paired correct answers, 30 pairs: both 3, `cli` only 3, `mcp` only 6, neither 18. Secondary p-values are Holm-adjusted over 10 tests.
+
+| Topic | cli correct | mcp correct |
+| --- | ---: | ---: |
+| K03 | 0/2 | 0/2 |
+| K08 | 0/2 | 0/2 |
+| K11 | 1/2 | 2/2 |
+| K12 | 0/2 | 1/2 |
+| K17 | 0/2 | 0/2 |
+| K19 | 1/2 | 2/2 |
+| K20 | 0/2 | 1/2 |
+| K24 | 1/2 | 0/2 |
+| K25 | 0/2 | 2/2 |
+| K28 | 0/2 | 0/2 |
+| K35 | 1/2 | 0/2 |
+| T02 | 1/2 | 0/2 |
+| T09 | 0/2 | 0/2 |
+| T18 | 0/2 | 0/2 |
+| T19 | 1/2 | 1/2 |
+
+- **Below ceiling.** Fresh `cli` sessions answered 6 of 30 correctly (20%), so these topics are not at ceiling. Screening did not just catch chance failures.
+- **Correct answers.** `mcp` answered 9 of 30, 3 more than `cli`. The difference is not significant: 6 discordant pairs favour `mcp` and 3 favour `cli`, exact McNemar p=0.51. With 9 discordant pairs, only a split of 9-0 would reach p<0.05 (p=0.004); 8-1 gives p=0.04. By topic, `mcp` did better on 5 topics and worse on 3.
+- **Not search against grep.** `cli` also searched, with `lab search` in 24 of 30 sessions. So round 2 compares the MCP tools with the same search run from the shell, more than it compares search with grep.
+- **Neither correct in 18 pairs.** Seven topics failed in all four sessions. A phrasing can be broader than its `need`: the key grades the record that states the present status, and a phrasing such as a short query may also match older records. Part of these failures may be prompts that the key does not fit, not misses of either delivery.
+- **Cost.** `mcp` took 2.1 more tool calls and 23% more tokens over all calls. Its notional cost was 29% higher, but that figure is confounded: the `cli` comparison sessions started right after the 132 `cli` screening sessions, with the same prompt-cache prefix, so they wrote fewer cache tokens (12,272 against 17,214 per session).
+
+## Conclusion
+
+- On topics where `cli` is at ceiling (round 1), `mcp` does not raise correct answers (43 against 45 of 48, p=0.5).
+- On topics where a `cli` session failed (round 2, 15 topics), `mcp` answered 9 of 30 against 6 of 30. The direction favours `mcp`, but the test is far from significant (p=0.51). E4b does not show that MCP delivery raises correct answers.
+- In both rounds, `mcp` costs about 2 more tool calls and 23–32% more tokens per session, at equal context in the last call. E4's decision (`lab mcp` as default, because it makes agents search) does not change: E4b gives no reason to reverse it, and no correctness gain to add to it.
+- To detect a gain of the size seen (3 in 30), a run needs many more below-ceiling topics than this test set has. With `need` prompts the test set has about 4; with phrasings, 15.
+
+## Cost and usage
+
+All sessions ran on the subscription; the dollar figures are the notional `total_cost_usd`.
+
+| Part | Sessions | Notional USD |
+| --- | ---: | ---: |
+| Pilot (K13) | 2 | 0.45 |
+| Round 1 | 96 | 19.79 |
+| Round 2 screening | 132 | 28.25 |
+| Round 2 comparison | 60 | 10.73 |
+| Total | 290 | 59.22 |
+
+The board's weekly usage reading went from 88% before the pilot to 90% after the last session.
+
+## Limits
+
+- Round 2 has 15 topics, not 20, and 30 pairs. Its power is low; see the conclusion.
+- The pairs within a topic are not independent: both replicates share the topic and the prompt. The McNemar tests treat the 48 and 30 pairs as independent. The topic-level sign test does not, and it agrees (p=1 in both rounds).
+- One model, one archive, one answer key. `correct` is graded by file, from the paths the answer names, as in E4. In K12, all four round-1 sessions cited a record that the key does not judge.
+- Round 2's prompts are the test set's phrasings, whose grades were made for the `need`. See "Neither correct in 18 pairs".
+- Round 2's cost is confounded by the screening run before it (see "Cost" above). Round 1's is not: each condition started first in 12 sessions.
+- The start position comes from `order.log`. Sessions of one topic start within the same second, so the position is the order in which `xargs` started them.
+- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool at `research-factory/e4b-grep-hard/e4b-transcripts.tgz` (pilot, both rounds and the screening).
+
+## Reproduce
+
+```sh
+# Two scratch copies of masters with only the `lab brief` hook and this repo's skill;
+# masters-cli without .mcp.json, masters-mcp with it.
+export E4B_MASTERS=<folder with masters-cli and masters-mcp> \
+  E4B_TESTSET=<masters>/docs/process/archive-search-testset-2026-11-12 E4B_LAB=<dir of lab>
+# Round 1
+uv run --no-project python select_topics.py "$E4B_MASTERS/masters-cli" "$E4B_TESTSET" 24 > topics.txt
+uv run --no-project python order.py topics.txt | E4B_OUT=out xargs -P4 -L1 sh run_session.sh
+uv run --no-project python measure.py "$E4B_TESTSET" out > raw/round1-need.jsonl
+uv run --no-project --with scipy python analyze.py raw/round1-need.jsonl
+# Round 2
+uv run --no-project python screen.py queue "$E4B_TESTSET" | E4B_OUT=screen xargs -P4 -L1 sh run_session.sh
+uv run --no-project python measure.py "$E4B_TESTSET" screen > raw/round2-screen.jsonl
+uv run --no-project python screen.py select "$E4B_TESTSET" raw/round2-screen.jsonl 24 > topics-round2.txt
+uv run --no-project python order.py topics-round2.txt | E4B_OUT=out2 xargs -P4 -L1 sh run_session.sh
+uv run --no-project python measure.py "$E4B_TESTSET" out2 > raw/round2-compare.jsonl
+uv run --no-project --with scipy python analyze.py raw/round2-compare.jsonl
+```
+
+The runs went in batches of 6 topics (44 prompts for screening), each after a check that the weekly usage was below 95%.

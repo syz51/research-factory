@@ -66,6 +66,7 @@ In real masters sessions with `lab mcp` configured, at least 0.6 of archive look
 ## Limits
 
 - Ceiling: correctness was near ceiling in every condition, so the experiment cannot show a gain in correct answers. A harder topic set, or an archive where grep fails more often, is needed for that.
+  [E4b](../e4b-grep-hard/README.md) (research-factory-264) reran `cli` against `mcp` on topics where a `cli` session failed: `mcp` answered 9 of 30 against 6 of 30, exact McNemar p=0.51. No significant gain.
 - One session per topic and condition, on one model; the 24 topics come from one archive.
 - `correct` is graded by file, not by passage, from the paths that the answer names. A path counts when it is the unique suffix of a judged path. Answers that name the right record only in prose are graded wrong.
 - `strict` counts a grade-0 file that the answer cites as context as an error, so it is a lower bound.

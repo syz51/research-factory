@@ -13,8 +13,9 @@ pick a batch of topics.
 """
 
 import sys
+from pathlib import Path
 
-topics = [line.split() for line in open(sys.argv[1]) if line.strip()]
+topics = [line.split() for line in Path(sys.argv[1]).read_text().splitlines() if line.strip()]
 first = int(sys.argv[2]) if len(sys.argv) > 2 else 1
 last = int(sys.argv[3]) if len(sys.argv) > 3 else len(topics)
 for i, (topic, *phrasing) in enumerate(topics, 1):

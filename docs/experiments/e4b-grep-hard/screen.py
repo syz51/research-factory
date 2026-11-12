@@ -30,7 +30,7 @@ def main() -> None:
             for k in (1, 2):
                 print("cli", t, k, k)
         return
-    rows = [json.loads(line) for line in open(sys.argv[3])]
+    rows = [json.loads(line) for line in Path(sys.argv[3]).read_text().splitlines()]
     n = int(sys.argv[4]) if len(sys.argv) > 4 else 24
     wrong = {(r["topic"], r["rep"]) for r in rows if r["condition"] == "cli" and not r["correct"]}
     done = {(r["topic"], r["rep"]) for r in rows if r["condition"] == "cli"}

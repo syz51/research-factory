@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "e4-delivery"))
-from measure import load_grades, session  # noqa: E402
+from measure import load_grades, session
 
 TOKENS = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
 
