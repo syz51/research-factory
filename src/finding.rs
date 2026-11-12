@@ -149,7 +149,7 @@ pub fn fingerprints<'a>(findings: impl IntoIterator<Item = &'a Finding>) -> Vec<
 /// `docs/a.md:42` → `docs/a.md`. Only a subject whose part before the colon
 /// looks like a path (it contains `/` or `.`) loses a trailing `:line`,
 /// `:line:column` or `:start-end`, so `claude:<id>` or `ref:177` stay whole.
-fn without_line(subject: &str) -> &str {
+pub(crate) fn without_line(subject: &str) -> &str {
     let mut s = subject;
     for _ in 0..2 {
         let Some((head, tail)) = s.rsplit_once(':') else {

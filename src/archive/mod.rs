@@ -776,6 +776,54 @@ fn without_id<'t>(title: &'t str, id: Option<&str>) -> &'t str {
     }
 }
 
+/// Those of `files`, relative to the project root, that are sealed at
+/// `commit`, each with the last line of its sealed text in the work tree: the
+/// file matches `sealed`, or its status there is one of `sealed_statuses`.
+/// Text appended after that line is not sealed yet. A file whose body no
+/// longer starts with the sealed body, which the seal check reports, is
+/// sealed whole. Empty without `[lab.archive]`.
+pub fn sealed_at(
+    project: &Project,
+    commit: &str,
+    files: &BTreeSet<String>,
+) -> Result<BTreeMap<String, usize>, String> {
+    if project.lab.archive.is_none() {
+        return Ok(BTreeMap::new());
+    }
+    let spec = Spec::new(project)?;
+    let lines = |b: &[u8]| b.iter().filter(|&&c| c == b'\n').count();
+    let mut out = BTreeMap::new();
+    for file in files {
+        let blob = std::process::Command::new("git")
+            .args(["cat-file", "blob", &format!("{commit}:./{file}")])
+            .current_dir(spec.root())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .map_err(|e| format!("git cat-file: {e}"))?;
+        if !blob.status.success() {
+            continue;
+        }
+        let sealed = spec.sealed.matches(file)
+            || front::status_of(&blob.stdout)
+                .is_some_and(|s| spec.cfg.sealed_statuses.contains(&s));
+        if !sealed {
+            continue;
+        }
+        let before = front::sealed_body(&blob.stdout);
+        let now = read_optional(&spec.root().join(file))?.unwrap_or_default();
+        let body = front::sealed_body(&now);
+        let last = if body.starts_with(before) {
+            lines(&now[..now.len() - body.len()])
+                + lines(before)
+                + usize::from(!before.ends_with(b"\n") && !before.is_empty())
+        } else {
+            usize::MAX
+        };
+        out.insert(file.clone(), last);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::without_id;
