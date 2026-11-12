@@ -90,7 +90,7 @@ pub fn fence_closes(line: &str, (c, n): (u8, usize)) -> bool {
 
 /// `line` with code spans and HTML comments replaced by spaces and backslash
 /// escapes by `x`, byte for byte, so that positions still index into `line`.
-fn mask(line: &str, in_comment: &mut bool) -> Vec<u8> {
+pub(super) fn mask(line: &str, in_comment: &mut bool) -> Vec<u8> {
     let b = line.as_bytes();
     let mut out = b.to_vec();
     let blank = |out: &mut Vec<u8>, from: usize, to: usize| out[from..to].fill(b' ');
@@ -279,7 +279,7 @@ fn reference_definition(line: &str, m: &[u8]) -> Option<String> {
 
 /// `line` without the parts inside HTML comments, given whether a comment
 /// was open when the line began.
-fn strip_comments(line: &str, mut in_comment: bool) -> String {
+pub(super) fn strip_comments(line: &str, mut in_comment: bool) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
     loop {

@@ -209,6 +209,9 @@ pub struct ArchiveConfig {
     /// Broken links kept on purpose in the sealed text of append-only files.
     #[serde(default)]
     pub kept_link: Vec<KeptLinkSpec>,
+    /// Records of board tasks must name a task for each open item.
+    #[serde(default)]
+    pub open_items: Option<OpenItemsSpec>,
     /// The archive model: 1 (default), or 2 for the rules and commands of
     /// docs/interfaces.md "Archive model 2". Every key below needs `model = 2`.
     #[serde(default = "default_model")]
@@ -367,6 +370,34 @@ fn default_current() -> Vec<String> {
 
 fn default_historical() -> Vec<String> {
     vec!["historical".into()]
+}
+
+/// `[lab.archive.open_items]`: in each scanned Markdown file with a `task`
+/// front-matter field, dated on or after `since`, every list item under one
+/// of `headings` names a board task (`<board>-<number>`) or says
+/// `no action:` and why.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenItemsSpec {
+    /// The first day checked (`YYYY-MM-DD`); older records are not checked.
+    pub since: String,
+    /// The board names a task id may start with.
+    pub boards: Vec<String>,
+    /// The section headings whose list items are open items.
+    #[serde(default = "default_open_item_headings")]
+    pub headings: Vec<String>,
+}
+
+pub(crate) fn default_open_item_headings() -> Vec<String> {
+    [
+        "Open questions",
+        "Limits",
+        "Follow-ups",
+        "Next steps",
+        "Not done",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 /// `[[lab.archive.kept_link]]`: a link in the sealed text of `file` whose
