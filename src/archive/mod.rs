@@ -730,16 +730,11 @@ pub fn next(
 ) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
     let id = if reserve || peek || spec.cfg.model >= 2 {
-        reserve::reserve(project, config, prefix, width, !peek)?
+        reserve::reserve(&spec, config, prefix, width, !peek)?
     } else {
-        let found = spec.walk(&[])?;
-        let records = spec.records(&found, &mut Texts::new())?;
-        let elsewhere = reserve::elsewhere(&spec, config)?;
-        let ids = records
-            .iter()
-            .filter_map(|r| r.meta.id.as_deref())
-            .chain(elsewhere.iter().map(String::as_str));
-        index::next_id(ids, prefix, width)
+        let mut ids = reserve::ids(&spec)?;
+        ids.extend(reserve::elsewhere(&spec, config)?);
+        index::next_id(ids.iter().map(String::as_str), prefix, width)
     };
     match id {
         Some(id) => {

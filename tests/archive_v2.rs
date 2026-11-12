@@ -543,6 +543,53 @@ fn next_counts_the_default_branch_and_the_other_worktrees() {
 }
 
 #[test]
+fn next_counts_elsewhere_for_a_project_below_the_top_and_skips_a_dangling_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("main");
+    let p = d.join("sub");
+    write(&d, ".gitignore", ".research/\n");
+    write(&p, "research.toml", MODEL_1);
+    write(&p, D001, "# First\n");
+    // A file of the same name above the project is no record of it.
+    write(&d, "docs/decisions/D050-outside.md", "# Outside\n");
+    git(&d, &["init", "-q", "-b", "main"]);
+    commit(&d, "start");
+    let wt = dir.path().join("wt");
+    git(
+        &d,
+        &["worktree", "add", "-q", "-b", "wt", wt.to_str().unwrap()],
+    );
+    let w = wt.join("sub");
+    let next = |dir: &Path| {
+        let out = lab(dir, &["archive", "next", "D"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        (stdout(&out).trim().to_string(), stderr(&out))
+    };
+    assert_eq!(next(&w).0, "D002");
+    write(&p, "docs/decisions/D004-merged.md", "# Merged\n");
+    commit(&d, "merge D004");
+    git(&d, &["switch", "-q", "-c", "old", "HEAD~1"]);
+    assert_eq!(next(&w).0, "D005", "from the default branch");
+    write(&p, "docs/decisions/D008-draft.md", "# Draft\n");
+    assert_eq!(next(&w).0, "D009", "from the main checkout's work tree");
+    // `origin/HEAD` that names a pruned branch is skipped with a note.
+    git(
+        &d,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gone",
+        ],
+    );
+    let (id, note) = next(&w);
+    assert_eq!(id, "D009");
+    assert!(
+        note.contains("the default branch are not counted") && note.contains("origin/gone"),
+        "{note}"
+    );
+}
+
+#[test]
 fn metadata_rules_report_ids_summaries_stray_files_and_page_groups() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

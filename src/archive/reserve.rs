@@ -36,9 +36,8 @@ struct Series {
     width: usize,
 }
 
-/// The record ids of `project`.
-fn ids(project: &Project) -> Result<Vec<String>, String> {
-    let spec = Spec::new(project)?;
+/// The record ids in the work tree of `spec`'s project.
+pub(super) fn ids(spec: &Spec) -> Result<Vec<String>, String> {
     let found = spec.walk(&[])?;
     let records = spec.records(&found, &mut Texts::new())?;
     Ok(records.into_iter().filter_map(|r| r.meta.id).collect())
@@ -53,7 +52,12 @@ pub(super) fn elsewhere(spec: &Spec, config: Option<&Path>) -> Result<Vec<String
     let root = &spec.project.root;
     let mut all = Vec::new();
     if let Some(branch) = crate::worktree::default_branch(root)? {
-        all.extend(gitseal::ids_at(spec, &branch)?);
+        match gitseal::ids_at(spec, &branch)? {
+            Some(ids) => all.extend(ids),
+            None => eprintln!(
+                "note: the records of the default branch are not counted: `{branch}` names no commit"
+            ),
+        }
     }
     let name = config
         .and_then(Path::file_name)
@@ -65,7 +69,7 @@ pub(super) fn elsewhere(spec: &Spec, config: Option<&Path>) -> Result<Vec<String
         }
         let read = Project::discover(&dir, Some(&file)).and_then(|p| {
             if p.lab.archive.is_some() {
-                ids(&p)
+                ids(&Spec::new(&p)?)
             } else {
                 Ok(Vec::new())
             }
@@ -100,17 +104,17 @@ fn lock(path: &Path) -> Result<File, String> {
 /// reserved when `record` is set; `None` when no id has the prefix and no
 /// `width` starts a series.
 pub(super) fn reserve(
-    project: &Project,
+    spec: &Spec,
     config: Option<&Path>,
     prefix: &str,
     width: Option<usize>,
     record: bool,
 ) -> Result<Option<String>, String> {
-    let spec = Spec::new(project)?;
-    let mut all = ids(project)?;
+    let project = spec.project;
+    let mut all = ids(spec)?;
     // Other worktrees, the main checkout among them, and the default branch
     // can hold records that this worktree's branch lacks.
-    all.extend(elsewhere(&spec, config)?);
+    all.extend(elsewhere(spec, config)?);
     let main = match checkout(project, config)? {
         Checkout::This => None,
         Checkout::Main(main) => Some(main),
