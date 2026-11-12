@@ -734,7 +734,11 @@ pub fn next(
     } else {
         let found = spec.walk(&[])?;
         let records = spec.records(&found, &mut Texts::new())?;
-        let ids = records.iter().filter_map(|r| r.meta.id.as_deref());
+        let elsewhere = reserve::elsewhere(&spec, config)?;
+        let ids = records
+            .iter()
+            .filter_map(|r| r.meta.id.as_deref())
+            .chain(elsewhere.iter().map(String::as_str));
         index::next_id(ids, prefix, width)
     };
     match id {

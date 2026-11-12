@@ -491,6 +491,58 @@ fn next_reserves_a_number_across_worktrees() {
 }
 
 #[test]
+fn next_counts_the_default_branch_and_the_other_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("main");
+    write(&d, ".gitignore", ".research/\n");
+    write(&d, "research.toml", MODEL_1);
+    write(&d, D001, "# First\n");
+    git(&d, &["init", "-q", "-b", "main"]);
+    commit(&d, "start");
+    let add = |name: &str| {
+        let wt = dir.path().join(name);
+        git(
+            &d,
+            &["worktree", "add", "-q", "-b", name, wt.to_str().unwrap()],
+        );
+        wt
+    };
+    let wt = add("wt");
+    let next = |dir: &Path, args: &[&str]| {
+        let mut all = vec!["archive", "next", "D"];
+        all.extend_from_slice(args);
+        let out = lab(dir, &all);
+        assert!(out.status.success(), "{}", stderr(&out));
+        (stdout(&out).trim().to_string(), stderr(&out))
+    };
+    assert_eq!(next(&wt, &[]).0, "D002");
+    // A record merged into the default branch counts, though neither work
+    // tree has it.
+    write(&d, "docs/decisions/D007-merged.md", "# Merged\n");
+    commit(&d, "merge D007");
+    git(&d, &["switch", "-q", "-c", "old", "HEAD~1"]);
+    assert!(!d.join("docs/decisions/D007-merged.md").exists());
+    assert_eq!(next(&wt, &[]).0, "D008");
+    assert_eq!(next(&wt, &["--peek"]).0, "D008");
+    // So does a record that another worktree has not committed yet.
+    let other = add("other");
+    write(&other, "docs/decisions/D011-draft.md", "# Draft\n");
+    assert_eq!(next(&wt, &[]).0, "D012");
+    assert_eq!(next(&wt, &["--peek"]).0, "D012");
+    assert_eq!(next(&d, &[]).0, "D012");
+    // A worktree whose project does not load is skipped with a note.
+    let broken = add("broken");
+    write(&broken, "research.toml", "[lab.archive\n");
+    write(&broken, "docs/decisions/D020-lost.md", "# Lost\n");
+    let (id, note) = next(&wt, &[]);
+    assert_eq!(id, "D012");
+    assert!(
+        note.contains("note: the records of") && note.contains("broken"),
+        "{note}"
+    );
+}
+
+#[test]
 fn metadata_rules_report_ids_summaries_stray_files_and_page_groups() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
