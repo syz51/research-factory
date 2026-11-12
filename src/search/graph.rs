@@ -208,20 +208,28 @@ pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM edges WHERE file_id = ?1", [file])?;
     let path: String =
         tx.query_row("SELECT path FROM files WHERE id = ?1", [file], |r| r.get(0))?;
-    let version: i64 = tx.query_row(
-        "SELECT coalesce(max(version), 0) + 1 FROM old_anchors WHERE path = ?1",
-        [&path],
+    keep_anchors(tx, &path, "main.units", file)
+}
+
+/// Stores the units of `file` in the table `units` (this index's, or those
+/// of the index a rebuild replaces) as the next version of `path`'s anchors.
+fn keep_anchors(conn: &Connection, path: &str, units: &str, file: i64) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row(
+        "SELECT coalesce(max(version), 0) + 1 FROM main.old_anchors WHERE path = ?1",
+        [path],
         |r| r.get(0),
     )?;
     // A range and text that an earlier version also had moves to this one.
-    tx.execute(
-        "INSERT INTO old_anchors (path, start_line, end_line, hash, version) \
-         SELECT ?2, start_line, end_line, hash, ?3 FROM units WHERE file_id = ?1 \
-         ON CONFLICT DO UPDATE SET version = excluded.version",
+    conn.execute(
+        &format!(
+            "INSERT INTO main.old_anchors (path, start_line, end_line, hash, version) \
+             SELECT ?2, start_line, end_line, hash, ?3 FROM {units} WHERE file_id = ?1 \
+             ON CONFLICT DO UPDATE SET version = excluded.version"
+        ),
         params![file, path, version],
     )?;
-    tx.execute(
-        "DELETE FROM old_anchors WHERE path = ?1 AND version <= ?2",
+    conn.execute(
+        "DELETE FROM main.old_anchors WHERE path = ?1 AND version <= ?2",
         params![path, version - OLD_VERSIONS],
     )?;
     Ok(())
@@ -230,12 +238,68 @@ pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
 /// Drops the anchors of each path that no source of any scope holds. It runs
 /// once a refresh has indexed every change, so that a path that moved from
 /// one scope to another keeps its anchors.
-pub fn drop_orphan_anchors(tx: &Transaction) -> rusqlite::Result<()> {
-    tx.execute(
-        "DELETE FROM old_anchors WHERE path NOT IN (SELECT path FROM files)",
+pub fn drop_orphan_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM main.old_anchors WHERE path NOT IN (SELECT path FROM main.files)",
         [],
     )?;
     Ok(())
+}
+
+/// The columns of `old_anchors` that [`carry_anchors`] can copy.
+const ANCHOR_COLUMNS: &[&str] = &["path", "start_line", "end_line", "hash", "version"];
+
+/// The columns of `table` in the attached index `old`, in order.
+fn old_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("SELECT name FROM pragma_table_info(?1, 'old') ORDER BY cid")?
+        .query_map([table], |r| r.get(0))?
+        .collect()
+}
+
+/// Carries the anchors of the index a rebuild replaces, attached as `old`,
+/// into the new one, whose `old_anchors` is still empty: the anchors it kept,
+/// then, as the next version, the units of each file whose text changed
+/// since. It copies nothing when the old `old_anchors` has other columns, and
+/// skips the changed files when the old `files` or `units` lack a column it
+/// reads. On an error the new index keeps no anchor: the build's journal is
+/// off, so no rollback could undo a part copy.
+pub fn carry_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    let copied = copy_anchors(conn);
+    if copied.is_err() {
+        conn.execute("DELETE FROM main.old_anchors", [])?;
+    }
+    copied
+}
+
+fn copy_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    if old_columns(conn, "old_anchors")? != ANCHOR_COLUMNS {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO main.old_anchors (path, start_line, end_line, hash, version) \
+         SELECT path, start_line, end_line, hash, version FROM old.old_anchors",
+        [],
+    )?;
+    let has = |table, wanted: &[&str]| -> rusqlite::Result<bool> {
+        let columns = old_columns(conn, table)?;
+        Ok(wanted.iter().all(|w| columns.iter().any(|c| c == w)))
+    };
+    if has("files", &["id", "scope", "path", "hash"])?
+        && has("units", &["file_id", "start_line", "end_line", "hash"])?
+    {
+        let changed: Vec<(i64, String)> = conn
+            .prepare(
+                "SELECT o.id, o.path FROM old.files o \
+                 JOIN main.files n ON n.scope = o.scope AND n.path = o.path \
+                 WHERE n.hash IS NOT o.hash ORDER BY o.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (file, path) in changed {
+            keep_anchors(conn, &path, "old.units", file)?;
+        }
+    }
+    drop_orphan_anchors(conn)
 }
 
 /// The citation edges between papers, read from the structure sidecars of

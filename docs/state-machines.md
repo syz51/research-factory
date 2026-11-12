@@ -168,7 +168,7 @@ discovered ─► parsed ─► indexed (lexical) ─► embedded ─► live
 
 A unit of a superseded or withdrawn record stays `live` and carries that status. Ranking lowers it and the output labels it.
 A unit never outlives its source: a deleted file removes its units in the same refresh.
-A replaced unit leaves its anchor (path, line range and content hash) in the index, so `lab open` finds the text an old anchor held. The index keeps these anchors for a file's last 10 versions. A deleted source drops them in the same refresh, and a rebuild starts without them (since lab 0.20.1, research-factory-266).
+A replaced unit leaves its anchor (path, line range and content hash) in the index, so `lab open` finds the text an old anchor held. The index keeps these anchors for a file's last 10 versions. A deleted source drops them in the same refresh (since lab 0.20.1, research-factory-266). A rebuild carries them over from the index it replaces, and keeps that index's units of each file that changed since its last refresh as the file's next version. It starts without them when the replaced index has no `old_anchors` table with the same columns, and keeps no changed units when that index's `files` or `units` table lacks a column it reads. It also starts without them when that index does not read, and then it prints a note on stderr; the query is not partial (since lab 0.21.1, research-factory-326).
 
 ### 3.3 Query
 

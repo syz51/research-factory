@@ -342,6 +342,12 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
         conn.execute_batch(SCHEMA)?;
         conn.execute_batch(graph::SCHEMA)?;
+        // The index this build replaces, for the anchors it kept.
+        let old = db_path(ctx);
+        // ATTACH would create a missing file; the lock keeps it from going.
+        let attached = old
+            .exists()
+            .then(|| conn.execute("ATTACH DATABASE ?1 AS old", [old.to_string_lossy()]));
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2), ('build', ?3)",
@@ -359,6 +365,14 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         }
         if let Some(papers) = graph::papers_changed(ctx, &tx)? {
             graph::write_papers(&tx, &papers)?;
+        }
+        // A build may replace a corrupt file: when its anchors do not read,
+        // the new index starts without them.
+        let carried = attached.map(|attached| attached.and_then(|_| graph::carry_anchors(&tx)));
+        // The anchors do not change what a query finds, so their loss is no
+        // partial result.
+        if let Some(Err(e)) = carried {
+            eprintln!("lab: the anchors of the replaced index were not carried over: {e}");
         }
         set_built(&tx, &ctx.scopes.iter().copied().collect())?;
         sync_words(&tx)?;
