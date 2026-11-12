@@ -66,6 +66,29 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 `agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab retro`, `lab brief` and `lab loop` count a rule's agent findings once per session tree: a session without a `parent_id` together with every session below it, within one `source`. A finding whose `subject` is not a session in the file counts on its own. They read the sessions file only when there are agent findings, and `lab retro --agent-findings FILE` reads the `sessions.jsonl` next to FILE. Without a readable sessions file each distinct finding counts, and they say why. `lab evaluate` also reads `source`, `id`, `role`, `start` and `parent_id` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). Within a stratum, the sessions below one root session (following `parent_id` up, within one `source`) form one session group, on the root's side of the adoption date; a session without a `parent_id` is a group of its own. It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out. Since lab 0.9.10, in a linked git worktree that lacks the configured findings or sessions file, which git ignores there, these commands read the main checkout's file instead (`git worktree list` names the main checkout first), and say so on stderr.
 
+**Archive lookups.** Since `agentprof` 0.3.0, each session record has an `archive` object that counts how the session looked up the archive. `agentprof` takes the archive root from the first of these that is set:
+
+1. `--archive-root DIR` on the command line.
+2. `[agentprof] archive_roots = [..]` in `research.toml`.
+3. The directory of `[lab.archive] start`. This is the only `[lab]` key `agentprof` reads.
+
+The object has eight fields. A lesson names each as a metric path:
+
+| Metric path | Counts |
+| --- | --- |
+| `agentprof:session.archive.searches` | archive searches |
+| `agentprof:session.archive.opens` | archive records opened by id |
+| `agentprof:session.archive.related` | graph lookups |
+| `agentprof:session.archive.no_hit_searches` | searches that found nothing |
+| `agentprof:session.archive.greps` | grep runs under the archive root |
+| `agentprof:session.archive.reads` | file reads under the archive root |
+| `agentprof:session.archive.search_share` | share of lookups that are searches |
+| `agentprof:session.archive.grep_share` | share of lookups that are greps |
+
+`greps`, `reads`, `search_share` and `grep_share` are `null` when no archive root is set. `agentprof` counts a search that exits 1 as a no-hit search, not as a tool error. It counts by name: `lab search`, `lab open`, `lab related` and `lab archive find` on the command line, and the MCP tools `archive_search`, `archive_open` and `archive_related`. A new lookup command or tool must keep these names, or `agentprof` must learn the new name first.
+
+Lab reads a metric through a lesson: `lab lesson add --metric agentprof:session.archive.<field>` names it, and `lab evaluate` measures it. `lab evaluate` treats a lower value as better, so a lesson about archive search measures `grep_share` or `greps`, not `search_share`.
+
 ## 6. Archive records and seals: front matter and `rf.archive-seal/1`
 
 `lab` owns these. A record is a Markdown file that a `[[lab.archive.index]]` includes. It may start with YAML front matter: a first line `---`, YAML, and a line `---`. Everything after it is the record's body. Every field is optional, unknown fields are ignored, and a single string is accepted where a list is expected.
