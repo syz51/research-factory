@@ -227,10 +227,27 @@ fn retrieve(
             unknown.push(i);
         }
     }
+    // The status filter is part of each retrieval, so that it applies before
+    // the cut to the best candidates.
+    let with_status = |column: &str| {
+        if statuses.is_empty() {
+            return String::new();
+        }
+        let list: Vec<String> = statuses
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect();
+        format!(
+            " AND {column} IN (SELECT u.id FROM units u JOIN files f ON f.id = u.file_id \
+             WHERE f.status IN ({}))",
+            list.join(", ")
+        )
+    };
     // Words: the units with every known term, then those with any.
     let ranked = format!(
         "SELECT rowid, rank FROM units_fts WHERE units_fts MATCH ?1 \
-         AND rank MATCH 'bm25({WEIGHTS})' ORDER BY rank LIMIT {CANDIDATES}"
+         AND rank MATCH 'bm25({WEIGHTS})'{} ORDER BY rank LIMIT {CANDIDATES}",
+        with_status("rowid")
     );
     let mut lexical = conn.prepare(&ranked)?;
     let mut joins = vec![" OR "];
@@ -267,21 +284,23 @@ fn retrieve(
         } else {
             Vec::new()
         };
-        if words.is_empty() {
-            continue;
-        }
-        let any = words
-            .iter()
-            .map(|w| format!("\"{}\"", w.replace('"', "")))
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        let rows = lexical.query_map([any], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)))?;
-        for row in rows {
-            let (unit, rank) = row?;
-            let entry = found.entry(unit).or_default();
-            // A part of a word counts less than the word.
-            entry.1 -= rank * PART_WEIGHT;
-            entry.2 |= 1 << i;
+        // The words are stems as the index holds them. A `MATCH` would stem
+        // them a second time, so read their units from the vocabulary.
+        let mut holders = conn.prepare_cached(&format!(
+            "SELECT doc, count(*) FROM units_inst WHERE term = ?1{} \
+             GROUP BY doc ORDER BY 2 DESC LIMIT {CANDIDATES}",
+            with_status("doc")
+        ))?;
+        for word in &words {
+            let rows =
+                holders.query_map([word], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))?;
+            for row in rows {
+                let (unit, count) = row?;
+                let entry = found.entry(unit).or_default();
+                // A part of a word counts less than the word.
+                entry.1 += PART_WEIGHT * (1.0 + (count as f64).ln());
+                entry.2 |= 1 << i;
+            }
         }
     }
     // An exact record id: every retrieved unit of the record, or its first unit.
@@ -291,7 +310,9 @@ fn retrieve(
             "SELECT f.id, (SELECT min(u.id) FROM units u WHERE u.file_id = f.id) \
              FROM files f WHERE f.record_id = ?1 COLLATE NOCASE",
         )?;
-        let rows = stmt.query_map([word], |r| {
+        // `D002,` and `H158?` name the ids D002 and H158.
+        let id = word.trim_matches(|c: char| !c.is_alphanumeric());
+        let rows = stmt.query_map([id], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
         })?;
         for row in rows {
@@ -390,7 +411,8 @@ pub fn search(
     phrasings: &[Phrasing],
     opts: &Options,
 ) -> Result<Outcome, Fault> {
-    let mut best: HashMap<i64, Candidate> = HashMap::new();
+    // Unit id to the rank and the candidate of the phrasing that ranks it best.
+    let mut best: HashMap<i64, (usize, Candidate)> = HashMap::new();
     let mut unknown: Vec<Unknown> = Vec::new();
     for (i, phrasing) in phrasings.iter().enumerate() {
         let (candidates, absent) = retrieve(conn, ctx, i, phrasing, opts.statuses)?;
@@ -398,13 +420,20 @@ pub fn search(
             let share = 1.0 / (RRF_K + rank as f64 + 1.0);
             // The phrasing that ranks a unit best describes it; every phrasing adds its share.
             match best.get_mut(&c.unit) {
-                Some(seen) => {
-                    seen.fused += share;
-                    seen.exact_id |= c.exact_id;
+                Some((seen_rank, seen)) => {
+                    c.fused = seen.fused + share;
+                    c.exact_id |= seen.exact_id;
+                    if rank < *seen_rank {
+                        *seen_rank = rank;
+                        *seen = c;
+                    } else {
+                        seen.fused = c.fused;
+                        seen.exact_id = c.exact_id;
+                    }
                 }
                 None => {
                     c.fused = share;
-                    best.insert(c.unit, c);
+                    best.insert(c.unit, (rank, c));
                 }
             }
         }
@@ -420,7 +449,7 @@ pub fn search(
             }
         }
     }
-    let mut ranked: Vec<Candidate> = best.into_values().collect();
+    let mut ranked: Vec<Candidate> = best.into_values().map(|(_, c)| c).collect();
     ranked.sort_by(|a, b| {
         b.exact_id
             .cmp(&a.exact_id)
@@ -486,8 +515,9 @@ pub fn search(
 /// Moves each record that is no longer in force below the successor it names,
 /// when both are hits and the query did not ask for it by id.
 fn below_successors(groups: &mut Vec<Vec<Candidate>>) {
-    // Each move puts one record below a later one, so this many passes suffice.
-    for _ in 0..groups.len() {
+    // A chain of n records needs fewer than n * n moves; the bound also ends
+    // records that name each other.
+    for _ in 0..groups.len() * groups.len() {
         let moved = (0..groups.len()).find_map(|i| {
             let old = &groups[i][0];
             if old.exact_id || !old.record.inactive {

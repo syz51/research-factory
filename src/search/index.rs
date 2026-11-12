@@ -64,6 +64,7 @@ CREATE VIRTUAL TABLE units_fts USING fts5(
     tokenize = 'porter unicode61 remove_diacritics 2'
 );
 CREATE VIRTUAL TABLE units_vocab USING fts5vocab(units_fts, 'row');
+CREATE VIRTUAL TABLE units_inst USING fts5vocab(units_fts, 'instance');
 -- The words of `units_fts`, for a query word that is only part of a word.
 CREATE VIRTUAL TABLE words_tri USING fts5(term, tokenize = 'trigram');
 ";
@@ -71,6 +72,8 @@ CREATE VIRTUAL TABLE words_tri USING fts5(term, tokenize = 'trigram');
 /// A failure of the index: `Corrupt` is answered by a rebuild.
 #[derive(Debug)]
 pub enum Fault {
+    /// Another process replaced the index file after this one opened it.
+    Replaced,
     Corrupt(String),
     Other(String),
 }
@@ -97,6 +100,7 @@ impl From<Fault> for String {
         match f {
             Fault::Corrupt(e) => format!("search index is corrupt: {e}"),
             Fault::Other(e) => e,
+            Fault::Replaced => "another process replaced the search index".into(),
         }
     }
 }
@@ -137,10 +141,12 @@ pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
         std::fs::write(&ignore, "*\n").map_err(|e| format!("{}: {e}", ignore.display()))?;
     }
     let mut force = rebuild;
-    for _ in 0..2 {
+    for _ in 0..3 {
         if !force && let Some(mut conn) = open_current(ctx)? {
             match refresh(ctx, &mut conn) {
                 Ok(stale) => return Ok(Opened { conn, stale }),
+                // Open the file that replaced it.
+                Err(Fault::Replaced) => continue,
                 Err(Fault::Corrupt(_)) => force = true,
                 Err(Fault::Other(e)) => return Err(e),
             }
@@ -239,6 +245,21 @@ fn build(ctx: &Context, force: bool) -> Result<(), String> {
     built
 }
 
+/// Names one build of the index file, so that a writer can tell that the
+/// file it opened is still the one at the index path.
+fn build_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn build_of(conn: &Connection) -> rusqlite::Result<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = 'build'", [], |r| {
+        r.get(0)
+    })
+}
+
 fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
     let run = || -> Result<(), Fault> {
         let mut conn = Connection::open(tmp)?;
@@ -247,8 +268,8 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
         conn.execute_batch(SCHEMA)?;
         let tx = conn.transaction()?;
         tx.execute(
-            "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2)",
-            params![SCHEMA_VERSION, ctx.fingerprint],
+            "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2), ('build', ?3)",
+            params![SCHEMA_VERSION, ctx.fingerprint, build_id()],
         )?;
         for source in sources(ctx)? {
             index_file(ctx, &tx, &source, None)?;
@@ -321,6 +342,14 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault
             "another process is updating the index; {pending} changed file(s) are not in it yet"
         )));
     };
+    // A build may have renamed a new file over the one this connection
+    // holds, between its opening and the lock. A write would then go to the
+    // unlinked file and leave a journal beside the new one.
+    let at_path = Connection::open_with_flags(db_path(ctx), OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|current| build_of(&current));
+    if at_path.ok() != Some(build_of(conn)?) {
+        return Err(Fault::Replaced);
+    }
     let budget = Duration::from_millis(ctx.cfg.refresh_budget_ms);
     let started = Instant::now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -462,7 +491,10 @@ fn index_file(
         });
     }
     for u in sections {
-        let indexed = format!("{ids}\n{title}\n{}\n{}", u.heading, u.body);
+        let indexed = format!(
+            "{ids}\n{title}\n{summary}\n{}\n{}\n{}",
+            u.heading, source.path, u.body
+        );
         let unit_hash = hex(&Sha256::digest(indexed.as_bytes())[..16]);
         unit.execute(params![
             file_id,

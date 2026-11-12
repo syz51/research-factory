@@ -574,3 +574,116 @@ fn a_stale_index_answers_from_its_last_state_and_says_so() {
     write(d, "research.toml", CONFIG);
     assert_eq!(json(d, &["bilby"])["state"], "hits");
 }
+
+#[test]
+fn several_phrasings_fuse_and_each_hit_is_described_by_its_best_phrasing() {
+    let dir = fixture();
+    let d = dir.path();
+    write(
+        d,
+        "docs/notes/both.md",
+        "# Both\n\nThe gamma delta unit also says alpha once.\n",
+    );
+    write(
+        d,
+        "docs/notes/first.md",
+        "# First\n\nAlpha beta, alpha beta.\n",
+    );
+    let report = json(d, &["alpha beta", "gamma delta"]);
+    assert_eq!(report["query"].as_array().unwrap().len(), 2);
+    let found = paths(&report);
+    assert!(found.contains(&"docs/notes/first.md"), "{found:?}");
+    let at = found
+        .iter()
+        .position(|p| *p == "docs/notes/both.md")
+        .unwrap();
+    // The second phrasing holds every word of this unit; the first lacks `beta`.
+    assert!(
+        report["hits"][at].get("missing").is_none(),
+        "{}",
+        report["hits"][at]
+    );
+    assert!(
+        report["hits"][at]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("gamma delta")
+    );
+}
+
+#[test]
+fn a_part_of_a_word_finds_a_word_whose_stem_changes_when_stemmed_again() {
+    let dir = fixture();
+    let d = dir.path();
+    write(
+        d,
+        "docs/notes/db.md",
+        "# Stores\n\nTwo databases hold the runs.\n",
+    );
+    let report = json(d, &["atabas"]);
+    assert_eq!(paths(&report), ["docs/notes/db.md"]);
+    assert_eq!(report["unknown"][0]["word"], "atabas");
+}
+
+#[test]
+fn a_chain_of_superseded_records_ranks_newest_first() {
+    let dir = fixture();
+    let d = dir.path();
+    // The older the record, the more often it says the word.
+    for (n, next, times) in [
+        (11, Some(12), 8),
+        (12, Some(13), 6),
+        (13, Some(14), 4),
+        (14, None, 1),
+    ] {
+        let front = match next {
+            Some(next) => format!("status: superseded\nsuperseded_by: D0{next}"),
+            // As far down as the others, so that the order needs six moves.
+            None => "status: historical".to_string(),
+        };
+        write(
+            d,
+            &format!("docs/decisions/D0{n}-chain.md"),
+            &format!(
+                "---\ntitle: Chain {n}\n{front}\n---\n# D0{n}\n\n{}\n",
+                "Echidna. ".repeat(times)
+            ),
+        );
+    }
+    let report = json(d, &["--records", "echidna"]);
+    let ids: Vec<&str> = report["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["record"]["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["D014", "D013", "D012", "D011"]);
+}
+
+#[test]
+fn a_status_filter_reaches_past_the_best_candidates_and_an_id_may_carry_punctuation() {
+    let dir = fixture();
+    let d = dir.path();
+    // More than the 100 candidates of one retrieval, all better than the draft.
+    for i in 0..130 {
+        write(
+            d,
+            &format!("docs/notes/k{i}.md"),
+            "# Kiwi\n\nKiwi kiwi kiwi kiwi.\n",
+        );
+    }
+    write(
+        d,
+        "docs/decisions/D020-kiwi.md",
+        "---\ntitle: Fruit\nstatus: draft\n---\n# D020\n\nA long text about many other things that names the kiwi once only, far from its start.\n",
+    );
+    assert_eq!(
+        paths(&json(d, &["--status", "draft", "kiwi"])),
+        ["docs/decisions/D020-kiwi.md"]
+    );
+    let by_id = json(d, &["D002, pilot?"]);
+    assert_eq!(paths(&by_id)[0], "docs/decisions/D002-use-bm25.md");
+    assert_eq!(by_id["hits"][0]["explain"], Value::Null);
+    let explained = json(d, &["--explain", "D002, pilot?"]);
+    assert_eq!(explained["hits"][0]["explain"]["exact_id"], true);
+}
