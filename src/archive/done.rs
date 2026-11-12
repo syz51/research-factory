@@ -40,6 +40,10 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
             Links,
             "give one of the records a new id from `lab archive next <prefix>`",
         ),
+        "id-taken-on-default-branch" => (
+            Links,
+            "take a new id from `lab archive next <prefix>` and rename the record before the merge",
+        ),
         "unknown-id" => (
             Links,
             "correct the id, or add the record that the field names",

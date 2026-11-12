@@ -473,7 +473,7 @@ reason = "the first report has no single result"
 | `unindexed_exclude` | Globs of Markdown files that `unindexed-file` leaves alone. |
 | `[[lab.archive.page_group]]` | `name`, `include`, optional `exclude` and `current`. At least one page of the group must have a status in `current`. |
 | `[lab.archive.historical_link]` | A link from a record with a status in `from` to a record with a status in `to` must have one of `marks` on its line, in any letter case. |
-| `[[lab.archive.allow]]` | `rule`, `subject` and `reason`, and for `historical-link` an optional `target` (the link destination as written). Accepts the findings that match its rule and subject (and target), for `duplicate-id`, `missing-summary`, `unindexed-file`, `no-current-page`, `historical-link`, `task-without-record` or (since lab 0.13.1) `open-item`. An `open-item` entry accepts every miss in the file, including items appended later. `subject` is the finding's subject without a line number: a path, the duplicated id, the page group's name or the task id. |
+| `[[lab.archive.allow]]` | `rule`, `subject` and `reason`, and for `historical-link` an optional `target` (the link destination as written). Accepts the findings that match its rule and subject (and target), for `duplicate-id`, `id-taken-on-default-branch` (since lab 0.21.4), `missing-summary`, `unindexed-file`, `no-current-page`, `historical-link`, `task-without-record` or (since lab 0.13.1) `open-item`. An `open-item` entry accepts every miss in the file, including items appended later. `subject` is the finding's subject without a line number: a path (the record's, for `id-taken-on-default-branch`), the duplicated id, the page group's name or the task id. |
 
 Model 2 adds these front matter fields. A value of the wrong type is a `front-matter-invalid` error in model 2, and is ignored in model 1.
 
@@ -510,7 +510,7 @@ Model 2 adds these rules to `lab archive check`. Each finding has the tool `lab`
 | `index-leftover` | warn | `write_indexes = false` and an index's `output` file exists. |
 | `stale-allow` | warn | An `[[lab.archive.allow]]` entry matches no finding. The subject is `rule:subject`. |
 
-`duplicate-id` (error) exists in both models and names every path that has the id. An allowed finding stays in the output as an info finding: its message ends with `; accepted by [[lab.archive.allow]]`, and `data` holds the reason. An entry silences only the finding with its rule and subject (and target).
+`duplicate-id` (error) exists in both models and names every path that has the id. `id-taken-on-default-branch` (warn, since lab 0.21.4) exists in both models too and finds such a clash before the merge. It reads the records that the default branch (as `lab archive next` names it) added since the merge base with `HEAD`, at paths that the work tree lacks. A record of the work tree with one of their ids, at another path, gets the warning, with its path as the subject; `data` holds `id`, `other` (that path) and `branch`. A record that had the same id at the merge base gets none, since the default branch only moved or copied it. The rule reads nothing outside git, without a default branch or a common commit, or when `HEAD` contains the default branch; a default branch that names no commit skips it with a `note:` on stderr. Because the record is in the change, `lab check --new-only` gates the warning. An allowed finding stays in the output as an info finding: its message ends with `; accepted by [[lab.archive.allow]]`, and `data` holds the reason. An entry silences only the finding with its rule and subject (and target).
 
 Commands of model 2:
 
@@ -537,6 +537,7 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `duplicate-id` | error | `[[lab.archive.index]]` | 0.2.0 |
 | `front-matter-invalid` | error | `[[lab.archive.index]]` | 0.2.0 |
 | `historical-link` | warn | model 2, `[lab.archive.historical_link]` | 0.12.0 |
+| `id-taken-on-default-branch` | warn | `[[lab.archive.index]]`, git | 0.21.4 |
 | `inactive-without-reason` | error | model 2, `reason_statuses` (default `inactive_statuses`) | 0.12.0 |
 | `index-leftover` | warn | model 2, `write_indexes = false` | 0.12.0 |
 | `index-missing` | error | `[[lab.archive.index]]` with `write_indexes = true` | 0.2.0 |

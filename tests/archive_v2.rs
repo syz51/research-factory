@@ -491,6 +491,74 @@ fn next_reserves_a_number_across_worktrees() {
 }
 
 #[test]
+fn check_warns_of_an_id_that_the_default_branch_added_at_another_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("main");
+    std::fs::create_dir(&d).unwrap();
+    archive(&d, CONFIG);
+    let new = |title: &str| {
+        record(
+            "proposed",
+            "2026-11-12",
+            "kind: decision\ntask: T-3\n",
+            title,
+        )
+    };
+    write(&d, "docs/decisions/D005-draft.md", &new("Draft"));
+    commit(&d, "draft");
+    let wt = dir.path().join("wt");
+    git(
+        &d,
+        &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+    );
+    // The branch writes D003 and D004 and keeps D005 where it was.
+    write(&wt, "docs/decisions/D003-mine.md", &new("Mine"));
+    write(&wt, "docs/decisions/D004-shared.md", &new("Shared"));
+    commit(&wt, "side records");
+    clean(&wt);
+    // The default branch adds its own D003, the same D004, and moves D005.
+    write(&d, "docs/decisions/D003-theirs.md", &new("Theirs"));
+    write(&d, "docs/decisions/D004-shared.md", &new("Shared"));
+    git(
+        &d,
+        &[
+            "mv",
+            "docs/decisions/D005-draft.md",
+            "docs/decisions/D005-moved.md",
+        ],
+    );
+    commit(&d, "main records");
+    clean(&d);
+    let (code, text) = check(&wt);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        rules(&text),
+        ["warn id-taken-on-default-branch docs/decisions/D003-mine.md"],
+        "{text}"
+    );
+    assert!(
+        text.contains("docs/decisions/D003-theirs.md also has on main"),
+        "{text}"
+    );
+    // The warning is what `lab check --new-only` gates in the change.
+    let out = lab(&wt, &["archive", "check", "--format", "jsonl"]);
+    let line = stdout(&out)
+        .lines()
+        .find(|l| l.contains("id-taken-on-default-branch"))
+        .map(String::from)
+        .unwrap_or_default();
+    assert!(
+        line.contains(r#""subject":"docs/decisions/D003-mine.md""#),
+        "{line}"
+    );
+    // After the merge both records are there: a duplicate-id error.
+    git(&wt, &["merge", "-q", "--no-edit", "main"]);
+    let (code, text) = check(&wt);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(rules(&text), ["error duplicate-id D003"], "{text}");
+}
+
+#[test]
 fn next_counts_the_default_branch_and_the_other_worktrees() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().join("main");
