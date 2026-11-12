@@ -229,7 +229,7 @@ fn no_hit_exits_0_with_0_results_and_the_nearest_words() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
-        "0 results\nNot in the index: retreiver (nearest: retriever)\nSearched: notes, refs\nNot searched: texts, files, sessions, board (pass --in <scope> or --in all)\n"
+        "0 results\nNot in the index: retreiver (nearest: retriever)\nSearched: notes, refs, texts\nNot searched: files, sessions, board (pass --in <scope> or --in all)\n"
     );
     let report = json(dir.path(), &["zzqq"]);
     assert_eq!(report["state"], "zero");
@@ -645,6 +645,16 @@ fn several_phrasings_fuse_and_each_hit_is_described_by_its_best_phrasing() {
             .unwrap()
             .contains("gamma delta")
     );
+    // Each phrasing adds its min-max share: `first` tops "alpha beta" and
+    // "alpha" (1 + 1), and `both` is last in both of them (0 + 0) and alone
+    // in "gamma delta" (1).
+    let fused = json(d, &["--explain", "alpha beta", "gamma delta", "alpha"]);
+    let score = |path: &str| {
+        let at = paths(&fused).iter().position(|p| *p == path).unwrap();
+        fused["hits"][at]["explain"]["fused"].as_f64().unwrap()
+    };
+    assert_eq!(score("docs/notes/first.md"), 2.0);
+    assert_eq!(score("docs/notes/both.md"), 1.0);
 }
 
 #[test]
@@ -713,9 +723,10 @@ fn a_status_filter_reaches_past_the_best_candidates_and_an_id_may_carry_punctuat
         "docs/decisions/D020-kiwi.md",
         "---\ntitle: Fruit\nstatus: draft\n---\n# D020\n\nA long text about many other things that names the kiwi once only, far from its start.\n",
     );
+    // Its head unit (front matter, file path) and its section: one record.
     assert_eq!(
         paths(&json(d, &["--status", "draft", "kiwi"])),
-        ["docs/decisions/D020-kiwi.md"]
+        ["docs/decisions/D020-kiwi.md", "docs/decisions/D020-kiwi.md"]
     );
     let by_id = json(d, &["D002, pilot?"]);
     assert_eq!(paths(&by_id)[0], "docs/decisions/D002-use-bm25.md");

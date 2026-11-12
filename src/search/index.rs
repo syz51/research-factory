@@ -21,13 +21,17 @@ use super::sources::{self, Doc, Loader, Resolver};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
-/// BM25 column weights of `units_fts`, in column order: id and aliases, then
-/// title, then summary, heading path and file path, then body.
-pub const WEIGHTS: &str = "10.0, 5.0, 2.0, 2.0, 2.0, 1.0";
+/// BM25 column weights of `units_fts`, in column order: ids, title, summary,
+/// heading path, meta (date, status and file path), body. They are the weights
+/// of experiment E1 of masters after its wider grid (DR045 item 2,
+/// research-factory-308): the title and the heading path count most, the
+/// summary least. On E1's topics they gave lab 0.597 nDCG@10 against 0.595
+/// with the first fit (1, 4, 0.5, 4, 0.5, 1).
+pub const WEIGHTS: &str = "0.5, 4.0, 0.25, 4.0, 0.5, 1.0";
 /// The position of `body` among the columns of `units_fts`.
 pub const BODY_COLUMN: usize = 5;
 
@@ -79,7 +83,7 @@ CREATE TABLE units(
 );
 CREATE INDEX units_file ON units(file_id);
 CREATE VIRTUAL TABLE units_fts USING fts5(
-    ids, title, summary, heading, path, body,
+    ids, title, summary, heading, meta, body,
     tokenize = 'porter unicode61 remove_diacritics 2'
 );
 CREATE VIRTUAL TABLE units_vocab USING fts5vocab(units_fts, 'row');
@@ -617,19 +621,27 @@ fn index_doc(
     }
     let title = row.title.as_deref().unwrap_or("");
     let summary = row.summary.as_deref().unwrap_or("");
-    // Only notes and files are found by their path; other keys are not words.
+    // Date, status and, for notes and files, the path: other keys are not words.
     let path = match doc.scope {
         Scope::Notes | Scope::Files => doc.key.as_str(),
         _ => "",
     };
+    let meta = [row.date.as_deref(), row.status.as_deref(), Some(path)]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut unit = tx.prepare_cached(
         "INSERT INTO units (file_id, start_line, end_line, heading, hash) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     let mut fts = tx.prepare_cached(
-        "INSERT INTO units_fts (rowid, ids, title, summary, heading, path, body) \
+        "INSERT INTO units_fts (rowid, ids, title, summary, heading, meta, body) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for u in &loaded.units {
+        // The path, not the date or status: a status edit keeps each
+        // section's hash, so an old anchor still finds its text.
         let indexed = format!(
             "{}\n{title}\n{summary}\n{}\n{path}\n{}",
             row.ids, u.heading, u.body
@@ -644,8 +656,54 @@ fn index_doc(
         ])?;
         let id = tx.last_insert_rowid();
         fts.execute(params![
-            id, row.ids, title, summary, u.heading, path, u.body
+            id, row.ids, title, summary, u.heading, meta, u.body
         ])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_weights_rank_title_and_heading_first_then_body_then_ids_and_meta_then_summary() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        let names: Vec<String> = conn
+            .prepare("SELECT * FROM units_fts")
+            .unwrap()
+            .column_names()
+            .map(String::from)
+            .collect();
+        assert_eq!(WEIGHTS.split(',').count(), names.len());
+        assert_eq!(names[BODY_COLUMN], "body");
+        // Row i holds the word in column i alone; every other cell holds one other word.
+        for i in 0..names.len() {
+            let mut cells = vec!["filler"; names.len()];
+            cells[i] = "lynx";
+            conn.execute(
+                "INSERT INTO units_fts(rowid, ids, title, summary, heading, meta, body) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    i as i64, cells[0], cells[1], cells[2], cells[3], cells[4], cells[5]
+                ],
+            )
+            .unwrap();
+        }
+        let order: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT rowid FROM units_fts WHERE units_fts MATCH 'lynx' \
+                 AND rank MATCH 'bm25({WEIGHTS})' ORDER BY rank, rowid"
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, i64>(0))
+            .unwrap()
+            .map(|i| names[usize::try_from(i.unwrap()).unwrap()].clone())
+            .collect();
+        assert_eq!(
+            order,
+            ["title", "heading", "body", "ids", "meta", "summary"]
+        );
+    }
 }

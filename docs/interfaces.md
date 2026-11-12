@@ -188,7 +188,7 @@ stages = ["lexical"]                 # the stages a query should run: lexical, d
 cites = ['\[(?P<key>\d+)\]']         # since 0.15.0: more citation forms, each with a group `key`
 refresh_budget_ms = 5000             # a query's refresh of changed files stops after this time; `lab archive done` indexes them all
 lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
-default_scopes = ["notes", "refs"]   # the scopes a query without --in searches (since lab 0.16.0)
+default_scopes = ["notes", "refs", "texts"]  # the scopes a query without --in searches (since lab 0.16.0; texts by default since 0.19.0)
 cards = ["docs/research/sources/cards/*.json"]  # paper cards of the `refs` scope
 files = ["runs/**"]                  # the files of the `files` scope
 files_exclude = ["runs/**/*.tmp"]
@@ -202,7 +202,7 @@ historical = ["docs/old/**"]
 ```
 
 - Without `notes`, the scope is every `.md` file below the directories that the globs of `[lab.archive]` name (`index.include`, `sealed`, `links`, `current_pages`, `start`): `docs/history/[0-9]*.md` gives `docs/history/**/*.md`. A glob for files in the project root, and a path without a pattern, stay as they are.
-- A `generated` file is not indexed, and each `[[lab.archive.index]]` output is always generated. The other classes are indexed and labelled, and rank below `own`: `paper` keeps 0.8 of its score, `chat` 0.6, `copied` 0.5 and `historical` 0.25. A record with one of the `inactive_statuses` keeps 0.25, and a superseded record ranks below each successor that the same query found.
+- A `generated` file is not indexed, and each `[[lab.archive.index]]` output is always generated. The other classes are indexed and labelled. `paper` keeps its whole score (0.8 before lab 0.19.0), and so does a paper card of class `generated` (0.5 before lab 0.19.0); `chat` keeps 0.6, `copied` 0.5 and `historical` 0.25, so they rank below `own`. A record with one of the `inactive_statuses` keeps 0.25, and a superseded record ranks below each successor that the same query found.
 - Of the stages, this version builds `lexical` and, since 0.15.0, `graph`. A query that `stages` asks another stage for ends as `partial` and names the stage.
 - `cites` adds citation patterns (Rust regular expressions) to the two that are always read: `ref:<key>`, and a link to the `#reference-<key>` anchor of a file. Each pattern needs a group named `key`; a pattern without one, or one that does not compile, stops the query with an error.
 
@@ -221,7 +221,7 @@ historical = ["docs/old/**"]
 
 - **Registry.** lab reads each line as JSON without a fixed schema: `key` (string or number), `title`, `authors` (may be null), `year`, `venue`, `depth`, `abstract`, `ids.arxiv`, `ids.doi`, `texts` (`[{path, extraction}]`), `duplicate_of` and `source`. An entry whose `duplicate_of` chain ends at another entry is a unit of that entry, with the heading `duplicate ref:<key>`; a hit names the target's key. A chain that loops or names a missing key ends at the entry itself. `ref:<key>`, the arXiv id without its version and the DOI without `https://doi.org/` are exact lookups, as is a query of one registry key alone (`lab search 232`). The name of a text file is a short name of its entry and an exact lookup too (`hirec.txt` makes `HiREC` find its entry), unless the name holds no letter, is the key, is a generic word such as `paper` or `main`, lies in a directory named by the key, or is shared with another entry's text. Text output of a `refs` hit: `ref:<key> · year · first author · title · depth · text path`.
 - **Texts.** Of an entry and its duplicates, the text with an `extraction` other than null or `plain` (the last one listed) is preferred, else the first plain one; a text path that this checkout lacks and git ignores is read from the main checkout of a linked worktree. NUL bytes read as spaces. With a structure file `<text>.structure.json` (`rf.paper-structure/1`) whose `text.sha256` equals the text's, a passage stays within one section, the section's heading is its heading, and `references` sections are left out; without one, passages run through the whole text. Lines are joined for matching (a word split by a hyphen at a line end is one word) while anchors keep the text's line numbers. Each passage carries the paper's title and its registry key (`hits[].key`).
-- **Paper cards** (`rf.paper-card/1`, default `sources/cards/*.json` beside the registry): each item is a unit of `field`, `value` and `quote` at the quote's `lines`. A card is routing text: class `generated`, which keeps 0.5 of its score.
+- **Paper cards** (`rf.paper-card/1`, default `sources/cards/*.json` beside the registry): each item is a unit of `field`, `value` and `quote` at the quote's `lines`. A card is routing text: class `generated`, which keeps its whole score (0.5 before lab 0.19.0).
 - **Stale derivative.** A structure file or card whose recorded `text.sha256` differs from its text's sha256 is ignored: the passages are cut without the structure file, the card gives no unit. A query of the scope ends `partial` and names it, and `lab archive check` and `lab archive done` report it as a `stale-derivative` warning.
 - **Unreachable sources.** A board export that fails, prints no task array or runs longer than 15 seconds, no configured board command, and a missing session list make the query `partial` with a notice naming the scope, never an error; the index keeps what it held of that scope.
 - **Numbers.** A decimal number in a query is one term, without a fraction of only zeros: `47.0%` finds `47` and `47.0`, and `0.50` finds `0.50`.
@@ -257,11 +257,11 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `hits[].hash` | The content hash of the unit's indexed text (32 hexadecimal characters of its SHA-256). |
 | `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
 | `hits[].missing` | The query words the unit lacks; absent when it has all. |
-| `hits[].also_in` | Since 0.15.0: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
-| `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (reciprocal rank fusion across phrasings) and `matched`. |
+| `hits[].also_in` | Since 0.15.0, and since 0.19.0 only with `--fold`: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
+| `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (since 0.19.0 the sum over the phrasings of the min-max normalised score; before, reciprocal rank fusion) and `matched`. |
 | `more` | How many more units matched than `hits` shows. |
 
-BM25 weights the columns: the id and aliases 10, the title 5, the summary, the heading path and the file path 2, the body 1. Text that a search returns is data: no tool runs or follows it.
+BM25 weights the columns as E1 fitted them (DR045 of masters; since 0.19.0): the title and the heading path 4, the body 1, the id and aliases and the metadata (date, status and file path) 0.5, the summary 0.25. Text that a search returns is data: no tool runs or follows it.
 
 ### Search graph, `lab related`, `lab open` and `lab mcp`
 
@@ -281,7 +281,7 @@ Belonging is not stored: a unit belongs to its file, and a file belongs to the r
 
 - `--cites KEY` (`232` or `ref:232`) keeps only units that cite the key. `--links-to ID_OR_PATH` keeps only units that link the record or file. Without words, each lists every such unit, newest file first.
 - `--as-of DATE` leaves out records dated after the date and ranks a record by its state on that date: a record superseded later ranks as in force. `--since DATE` and `--until DATE` keep only records dated in the range, ends included.
-- A unit that links the record of a better hit is folded under that hit as an `also in` line (`also_in` in JSON). Two records of one id series (`DR040` and `DR041`) and two records in a supersession or amendment are not folded. `--all` turns folding off.
+- With `--fold` (`fold` in the MCP tool), a unit that links the record of a better hit is folded under that hit as an `also in` line (`also_in` in JSON). Two records of one id series (`DR040` and `DR041`) and two records in a supersession or amendment are not folded. From lab 0.15.0 to 0.18.0 folding was the default and `--all` turned it off; since 0.19.0 `--all` is accepted and does nothing, because folding cost 0.01 nDCG@10 on the masters test set (research-factory-295).
 
 `lab related NAME [--limit N] [--json]` lists the neighbours of a record id (`DR041`), a path or anchor, `ref:<key>` or `task:<id>`, at most `--limit` (default 20) for each relation. The relations: `superseded by`, `supersedes`, `amended by`, `amends`, `task`, `part of`, `parts`, `links to`, `linked from` and `cites`; for a reference key, `cited by` and the papers it `cites`; for a task, its `records`. Each neighbour has its anchor when the edge starts at a line. `--json` prints one `rf.related/1` object:
 
@@ -298,17 +298,17 @@ Belonging is not stored: a unit belongs to its file, and a file belongs to the r
 
 `direction` is `out` for an edge that starts at the node and `in` for one that ends at it; `anchor` is the unit that holds a link or citation (front-matter edges have none); `total` counts the neighbours before `--limit`; `indexed` is false for an id or path that names no indexed file. A name that names nothing exits 2.
 
-`lab open ANCHOR [--lines N] [--json]` prints one unit with at most `--lines` (default 80) lines of text, then the anchors of up to three neighbours of each relation of its file. ANCHOR is a hit's anchor (`path#Lstart-Lend`), `path:line` (the unit that holds the line), `path:a-b` (the unit with exactly that range, else the text found as below), a path, a record id, or a hit's content hash. When the file changed after the anchor was made and no unit has that line range, the anchor finds its old text by content hash: the output's notice says `the file changed; the text of La-Lb moved to Lx-Ly (same content hash)`, or that the text is gone and the unit now at those lines is shown. `--json` prints one `rf.open/1` object with `anchor`, `path`, `start`, `end`, `more_lines` (the lines past the budget), `heading`, the record's `id`, `title`, `date` and `status`, `notice`, `lines` and `neighbours`. A stale index prints `lab: partial: the index is stale` on stderr.
+`lab open ANCHOR [--lines N] [--json]` prints one unit with at most `--lines` (default 80) lines of text, then the anchors of up to three neighbours of each relation of its file. ANCHOR is a hit's anchor (`path#Lstart-Lend`), `path:line` (the unit that holds the line), `path:a-b` (the unit with exactly that range, else the text found as below), a path or a record id (its first section below the front matter, since 0.19.0), or a hit's content hash. When the file changed after the anchor was made and no unit has that line range, the anchor finds its old text by content hash: the output's notice says `the file changed; the text of La-Lb moved to Lx-Ly (same content hash)`, or that the text is gone and the unit now at those lines is shown. `--json` prints one `rf.open/1` object with `anchor`, `path`, `start`, `end`, `more_lines` (the lines past the budget), `heading`, the record's `id`, `title`, `date` and `status`, `notice`, `lines` and `neighbours`. A stale index prints `lab: partial: the index is stale` on stderr.
 
 `lab mcp` is a Model Context Protocol server on stdio: newline-delimited JSON-RPC 2.0, protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`, methods `initialize`, `ping`, `tools/list` and `tools/call`; notifications get no reply and other methods get error -32601. It reads the project from its working directory and writes logs to stderr. Its tools:
 
 | Tool | Arguments | Same as |
 |---|---|---|
-| `archive_search` | `query` (a string or an array of phrasings), `limit`, `records`, `status`, `cites`, `links_to`, `as_of`, `since`, `until`, `all` | `lab search` |
+| `archive_search` | `query` (a string or an array of phrasings), `limit`, `records`, `status`, `cites`, `links_to`, `as_of`, `since`, `until`, `fold` (`all` before 0.19.0) | `lab search` |
 | `archive_open` | `anchor` (required), `lines` | `lab open` |
 | `archive_related` | `name` (required), `limit` | `lab related` |
 
-Each description says when to use the tool. A result is text only: its first line is the state (`state: hits; missing stages: dense, rerank`, with `partial` notices after `;`), then for `archive_search` a line `mode: lexical (model: unloaded)`, then the text output of the command. The model state is `unloaded`, `loading`, `ready` or `failed`; this version loads no model and always searches in `lexical` mode. A failed call returns `isError: true` with `state: error` and the message. An agent connects it with an MCP entry such as `{"mcpServers":{"lab":{"type":"stdio","command":"lab","args":["mcp"]}}}` in the project's `.mcp.json`.
+Each description says when to use the tool. A result is text only: its first line is the state (`state: hits; missing stages: dense, rerank`, with `partial` notices after `;`), then for `archive_search` a line `mode: lexical`, then the text output of the command. Lexical search is the chosen configuration (masters DR045), so no stage loads a model; before 0.19.0 the line was `mode: lexical (model: unloaded)`. A failed call returns `isError: true` with `state: error` and the message. An agent connects it with an MCP entry such as `{"mcpServers":{"lab":{"type":"stdio","command":"lab","args":["mcp"]}}}` in the project's `.mcp.json`.
 
 ### Search learning loop: `rf.search-query/1`, `rf.search-open/1`, the thesaurus and `rf.retro/1`
 
@@ -338,7 +338,7 @@ review_days = 90                         # `lab retro` lists entries unused for 
 | `state` | `hits`, `partial`, `zero` or `error` (then `error` holds the message). |
 | `stages`, `missing_stages` | The stages that ran, and the configured stages that are not built. |
 | `expansions` | The thesaurus entries the query applied: the query `term`, the terms `added` for it, and the `entry` as `a = b`. Absent when none. |
-| `candidates` | For each stage, its 10 best units before they are grouped by record, as `id` (the anchor) and `score`. |
+| `candidates` | For each stage, its 10 best units before `--records` keeps one for each record, as `id` (the anchor) and `score`. |
 | `hit_count`, `complete`, `hits` | The number of hits, the hits that hold every term, and the hits' anchors, best first. |
 | `unknown`, `notices` | The query words no unit holds, and why the answer may be incomplete. Absent when empty. |
 | `latency_ms` | The time the query took. |
@@ -366,7 +366,7 @@ review_days = 90                         # `lab retro` lists entries unused for 
 
 An ID may be given by a unique prefix.
 
-**TREC runs.** `lab search --run TOPICS [--out FILE] [--phrasings] [--limit N] [--records]` answers a topics file and writes a TREC run, `topic Q0 docid rank score lab-search`, with the score `limit + 1 - rank`, so no two scores of a topic tie. A topics line is a JSON object with `id` (string or number) and `query`, other fields ignored, or `id<TAB>query`; `#` starts a comment. `--phrasings` adds a JSON topic's `phrasings` as more phrasings. The docid is the hit's anchor, `path#Lstart-Lend` or `ref:<key>`, or with `--records` the record's path; `%` and spaces are escaped as `%25` and `%20`. The default limit is 10. `ireval eval QRELS RUN` scores the run.
+**TREC runs.** `lab search --run TOPICS [--out FILE] [--phrasings] [--limit N] [--records]` answers a topics file and writes a TREC run, `topic Q0 docid rank score lab-search`, with the score `limit + 1 - rank`, so no two scores of a topic tie. A topics line is a JSON object with `id` (string or number) and `query`, other fields ignored, or `id<TAB>query`; `#` starts a comment. `--phrasings` adds a JSON topic's `phrasings` as more phrasings. The docid is the hit's anchor, `path#Lstart-Lend` or `ref:<key>`, or with `--records` the record's path; `%` and spaces are escaped as `%25` and `%20`. Since 0.19.0 the run lists the docids in the order the text output shows them: each hit, then, with `--fold`, the units folded under it as `also in` lines, each docid once, up to the limit. The default limit is 10. `ireval eval QRELS RUN` scores the run.
 
 **Duplicate check.** `lab archive similar FILE|WORDS...` searches the records whose sections hold at least 60% of the weight (`ln(1 + units / units holding it)`) of the subject's words, and at least two of them when the subject has two or more. The subject is a record's title and aliases, or the words given. It prints `similar: none`, `similar: N record(s) on the same topic` with up to 5 lines, or `skipped: REASON` when the search fails, and always exits 0. It builds the index when it is absent. `lab archive next PREFIX --title TITLE` prints the same list on stderr. `lab archive check` runs it for each new record file (untracked and not ignored, or added in the git index, and matched by an index's `include`) against the records that are not new: a match is a `similar-record` warning, and a failed search is a `similar-skipped` info finding.
 ### Archive model 2

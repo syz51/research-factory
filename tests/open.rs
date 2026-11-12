@@ -110,8 +110,15 @@ fn opens_the_unit_that_holds_a_path_line_and_a_record_id() {
     let unit = json(dir.path(), &["open", &format!("{DR001}:9")]);
     assert_eq!(unit["anchor"], format!("{DR001}#L7-L9"));
     assert_eq!(unit["lines"][2], "Retrieval uses BM25.");
+    // A record id opens its first section, not its front matter.
     let unit = json(dir.path(), &["open", "DR002"]);
     assert_eq!(unit["path"], DR002);
+    assert_eq!(unit["anchor"], format!("{DR002}#L7-L9"), "{unit}");
+    assert_eq!(unit["lines"][0], "# DR002");
+    assert_eq!(json(dir.path(), &["open", DR002])["anchor"], unit["anchor"]);
+    // The exact-id hit is the same section.
+    let found = json(dir.path(), &["search", "DR002"]);
+    assert_eq!(found["hits"][0]["anchor"], unit["anchor"], "{found}");
     let o = lab(dir.path(), &["open", "DR999"]);
     assert_eq!(o.status.code(), Some(2));
 }
@@ -141,5 +148,23 @@ fn an_old_anchor_finds_its_text_after_the_lines_moved_and_says_so() {
             .contains("moved to L14-L45"),
         "{unit}"
     );
+    assert_eq!(unit["lines"][0], "## Table");
+}
+
+#[test]
+fn an_old_anchor_finds_its_text_after_a_front_matter_edit_moved_it() {
+    let dir = fixture();
+    let anchor = format!("{DR001}#L11-L42");
+    ok(dir.path(), &["open", &anchor]);
+    // A new date and one more front-matter line keep each section's hash.
+    let path = dir.path().join(DR001);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace("date: 2026-01-10\n", "date: 2026-01-11\nsupersedes: []\n"),
+    )
+    .unwrap();
+    let unit = json(dir.path(), &["open", &anchor]);
+    assert_eq!(unit["anchor"], format!("{DR001}#L12-L43"), "{unit}");
     assert_eq!(unit["lines"][0], "## Table");
 }

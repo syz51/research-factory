@@ -2,7 +2,7 @@
 
 This document models the research pipeline as state machines.
 It names each machine, its states, its transitions and the place that enforces each transition.
-It covers the tools as they are (lab 0.17.0, papers 0.7.0, claimcheck 0.11.0, prov 0.1.2, agentprof 0.4.0, the work board) and the machines that [archive-design.md](archive-design.md) adds.
+It covers the tools as they are (lab 0.19.0, papers 0.7.0 with the depth rules of 0.11.2 in section 4.2, claimcheck 0.11.0, prov 0.1.2, agentprof 0.4.0, the work board) and the machines that [archive-design.md](archive-design.md) adds.
 
 An **explicit** machine has its states in code or in a config list.
 An **implicit** machine has states that exist only as a combination of files, fields or habits.
@@ -185,6 +185,7 @@ Terminal states and exit codes:
 | `error` | bad query, unreadable index, lock timeout | 2 |
 
 Each query writes one `rf.search-query/1` trace line with its terminal state (research-factory-192).
+Since lab 0.19.0 (research-factory-295, masters DR045): `parsed` keeps the first 32 terms of a phrasing, and more terms give a `partial` notice, not an `error`. `fused` sums each phrasing's min-max normalised BM25 score; it was reciprocal rank fusion. `reranked` passes the list on unchanged, because experiment E1 chose no reranker. `grouped` makes each unit a hit of its own and, with `--records`, keeps a record's best unit; it no longer puts at most two units of a record under its best one, and it folds a unit under the record it links only with `--fold`. On the masters test set, fully judged, grouping cost 0.02 nDCG@10 and folding 0.01.
 `zero` and `partial` are not errors, so a script can tell "nothing found" from "search broken".
 
 ### 3.4 Missed query and thesaurus entry
@@ -198,11 +199,11 @@ thesaurus entry: active ─► retired (no query used it in the review window)
 `lab retro` proposes; a person or an agent accepts with `lab retro accept` (research-factory-205).
 Rejections are stored. Without that state, the same alias returns at each retro. This is the main implicit machine of the learning loop.
 
-### 3.5 Model loading in `lab mcp`
+### 3.5 Model loading in `lab mcp` (retired)
 
-`unloaded ─► loading ─► ready`, or `failed`.
-A query that arrives during `loading` runs in degraded mode; it does not wait.
-`failed` is reported once per process and in each trace line. Owner: research-factory-204.
+`unloaded ─► loading ─► ready`, or `failed`, while a dense or rerank stage was planned.
+Experiment E1 (masters DR045) chose lexical search, so no stage loads a model.
+Since lab 0.19.0 the machine is removed and each `archive_search` result says `mode: lexical` (research-factory-295).
 
 ## 4. Paper machines (papers, claimcheck)
 
@@ -252,8 +253,10 @@ Still open: no tool has a `withdrawn` state for a retracted paper. research-fact
 States are the values of `depth` in the registry, from "listed" to "read in full", plus `unknown`. The tool accepts any listed value in any order.
 Accepted: depth describes how far a person or an agent read, and a re-read at a lower depth does not happen in practice.
 
-- `unknown` is valid only with a reason after it, as `Inspection depth: unknown` followed by the reason.
-- An entry with no depth, or `unknown` without a reason, gives `depth-missing` (warn). This is in papers 0.7.0 (research-factory-219).
+- `unknown` is valid only as `Inspection depth: unknown. Reason: …`, with text after the word `Reason` (papers 0.10.1). The label may carry a note in parentheses, such as `Reason (12 November 2026): …`.
+- Other text after `unknown`, such as `unknown; abstract only`, gives `depth-unparsed` (warn) and no level (papers 0.11.1, research-factory-299).
+- An entry with no depth gives `depth-missing` (warn) (papers 0.7.0, research-factory-219). So do a bare `Inspection depth: unknown` and a `Reason` with no word after it, such as `Reason:` or a copied `Reason: …` (papers 0.11.1).
+- An entry that is a duplicate of another entry gives no `depth-missing` (papers 0.10.1).
 
 ### 4.3 Network machines of papers
 

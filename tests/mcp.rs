@@ -162,9 +162,7 @@ fn lists_three_tools_and_its_search_gives_the_hits_of_lab_search() {
     // Two lines name the terminal state, the missing stages and the mode;
     // the rest is the text of `lab search`.
     let text = search["content"][0]["text"].as_str().unwrap();
-    let (head, rest) = text
-        .split_once("\nmode: lexical (model: unloaded)\n")
-        .expect(text);
+    let (head, rest) = text.split_once("\nmode: lexical\n").expect(text);
     assert_eq!(head, "state: hits; missing stages: dense, rerank");
     assert_eq!(rest, cli);
 
