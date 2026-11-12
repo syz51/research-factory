@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]`, `[[lab.archive.kept_link]]`, the tables of archive model 2 and `[lab.search]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]`, `[[lab.archive.kept_link]]`, `[lab.archive.open_items]`, the tables of archive model 2 and `[lab.search]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -126,6 +126,17 @@ reason = "quotes a past chat answer that linked a file on another machine"
 ```
 
 `lab archive check` does not report a missing link target in `file` whose destination equals `target` as `broken-link` when the link's line lies wholly in the file's sealed text: the file matches `sealed`, has a seal-manifest entry whose seal still holds (unchanged or appended to), and the line ends within the entry's `bytes`, counted from the start of the body, so front matter may change. It reports one `kept-link` info finding per such link instead, with the link as its subject and `data` `{"target": "…", "reason": "…"}`; the text output adds the reason. The same link outside the sealed text, in a file that is not append-only or not sealed yet, or in text appended after the seal, stays a `broken-link` error whose message says that `kept_link` covers only sealed text. An entry that matches no missing link in a checked file, such as one whose target exists now, is a `stale-kept-link` warning with `file` as its subject. An entry with an empty `target` or `reason`, a `file` that is not a relative path below the root without `.`, `..` or empty segments, or a `file` and `target` configured twice stops the check with an error (exit 2). An offloaded list takes precedence: a target it holds is counted there.
+
+An open-item rule (`[lab.archive.open_items]`, since lab 0.13.0, whose older versions reject the key) makes a record of a board task name the task that holds each of its open items. It is off without the table:
+
+```toml
+[lab.archive.open_items]
+since = "2026-11-12"               # the first day checked
+boards = ["research-factory"]      # a task id is <board>-<number>
+headings = ["Open questions", "Limits", "Follow-ups", "Next steps", "Not done"]  # the default
+```
+
+It checks every Markdown file that `lab archive check` scans (an index's records and the files of `sealed`, `links`, `current_pages` and each `budget`), except index outputs, whose front matter is a mapping with a non-empty `task` field. A file is skipped when its date is before `since`: the front matter's valid `date`, else the first date in its path. A file with neither date is checked. In such a file, a section whose ATX heading (`## Limits`) matches one of `headings` (by visible text, case-insensitive, at any level, with a trailing colon ignored) runs to the next heading of the same or higher level. Each list item there (`-`, `*`, `+` or `1.`, with its continuation lines) must hold a task id, `<board>-<number>` for one of `boards` and not inside a longer name (`old-masters-3` names no `masters` task), or the words `no action:` followed by a reason; `**` and backticks are ignored. An item passes when an item it is nested in passes, and an item with nested items is checked through them. Paragraphs, tables, thematic breaks (`* * *`), fenced code and HTML comments are not checked; a numbered line that interrupts a paragraph starts a list only with `1.`, as in CommonMark. Each miss is an `open-item` error with the item as its subject, `data` `{"section": "…"}` and the item's first 60 characters in the text output. The rule checks only that an id is written: not that the task exists, is open, or covers the item. An empty `boards` or `headings`, a board name other than letters, digits, `-` and `_`, or a `since` that is not `YYYY-MM-DD` stops the check with an error (exit 2).
 
 ### Search: `[lab.search]` and `rf.search/1`
 

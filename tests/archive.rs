@@ -747,3 +747,104 @@ fn kept_links_cover_only_the_sealed_text_of_append_only_files() {
         );
     }
 }
+
+#[test]
+fn open_items_in_task_records_name_a_board_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let base = "[lab.archive]\nlinks = [\"docs/**/*.md\"]\n\n[[lab.archive.index]]\nname = \"followups\"\noutput = \"docs/followups/INDEX.md\"\ntitle = \"Follow-ups\"\ninclude = [\"docs/followups/*/README.md\"]\n";
+    let rule = "\n[lab.archive.open_items]\nsince = \"2026-11-12\"\nboards = [\"rf\"]\n";
+    write(d, "research.toml", &format!("{base}{rule}"));
+    let record = |task: &str, date: &str, item: &str| {
+        format!(
+            "---\n{task}date: {date}\n---\n# Pilot\n\n## Result\n\n- not an open item\n\n## Open questions\n\n{item}\n"
+        )
+    };
+    let f = "docs/followups/2026-11-12-pilot/README.md";
+    // A record in no index, found only through `links`, is checked too.
+    let p = "docs/process/review/README.md";
+    write(
+        d,
+        f,
+        &record("task: rf-1\n", "2026-11-12", "- Does it hold?"),
+    );
+    write(d, p, &record("task: rf-2\n", "2026-11-13", "- Is it fast?"));
+    // Before the start date, and without a `task` field: not checked.
+    write(
+        d,
+        "docs/followups/2026-11-11-old/README.md",
+        &record("task: rf-3\n", "2026-11-11", "- Old?"),
+    );
+    write(d, "docs/notes.md", &record("", "2026-11-12", "- No task?"));
+    assert_eq!(lab(d, &["archive", "update"]).status.code(), Some(0));
+    let open = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|l| l.contains("open-item"))
+            .map(|l| l.split(' ').take(3).collect::<Vec<_>>().join(" "))
+            .collect()
+    };
+
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        open(&text),
+        [
+            format!("error open-item {f}:13"),
+            format!("error open-item {p}:13")
+        ],
+        "{text}"
+    );
+    assert!(
+        text.contains("an item under \"Open questions\" names no board task"),
+        "{text}"
+    );
+    assert!(text.contains("(Does it hold?)"), "{text}");
+
+    // A task id, or `no action:` with a reason, passes.
+    write(
+        d,
+        f,
+        &record(
+            "task: rf-1\n",
+            "2026-11-12",
+            "- Does it hold? Tracked in rf-7.",
+        ),
+    );
+    write(
+        d,
+        p,
+        &record(
+            "task: rf-2\n",
+            "2026-11-13",
+            "- Is it fast? No action: measured, 2 ms.",
+        ),
+    );
+    let (code, text) = check(d);
+    assert_eq!(code, Some(0), "{text}");
+    assert!(open(&text).is_empty(), "{text}");
+
+    // Without `[lab.archive.open_items]` the rule is off.
+    write(
+        d,
+        f,
+        &record("task: rf-1\n", "2026-11-12", "- Does it hold?"),
+    );
+    assert_eq!(check(d).0, Some(1));
+    write(d, "research.toml", base);
+    let (code, text) = check(d);
+    assert_eq!(code, Some(0), "{text}");
+
+    // A bad configuration stops the check.
+    write(
+        d,
+        "research.toml",
+        &format!("{base}{}", rule.replace("2026-11-12", "12 Nov")),
+    );
+    let o = lab(d, &["archive", "check"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("`since` must be YYYY-MM-DD"),
+        "{}",
+        stderr(&o)
+    );
+}

@@ -10,6 +10,7 @@ mod gitseal;
 mod index;
 pub(crate) mod markdown;
 mod meta_rules;
+mod open_items;
 mod reserve;
 mod rules;
 mod seal;
@@ -59,6 +60,7 @@ pub struct Spec<'p> {
     current: FileSet,
     budgets: Vec<FileSet>,
     manifest: PathBuf,
+    open_items: Option<open_items::OpenItems>,
 }
 
 impl<'p> Spec<'p> {
@@ -180,6 +182,11 @@ impl<'p> Spec<'p> {
                 .seal_manifest
                 .as_deref()
                 .map_or_else(|| project.default_seal_manifest(), |p| project.path(p)),
+            open_items: cfg
+                .open_items
+                .as_ref()
+                .map(open_items::OpenItems::new)
+                .transpose()?,
         })
     }
 
