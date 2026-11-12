@@ -33,6 +33,10 @@ pub(super) struct Problem {
 
 impl Problem {
     pub(super) fn new(rule: &'static str, severity: Severity, path: &str, message: String) -> Self {
+        debug_assert!(
+            crate::rules::get(rule).is_some(),
+            "rule {rule:?} is not in src/rules.rs RULES"
+        );
         Self {
             rule,
             severity,
@@ -66,6 +70,7 @@ impl Problem {
     }
 
     pub(super) fn text(&self) -> String {
+        crate::rules::debug_check(self.rule, self.severity);
         let detail = self
             .detail
             .as_ref()
@@ -80,6 +85,7 @@ impl Problem {
     }
 
     pub(super) fn finding(&self) -> Finding {
+        crate::rules::debug_check(self.rule, self.severity);
         let mut f = Finding::lab(
             self.rule,
             self.severity,

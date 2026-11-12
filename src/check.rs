@@ -310,6 +310,12 @@ fn main_checkout_args(
     (args, swapped)
 }
 
+/// A finding of lab itself, checked against the rule table in debug builds.
+fn lab_finding(rule: &'static str, severity: Severity, subject: &str, message: String) -> Finding {
+    crate::rules::debug_check(rule, severity);
+    Finding::lab(rule, severity, subject, message)
+}
+
 /// Runs one checker in `root` (the project root, or a replayed commit's copy
 /// of it) and parses its stdout. Its program resolves against the project
 /// root, so a replay runs today's checker. With `fallback`, the root is a
@@ -350,7 +356,7 @@ fn run_one(
     let output = match output {
         Ok(output) => output,
         Err(e) => {
-            let f = Finding::lab(
+            let f = lab_finding(
                 "check-failed",
                 Severity::Error,
                 &spec.name,
@@ -390,7 +396,7 @@ fn run_one(
     }
     if let Some((line, e)) = first_unparsed {
         // Output that is not rf.finding/1 may hide findings, so the run is incomplete.
-        findings.push(Finding::lab(
+        findings.push(lab_finding(
             "check-output-invalid",
             Severity::Error,
             &spec.name,
@@ -404,7 +410,7 @@ fn run_one(
         // interfaces.md: 0 = no errors, 1 = errors found, anything else = the check itself failed.
         outcome.status = "ok".into();
         if outcome.exit == Some(1) && !findings.iter().any(|f| f.severity == Severity::Error) {
-            findings.push(Finding::lab(
+            findings.push(lab_finding(
                 "check-exit-mismatch",
                 Severity::Warn,
                 &spec.name,
@@ -416,7 +422,7 @@ fn run_one(
         let stderr = String::from_utf8_lossy(&output.stderr);
         let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
         let tail = lines[lines.len().saturating_sub(3)..].join(" | ");
-        findings.push(Finding::lab(
+        findings.push(lab_finding(
             "check-failed",
             Severity::Error,
             &spec.name,

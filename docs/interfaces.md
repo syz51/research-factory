@@ -294,6 +294,49 @@ Commands of model 2:
 - `lab archive next <PREFIX> --reserve` (the default in model 2) gives a number that no other worktree gets. It takes the largest number among the ids in this checkout, the ids in the main checkout and the numbers given out before, adds one, and records it in the main checkout's `<state_dir>/lab/archive-reserved.json` (`{"schema": "rf.archive-reserved/1", "series": {"D": {"max": 12, "width": 3}}}`) under an exclusive lock on `archive-reserved.lock`. `--peek` prints the number and reserves nothing. Both files are local state, not committed.
 - `lab archive update` stops before the seal step when the index step fails, prints `Nothing sealed: the index step failed.` and exits 1. This holds in both models since 0.12.0.
 
+### Rule table
+
+Every rule that `lab archive check` and `lab check` report a finding under. Severity is the default. An `[[lab.archive.allow]]` entry or a `[[lab.archive.kept_link]]` entry lowers a finding to info. `src/rules.rs` holds the same table: a test keeps the two equal, and debug builds stop on a finding whose rule is not in it or whose severity differs. A new rule goes into both in the same change. "Model 2" means `[lab.archive] model = 2`.
+
+| Rule | Severity | Enabled by | Since |
+| --- | --- | --- | --- |
+| `amendment-mismatch` | warn | model 2, records with `amends` or `amended_by` | 0.12.0 |
+| `archived-link` | info | `[[lab.archive.offloaded]]` | 0.9.1 |
+| `broken-anchor` | error | `links` | 0.2.0 |
+| `broken-link` | error | `links` | 0.2.0 |
+| `check-exit-mismatch` | warn | `[[lab.checks]]` | 0.1.0 |
+| `check-failed` | error | `[[lab.checks]]` | 0.1.0 |
+| `check-output-invalid` | error | `[[lab.checks]]` | 0.1.0 |
+| `duplicate-id` | error | `[[lab.archive.index]]` | 0.2.0 |
+| `front-matter-invalid` | error | `[[lab.archive.index]]` | 0.2.0 |
+| `historical-link` | warn | model 2, `[lab.archive.historical_link]` | 0.12.0 |
+| `inactive-without-reason` | error | model 2, `reason_statuses` (default `inactive_statuses`) | 0.12.0 |
+| `index-leftover` | warn | model 2, `write_indexes = false` | 0.12.0 |
+| `index-missing` | error | `[[lab.archive.index]]` with `write_indexes = true` | 0.2.0 |
+| `index-stale` | error | `[[lab.archive.index]]` with `write_indexes = true` | 0.2.0 |
+| `kept-link` | info | `[[lab.archive.kept_link]]` | 0.9.11 |
+| `missing-field` | error | `[[lab.archive.index]]` | 0.2.0 |
+| `missing-kind` | error | model 2, `task_from` | 0.12.0 |
+| `missing-summary` | warn | model 2, `[[lab.archive.index]]` | 0.12.0 |
+| `missing-task` | error | model 2, `task_from` | 0.12.0 |
+| `no-current-page` | warn | model 2, `[[lab.archive.page_group]]` | 0.12.0 |
+| `seal-unverified` | error | model 2, `seal = "git"` | 0.12.0 |
+| `sealed-edited` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
+| `sealed-missing` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
+| `size-budget` | warn (configurable) | `[[lab.archive.budget]]` | 0.2.0 |
+| `stale-allow` | warn | model 2, `[[lab.archive.allow]]` | 0.12.0 |
+| `stale-kept-link` | warn | `[[lab.archive.kept_link]]` | 0.9.11 |
+| `status-reversed` | error | model 2, `seal = "git"` | 0.12.0 |
+| `superseded-but-active` | warn | `[[lab.archive.index]]` | 0.2.0 |
+| `superseded-link` | warn | `current_pages` | 0.2.0 |
+| `supersession-mismatch` | warn | `[[lab.archive.index]]` | 0.2.0 |
+| `task-link-skipped` | info | model 2, records with `task` | 0.12.0 |
+| `task-without-record` | warn | model 2, `board_export` and `research_tag` | 0.12.0 |
+| `unindexed-file` | warn | model 2, `[[lab.archive.index]]` | 0.12.0 |
+| `unknown-id` | error | `[[lab.archive.index]]` | 0.2.0 |
+| `unknown-task` | error | model 2, `board_export` | 0.12.0 |
+| `unsealed` | warn | `sealed` (seal manifest) | 0.2.0 |
+
 ## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 
 `lab` owns these. [factory.md](factory.md#how-a-lesson-is-evaluated) explains the method.

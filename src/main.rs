@@ -17,6 +17,7 @@ mod lesson_loop;
 mod lessons;
 mod replay;
 mod retro;
+mod rules;
 mod search;
 mod signals;
 mod stats;

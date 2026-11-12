@@ -66,6 +66,14 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
             "link the record that replaced it, or say on the line that the target is historical",
         ),
         "stale-kept-link" | "stale-allow" => (Links, "remove the entry from research.toml"),
+        "kept-link" => (
+            Links,
+            "nothing: a [[lab.archive.kept_link]] entry keeps this link on purpose",
+        ),
+        "archived-link" => (
+            Links,
+            "nothing: the target moved out of the project, and the offloaded list names it",
+        ),
         "index-stale" | "index-missing" => (Links, "run `lab archive index`"),
         "index-leftover" => (
             Links,
@@ -349,4 +357,18 @@ pub fn log(
         eprintln!("{undated} record(s) have no date and are not in the timeline.");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every archive rule has a stage and a fix in `lab archive done`; the
+    /// rules of `lab check` itself (`check-*`) report under `sources cited`.
+    #[test]
+    fn every_archive_rule_has_a_fix() {
+        for r in crate::rules::RULES {
+            assert_eq!(fix(r.id).is_some(), !r.id.starts_with("check-"), "{}", r.id);
+        }
+    }
 }
