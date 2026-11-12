@@ -2,7 +2,7 @@
 
 This document models the research pipeline as state machines.
 It names each machine, its states, its transitions and the place that enforces each transition.
-It covers the tools as they are (lab 0.19.0, papers 0.7.0 with the depth rules of 0.11.2 in section 4.2, claimcheck 0.11.0, prov 0.1.2, agentprof 0.4.0, the work board) and the machines that [archive-design.md](archive-design.md) adds.
+It covers the tools as they are (lab 0.21.6, papers 0.12.1, claimcheck 0.12.0, prov 0.1.3, agentprof 0.4.0, the work board; a section names the version that changed a machine) and the machines that [archive-design.md](archive-design.md) adds.
 
 An **explicit** machine has its states in code or in a config list.
 An **implicit** machine has states that exist only as a combination of files, fields or habits.
@@ -74,6 +74,8 @@ Guards added by research-factory-207: an inactive status requires `superseded_by
 | Machine | States | Defect | Outcome |
 |---|---|---|---|
 | Numbered id (DR, H) **(implicit)** | free, taken | `src/archive/index.rs:232-259` takes the highest number plus one with no reservation. Two worktrees can take the same number. Masters has H147 and H89 twice. | Fixed by 207: decision numbers are reserved in the main checkout's `.research` directory. Results use a folder slug with a date and need no number. |
+| Id on another branch **(implicit)** | free, reserved, taken here, taken on the default branch, taken in another worktree | A reservation counted only this checkout's ids and the numbers given out. A branch from an older main, or a record in another worktree, could still take a number (masters DR042 twice, research-factory-203). | Fixed by 227 (lab 0.21.3): `lab archive next` counts the ids on the default branch and in every other worktree (`src/archive/reserve.rs:1-8`). Fixed by 337 (lab 0.21.4): `lab archive check` warns `id-taken-on-default-branch` when the default branch added a record with the same id at another path since the merge base (`src/archive/gitseal.rs:152-157`). |
+| Id change | id, renumbered | Repair was by hand: rename the file, the `id:`, the heading and each link. | Fixed by 336 (lab 0.21.6): `lab archive renumber OLD NEW`. It refuses a `NEW` taken here, on the default branch or in another worktree (`src/archive/renumber.rs:264-275`), and a sealed record, since a new name would break its seal (`src/archive/renumber.rs:287-296`). It renames first, then rewrites links, and lists links in sealed text and plain mentions for a person. |
 | Follow-up folder **(implicit)** | folder without front matter, with front matter, with date | 198 folders in masters; 32 have front matter | Fixed by 193 (repair) and 189 (rule) |
 
 ### 2.3 Seal
@@ -102,6 +104,7 @@ untracked ─► committed draft ─► sealed ─► appended ─► appended .
 - `lab archive log` shows the history of one record from git. `lab archive check` caches the last verified commit, so the check reads only newer commits.
 - An accepted edit is a config entry with a reason. It is the only way out of `edited`.
 - `lab archive update` stops before the seal step when the index step fails.
+- Since lab 0.21.2 (research-factory-252), a kept link and `lab check --new-only` treat text as sealed when an earlier commit gave the record a sealed status, even if a later commit changed the status (`src/archive/gitseal.rs:662-716`, `status_sealed_by`). A baseline counts only when it is an ancestor of the commit checked.
 
 ### 2.4 Generated index
 
@@ -120,6 +123,11 @@ written ─► links resolve ─► task named and known ─► sources cited �
 
 It runs the index print, the checks for changed records, and the seal check, and it exits non-zero at the first state it cannot leave.
 It replaces the instruction "run `lab archive update`, then `lab check --new-only`".
+
+Link target **(implicit)**: a link resolves in this checkout, but its target can be `tracked`, `ignored` or `untracked` by git.
+An untracked target exists only in this checkout, so the link breaks in every other one.
+Since lab 0.20.0 (research-factory-228), `lab archive check` warns `untracked-link` for a link to an untracked file, or to a directory that holds untracked files when git tracks nothing in it (`src/archive/rules.rs:740-766`).
+It is a Warn: `lab archive done` prints the fix and still exits 0. Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
 
 ### 2.6 Topic pages and the entry page **(implicit)**
 
@@ -247,7 +255,7 @@ Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
 - `papers read` stages a plain or layout text as `<name>.txt.tmp`, records it, writes its manifest, then renames it. A failed step undoes the earlier ones. A Docling text already worked this way.
 - A catalogue entry with no depth is `depth-missing` (warn), as section 4.2 says. The 17 masters entries that had a null depth now state `unknown` with a reason.
 
-Still open: no tool has a `withdrawn` state for a retracted paper. research-factory-219 decided not to add one now. Proposal research-factory-282 holds the detection work.
+Withdrawn or retracted paper: accepted as a notice, not a registry state. Since papers 0.8.0 (research-factory-282), `papers verify` reports `verify-withdrawn` (warn) from arXiv's OAI-PMH version history, `verify-retracted` and `verify-notice` (warn) from Crossref `updated-by` and `update-to`, and `verify-updated` (info) for corrections, on every run. `verified.status` stays `match`, since these are notices, not metadata errors. No `withdrawn{at, source}` registry field was added, because nothing reads it. The masters rerun on 2507.00477 waits on arXiv's API (research-factory-291).
 
 ### 4.2 Reading depth
 
@@ -334,6 +342,7 @@ Explicit, with a file lock. An unreadable `last.json` cannot show a recent loop,
 | Check run status | ok, findings, failed | `ok` means the checker ran to completion. An exit that disagrees with the findings adds a `check-exit-mismatch` warning: exit 1 without an error finding, and since lab 0.17.0 exit 0 with one. clap refuses `--new-only` with `--at`. Fixed by 217. |
 | Baseline | none, recorded | explicit |
 | Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn fails no gate, except, since lab 0.21.0, a Warn that `lab check --new-only` finds new against the merge base in a file the change touches (research-factory-226). Accepted as the meaning of Warn; each rule this document depends on is an Error. |
+| Stored check run **(implicit)** | stored, committed, superseded and committed | A stored run in `.research/lab/checks/` is evidence, but an agent could delete or edit it, and a superseded run was often left uncommitted. Fixed by 228 (lab 0.20.0): the skill says to commit every run of a session, superseded runs included, with the text it checked. The opt-in PreToolUse hook `skill/research-factory/scripts/guard-check-runs.sh` refuses a tool call that deletes or edits a stored run; masters wires it in `.claude/settings.json`. It guards against mistakes, not intent, and fails open without jq. |
 
 ### 5.6 Replay and worktree
 
@@ -342,6 +351,7 @@ Explicit, with a file lock. An unreadable `last.json` cannot show a recent loop,
 | Replay worktree | created, checked, removed | explicit; removed on each exit path |
 | Worktree `Location` (`src/worktree.rs:17`) | NotLinked, Bare, Linked | explicit |
 | Ignored-file fallback | own checkout, main checkout | explicit since lab 0.9.10; the search index does **not** fall back: each checkout has its own index (section 3.1) |
+| Worktree data (masters) **(implicit)** | empty, seeded, pushed back | A new worktree had none of the main checkout's ~54,000 git-ignored files (research-factory-312). masters' `.claude/hooks/worktree-data.py` clones them (APFS copy-on-write) on SessionStart and after EnterWorktree, and pushes files made in the worktree back to the main checkout on Stop. It never copies `private/` or secrets; `.env` templates and files a provenance manifest lists are copied (research-factory-316). The hook's context line `worktree-data: cloned N ...` reaches the agent (verified live by research-factory-325). |
 
 ### 5.7 Retro candidate
 
@@ -417,6 +427,13 @@ experiment task ─► measured ─► decision record (proposed) ─► accepte
 The umbrella task holds this machine: its acceptance says that each configuration an experiment chose is built and installed.
 A decision that waits on the owner is a blocked task with an ask (for example research-factory-213 and DR043).
 
+Two machines inside an experiment were implicit until 12 November 2026:
+
+| Machine | States | Enforced |
+|---|---|---|
+| Experiment call batch **(implicit)** | unchecked, preflight passed, preflight failed, calling | Plain `claude -p` and `claude-api` calls also sent the model the account email and an `# Environment` block. Fixed by 224, 322 and its sub-tasks: headless calls go through `~/.claude/bin/claude-experiment` (dotfiles). `claude-experiment preflight --cap N` exits 4 when a forwarded canary request still carries either block, whatever the prompt size (327), and fails over the prompt-token cap. It turns off Claude Code's auto-memory by default (332). Callers stop the batch on a nonzero exit before any call: papers `card --preflight` (323, papers 0.12.0), and in masters E1's `llm.py` (one preflight per batch under a lock), `run-cards.sh` and `research.toml` `[papers] claude` (324). Agentic harnesses that need tools, such as E4's `run_session.sh`, still call `claude -p`. |
+| Test-set judgment pin (masters) **(implicit)** | pinned at `as_of`, drifted, re-pinned, judge again, judged | The test set names units by line range at the commit in `topics.jsonl`'s `as_of`; an edit moves them. `check_qrels.py` exits 1 for a docid that no longer matches a unit, and for each row of `work/judge-again.tsv`. `repin.py` sorts each judged pair as same, moved, changed or vanished, rewrites the first three and rewrites `as_of`; with `--write` it lists changed pairs in `work/judge-again.tsv`, so they are judged again, not rewritten silently (245). Runs and extra grade files scored against the set are moved into its coordinates too (340, 341). |
+
 ### 7.4 Text and its derivatives
 
 Covered in section 4.1 (stale derivative). The joint is between `papers` (writer) and `lab search` (reader); the sha256 in each sidecar is the shared state.
@@ -455,3 +472,9 @@ Covered in section 4.1 (stale derivative). The joint is between `papers` (writer
 | 23 | Board note to record | 7.2 | Built by 187 (board scope) |
 | 24 | Experiment to build | 7.3 | Held by the umbrella task |
 | 25 | Tool version needed by a project | 7.5 | Fixed by 207 |
+| 26 | Id on the default branch or in another worktree | 2.2 | Fixed by 227, 337; renumber by 336 |
+| 27 | Link target tracked, ignored or untracked | 2.5 | Fixed by 228 (warning) |
+| 28 | Stored check run | 5.5 | Fixed by 228 (skill rule, opt-in hook) |
+| 29 | Worktree data | 5.6 | Fixed by 312, 316 (masters hook) |
+| 30 | Experiment call batch | 7.3 | Fixed by 224, 322 to 333 |
+| 31 | Test-set judgment pin | 7.3 | Fixed by 245, 340, 341 |
