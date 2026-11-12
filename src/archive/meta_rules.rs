@@ -15,8 +15,9 @@ use crate::config::{ArchiveConfig, CONFIG_FILE, Field, SealMode};
 use crate::finding::Severity;
 
 /// The rules an `[[lab.archive.allow]]` entry may name.
-pub(super) const ALLOWED: [&str; 7] = [
+pub(super) const ALLOWED: [&str; 8] = [
     "duplicate-id",
+    "id-taken-on-default-branch",
     "missing-summary",
     "unindexed-file",
     "no-current-page",

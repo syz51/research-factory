@@ -20,7 +20,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use serde::{Deserialize, Serialize};
 
 use super::rules::Problem;
-use super::{Spec, front, seal};
+use super::{Record, Spec, front, seal};
 use crate::finding::Severity;
 
 const SCHEMA: &str = "rf.archive-git-seal/1";
@@ -129,26 +129,111 @@ pub(super) fn ids_at(spec: &Spec, rev: &str) -> Result<Option<Vec<String>>, Stri
         let Some(path) = full.strip_prefix(prefix.as_str()) else {
             continue;
         };
-        if outputs.contains(path) {
+        if outputs.contains(path) || !spec.indexes.iter().any(|i| i.files.matches(path)) {
             continue;
         }
-        let listing: Vec<_> = spec
-            .indexes
-            .iter()
-            .filter(|i| i.files.matches(path))
-            .collect();
-        if listing.is_empty() {
-            continue;
-        }
-        let Some(bytes) = blobs.get(&format!("{rev}:{full}"))? else {
-            continue;
-        };
-        for ix in listing {
-            let (meta, _) = spec.meta(Some(ix), path, &bytes, || Ok(None))?;
-            ids.extend(meta.id);
+        if let Some(bytes) = blobs.get(&format!("{rev}:{full}"))? {
+            ids.extend(blob_ids(spec, path, &bytes)?);
         }
     }
     Ok(Some(ids))
+}
+
+/// The ids that the indexes listing `path` derive for a file holding `bytes`.
+fn blob_ids(spec: &Spec, path: &str, bytes: &[u8]) -> Result<Vec<String>, String> {
+    let mut ids = Vec::new();
+    for ix in spec.indexes.iter().filter(|i| i.files.matches(path)) {
+        let (meta, _) = spec.meta(Some(ix), path, bytes, || Ok(None))?;
+        ids.extend(meta.id);
+    }
+    Ok(ids)
+}
+
+/// `id-taken-on-default-branch`: a record of the work tree whose id a record
+/// added on the default branch since the merge base has, at a path the work
+/// tree lacks. After a rebase or merge both would be there, a `duplicate-id`.
+/// A record that had the id at the merge base is left alone: the default
+/// branch moved or copied it. Nothing outside git, without a default branch
+/// or a common commit, or when `HEAD` contains the default branch.
+pub(super) fn taken_on_default(spec: &Spec, records: &[&Record]) -> Result<Vec<Problem>, String> {
+    let root = spec.root();
+    let Some(prefix) = prefix(root) else {
+        return Ok(Vec::new());
+    };
+    let Some(branch) = crate::worktree::default_branch(root)? else {
+        return Ok(Vec::new());
+    };
+    let Some(tip) = commit(root, &branch)? else {
+        eprintln!("note: rule id-taken-on-default-branch skipped: `{branch}` names no commit");
+        return Ok(Vec::new());
+    };
+    let Some(base) = crate::worktree::merge_base(root, &tip)? else {
+        return Ok(Vec::new());
+    };
+    if base == tip {
+        return Ok(Vec::new());
+    }
+    let added = output(
+        root,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=A",
+            "--relative",
+            &base,
+            &tip,
+            "--",
+        ],
+        b"",
+    )?;
+    let outputs: BTreeSet<&str> = spec.cfg.index.iter().map(|i| i.output.as_str()).collect();
+    let mut blobs = Blobs::open(root)?;
+    // Each id of a record added there, with its path.
+    let mut theirs: Vec<(String, String)> = Vec::new();
+    for path in added.split(|&b| b == 0).filter(|p| !p.is_empty()) {
+        let path = String::from_utf8_lossy(path).into_owned();
+        if outputs.contains(path.as_str())
+            || !spec.indexes.iter().any(|i| i.files.matches(&path))
+            || root.join(&path).exists()
+        {
+            continue;
+        }
+        if let Some(bytes) = blobs.get(&format!("{tip}:{prefix}{path}"))? {
+            for id in blob_ids(spec, &path, &bytes)? {
+                theirs.push((id, path.clone()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for r in records {
+        let Some(id) = r.meta.id.as_deref() else {
+            continue;
+        };
+        let Some((_, other)) = theirs.iter().find(|(i, _)| i == id) else {
+            continue;
+        };
+        let at_base = match blobs.get(&format!("{base}:{prefix}{}", r.path))? {
+            Some(bytes) => blob_ids(spec, &r.path, &bytes)?,
+            None => Vec::new(),
+        };
+        if at_base.iter().any(|i| i == id) {
+            continue;
+        }
+        let mut p = Problem::new(
+            "id-taken-on-default-branch",
+            Severity::Warn,
+            &r.path,
+            format!(
+                "has id {id}, which {other} also has on {branch}; take a new id from \
+                 `lab archive next <prefix>` and rename this record before the merge"
+            ),
+        );
+        p.data = Some(serde_json::json!({"id": id, "other": other, "branch": branch}));
+        out.push(p);
+    }
+    Ok(out)
 }
 
 /// Reads blobs through one `git cat-file --batch` process.

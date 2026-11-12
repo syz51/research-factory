@@ -128,6 +128,7 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
     let records = spec.records(by_index, &mut texts)?;
     let mut out = Vec::new();
     record_problems(spec, &records, &mut out);
+    out.extend(super::gitseal::taken_on_default(spec, &unique(&records))?);
     if let Some(rule) = &spec.open_items {
         rule.problems(spec, &found, &mut texts, &mut out)?;
     }
