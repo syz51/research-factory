@@ -395,6 +395,8 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `seal-unverified` | error | model 2, `seal = "git"` | 0.12.0 |
 | `sealed-edited` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
 | `sealed-missing` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
+| `similar-record` | warn | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
+| `similar-skipped` | info | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
 | `size-budget` | warn (configurable) | `[[lab.archive.budget]]` | 0.2.0 |
 | `stale-allow` | warn | model 2, `[[lab.archive.allow]]` | 0.12.0 |
 | `stale-kept-link` | warn | `[[lab.archive.kept_link]]` | 0.9.11 |
