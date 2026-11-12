@@ -45,6 +45,7 @@ pub(super) fn validate(cfg: &ArchiveConfig) -> Result<(), String> {
             ("task_from", cfg.task_from.is_some()),
             ("board_export", cfg.board_export.is_some()),
             ("research_tag", cfg.research_tag.is_some()),
+            ("research_parents", !cfg.research_parents.is_empty()),
             (
                 "summary_min_chars",
                 cfg.summary_min_chars != defaults.summary_min_chars,
@@ -164,6 +165,9 @@ pub(super) fn validate(cfg: &ArchiveConfig) -> Result<(), String> {
     }
     if cfg.research_tag.is_some() && cfg.board_export.is_none() {
         return err("`research_tag` needs `board_export`".into());
+    }
+    if !cfg.research_parents.is_empty() && cfg.board_export.is_none() {
+        return err("`research_parents` needs `board_export`".into());
     }
     let mut names = BTreeSet::new();
     for g in &cfg.page_group {
@@ -362,6 +366,9 @@ struct Task {
     id: String,
     done: bool,
     tags: Vec<String>,
+    parent: Option<String>,
+    /// `updated_at` as the export prints it, such as `2026-11-12T03:04:05Z`.
+    updated: Option<String>,
 }
 
 /// Runs `board_export` and reads its JSON: an array of tasks, or an object
@@ -418,6 +425,11 @@ fn board_tasks(spec: &Spec, command: &[String]) -> Result<Vec<Task>, String> {
                 id: t.get("id")?.as_str()?.to_string(),
                 done: t.get("status").and_then(|s| s.as_str()) == Some("done"),
                 tags: strings("tags").chain(strings("labels")).collect(),
+                parent: t.get("parent").and_then(|v| v.as_str()).map(String::from),
+                updated: t
+                    .get("updated_at")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             })
         })
         .collect())
@@ -508,24 +520,53 @@ fn tasks(spec: &Spec, records: &[&Record], out: &mut Vec<Problem>) {
             ));
         }
     }
-    if let Some(tag) = &cfg.research_tag {
-        for t in board
-            .iter()
-            .filter(|t| t.done && t.tags.contains(tag) && !named.contains(t.id.as_str()))
-        {
-            let mut p = Problem::new(
-                "task-without-record",
-                Severity::Warn,
-                CONFIG_FILE,
-                format!(
-                    "task {} is done and tagged `{tag}`, but no record names it; write the \
-                     record, or add `task: {}` to the record that holds its result",
-                    t.id, t.id
-                ),
-            );
-            p.subject = Some(t.id.clone());
-            out.push(p);
+    if cfg.research_tag.is_none() && cfg.research_parents.is_empty() {
+        return;
+    }
+    let parents: BTreeMap<&str, &str> = board
+        .iter()
+        .filter_map(|t| Some((t.id.as_str(), t.parent.as_deref()?)))
+        .collect();
+    // Why a task is research work: its tag, or the listed task it is below.
+    let research = |t: &Task| -> Option<String> {
+        if let Some(tag) = cfg.research_tag.as_ref().filter(|tag| t.tags.contains(tag)) {
+            return Some(format!("tagged `{tag}`"));
         }
+        // The step limit ends a `parent` cycle in the export.
+        let mut id = Some(t.id.as_str());
+        for _ in 0..=board.len() {
+            let current = id?;
+            if cfg.research_parents.iter().any(|p| p == current) {
+                return Some(if current == t.id {
+                    "listed in `research_parents`".to_string()
+                } else {
+                    format!("below {current}, which `research_parents` lists")
+                });
+            }
+            id = parents.get(current).copied();
+        }
+        None
+    };
+    for t in board.iter().filter(|t| {
+        t.done
+            && !named.contains(t.id.as_str())
+            // Work closed before `task_from` needs no record of model 2.
+            && !(cfg.task_from.as_ref())
+                .is_some_and(|from| t.updated.as_ref().is_some_and(|u| u < from))
+    }) {
+        let Some(why) = research(t) else { continue };
+        let mut p = Problem::new(
+            "task-without-record",
+            Severity::Warn,
+            CONFIG_FILE,
+            format!(
+                "task {} is done and {why}, but no record names it; write the record, or add \
+                 `task: {}` to the record that holds its result",
+                t.id, t.id
+            ),
+        );
+        p.subject = Some(t.id.clone());
+        out.push(p);
     }
 }
 

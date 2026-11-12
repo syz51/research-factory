@@ -254,6 +254,10 @@ pub struct ArchiveConfig {
     /// A done task of the board export with this tag needs a record that names it.
     #[serde(default)]
     pub research_tag: Option<String>,
+    /// A done task of the board export that is one of these tasks or below
+    /// one, following `parent`, needs a record that names it.
+    #[serde(default)]
+    pub research_parents: Vec<String>,
     /// The shortest accepted `summary`, in characters.
     #[serde(default = "default_summary_min_chars")]
     pub summary_min_chars: usize,

@@ -738,6 +738,59 @@ fn records_name_a_task_that_the_board_knows() {
             "{text}"
         );
     }
+
+    // `research_parents`: a done task at or below a listed task needs a
+    // record, unless it changed before `task_from`. U-5 and U-6 form a
+    // `parent` cycle, which must end.
+    write(
+        d,
+        "board.json",
+        r#"[{"id":"T-2","status":"doing"},{"id":"T-9","status":"doing"},
+            {"id":"U-0","status":"done","updated_at":"2026-10-03T00:00:00Z"},
+            {"id":"U-1","status":"done","parent":"U-0","updated_at":"2026-11-01T09:00:00Z"},
+            {"id":"U-2","status":"done","parent":"U-1"},
+            {"id":"U-3","status":"done","parent":"U-0","updated_at":"2026-10-02T23:59:59Z"},
+            {"id":"U-4","status":"done","updated_at":"2026-11-01T09:00:00Z"},
+            {"id":"U-5","status":"done","parent":"U-6"},
+            {"id":"U-6","status":"done","parent":"U-5"},
+            {"id":"U-7","status":"doing","parent":"U-0"}]"#,
+    );
+    write(
+        d,
+        "research.toml",
+        &with(
+            "task_from = \"2026-10-03\"\nboard_export = [\"cat\", \"board.json\"]\n\
+             research_parents = [\"U-0\"]\n",
+        ),
+    );
+    let (code, text) = check(d);
+    assert_eq!(code, Some(0), "{text}");
+    assert_eq!(
+        rules(&text),
+        [
+            "warn task-without-record U-0",
+            "warn task-without-record U-1",
+            "warn task-without-record U-2",
+        ]
+    );
+    assert!(
+        text.contains("task U-2 is done and below U-0, which `research_parents` lists"),
+        "{text}"
+    );
+    assert!(
+        text.contains("task U-0 is done and listed in `research_parents`"),
+        "{text}"
+    );
+
+    // Without `board_export` the setting is a config error.
+    write(d, "research.toml", &with("research_parents = [\"U-0\"]\n"));
+    let out = lab(d, &["archive", "check"]);
+    assert_eq!(out.status.code(), Some(2), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("`research_parents` needs `board_export`"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
