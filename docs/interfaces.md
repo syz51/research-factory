@@ -173,6 +173,10 @@ stages = ["lexical"]                 # the stages a query should run: lexical, d
 cites = ['\[(?P<key>\d+)\]']         # since 0.15.0: more citation forms, each with a group `key`
 refresh_budget_ms = 5000             # a query's refresh of changed files stops after this time; `lab archive done` indexes them all
 lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
+default_scopes = ["notes", "refs"]   # the scopes a query without --in searches (since lab 0.16.0)
+cards = ["docs/research/sources/cards/*.json"]  # paper cards of the `refs` scope
+files = ["runs/**"]                  # the files of the `files` scope
+files_exclude = ["runs/**/*.tmp"]
 
 [lab.search.classes]                 # source classes by path; a file in none is `own`
 paper = ["docs/papers/**"]
@@ -187,9 +191,29 @@ historical = ["docs/old/**"]
 - Of the stages, this version builds `lexical` and, since 0.15.0, `graph`. A query that `stages` asks another stage for ends as `partial` and names the stage.
 - `cites` adds citation patterns (Rust regular expressions) to the two that are always read: `ref:<key>`, and a link to the `#reference-<key>` anchor of a file. Each pattern needs a group named `key`; a pattern without one, or one that does not compile, stops the query with an error.
 
-The unit of the index is one Markdown section: from a heading to the line before the next heading, cut at a blank line when it is longer than 120 lines. A file without text below a heading is one unit. A unit's anchor is `path#Lstart-Lend`: the path relative to the project root and 1-based line numbers of the file, both inclusive, the heading line included. Two anchors name the same text when their paths are equal and their line ranges overlap.
+#### Scopes
 
-The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each checkout: a linked git worktree builds its own and never reads the main checkout's. Its directory ignores itself in git. Each query first compares every file's size and modification time with the index, and reads the changed files (a file whose content hash is the same is not indexed again) and removes the deleted ones. An index of another schema version or another configuration, and a file that SQLite cannot read, are replaced: the new index is written to a second file and renamed over the old one. One process writes at a time (`lock`, an advisory file lock); a query that finds the lock held answers from the last committed state and says the index is stale.
+`--in` takes scopes, repeated or comma-separated, or `all`; without it a query searches `default_scopes`. A query builds and refreshes only the scopes it searches; the first query of a scope adds the whole scope, without the refresh budget.
+
+| Scope | Sources | Unit | Anchor | Class |
+|---|---|---|---|---|
+| `notes` | the Markdown files above | Markdown section | `path#Lstart-Lend` | by `classes` |
+| `refs` | the entries of the registry (`[papers] registry`, default `references.jsonl`), and the paper cards | an entry: its `abstract` and its catalogue line (`source.path`, `source.line`); each card item | `ref:<key>`; a card item `text#Lfirst-Llast` of its quote | `paper`; a card `generated` |
+| `texts` | the extracted text of each entry | passage of about 200 words | `text#Lstart-Lend` | `paper` |
+| `files` | `files`, or else the files git tracks that are not Markdown and not notes | the file's path words, size and the record of the nearest directory that holds a note with an id | the path | by `classes` |
+| `sessions` | the main sessions of the `rf.session/1` list (`[lab] agent_sessions`, else `sessions.jsonl` beside `agent_findings`) whose transcript is `present` | a message the person typed (not tool results, not injected context), at most 8000 characters | `transcript#Ln` (JSONL line) | `chat` |
+| `board` | the tasks that `[lab.archive] board_export` prints (an array, or `{"tasks": [...]}`; each task's `notes` when the export has them) | the task's title, body, acceptance and summary; each note | `board:<id>`, `board:<id>#note-<n>` | `chat` |
+
+- **Registry.** lab reads each line as JSON without a fixed schema: `key` (string or number), `title`, `authors` (may be null), `year`, `venue`, `depth`, `abstract`, `ids.arxiv`, `ids.doi`, `texts` (`[{path, extraction}]`), `duplicate_of` and `source`. An entry whose `duplicate_of` chain ends at another entry is a unit of that entry, with the heading `duplicate ref:<key>`; a hit names the target's key. A chain that loops or names a missing key ends at the entry itself. `ref:<key>`, the arXiv id without its version and the DOI without `https://doi.org/` are exact lookups, as is a query of one registry key alone (`lab search 232`). The name of a text file is a short name of its entry and an exact lookup too (`hirec.txt` makes `HiREC` find its entry), unless the name holds no letter, is the key, is a generic word such as `paper` or `main`, lies in a directory named by the key, or is shared with another entry's text. Text output of a `refs` hit: `ref:<key> · year · first author · title · depth · text path`.
+- **Texts.** Of an entry and its duplicates, the text with an `extraction` other than null or `plain` (the last one listed) is preferred, else the first plain one; a text path that this checkout lacks and git ignores is read from the main checkout of a linked worktree. NUL bytes read as spaces. With a structure file `<text>.structure.json` (`rf.paper-structure/1`) whose `text.sha256` equals the text's, a passage stays within one section, the section's heading is its heading, and `references` sections are left out; without one, passages run through the whole text. Lines are joined for matching (a word split by a hyphen at a line end is one word) while anchors keep the text's line numbers. Each passage carries the paper's title and its registry key (`hits[].key`).
+- **Paper cards** (`rf.paper-card/1`, default `sources/cards/*.json` beside the registry): each item is a unit of `field`, `value` and `quote` at the quote's `lines`. A card is routing text: class `generated`, which keeps 0.5 of its score.
+- **Stale derivative.** A structure file or card whose recorded `text.sha256` differs from its text's sha256 is ignored: the passages are cut without the structure file, the card gives no unit. A query of the scope ends `partial` and names it, and `lab archive check` and `lab archive done` report it as a `stale-derivative` warning.
+- **Unreachable sources.** A board export that fails, prints no task array or runs longer than 15 seconds, no configured board command, and a missing session list make the query `partial` with a notice naming the scope, never an error; the index keeps what it held of that scope.
+- **Numbers.** A decimal number in a query is one term, without a fraction of only zeros: `47.0%` finds `47` and `47.0`, and `0.50` finds `0.50`.
+
+The unit of the `notes` scope is one Markdown section: from a heading to the line before the next heading, cut at a blank line when it is longer than 120 lines. A file without text below a heading is one unit. A unit's anchor is `path#Lstart-Lend`: the path relative to the project root and 1-based line numbers of the file, both inclusive, the heading line included. Two anchors name the same text when their paths are equal and their line ranges overlap.
+
+The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each checkout: a linked git worktree builds its own and never reads the main checkout's. Its directory ignores itself in git. Each query first compares the stamp of every source of the scopes it searches (a file's size and modification time; an entry's JSON line and catalogue line; a task's JSON) with the index, and reads the changed sources (a file whose content hash is the same is not indexed again) and removes the deleted ones. An index of another schema version or another configuration, and a file that SQLite cannot read, are replaced: the new index is written to a second file and renamed over the old one. One process writes at a time (`lock`, an advisory file lock); a query that finds the lock held answers from the last committed state and says the index is stale.
 
 `lab search --json` prints one object:
 
@@ -213,6 +237,8 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `query` | The phrasings: the arguments as one phrasing when each is one word, otherwise one phrasing for each argument. |
 | `stages` | Each stage as `ready`, `missing` or `failed`. |
 | `unknown` | The query words that no unit holds, each with up to three near indexed words. |
+| `scopes` | The scopes searched. A query with no hit prints the scopes it did not search. |
+| `hits[].scope`, `hits[].key`, `hits[].info` | The hit's scope; the registry key of a `refs` or `texts` hit; facts of the source: for an entry `key`, `year`, `first_author`, `depth`, `venue`, `text` (the local text) and `duplicates`; for a passage `extraction` and `structure` (`used`, `stale` or `none`). |
 | `hits[].hash` | The content hash of the unit's indexed text (32 hexadecimal characters of its SHA-256). |
 | `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
 | `hits[].missing` | The query words the unit lacks; absent when it has all. |
@@ -473,6 +499,7 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `similar-skipped` | info | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
 | `size-budget` | warn (configurable) | `[[lab.archive.budget]]` | 0.2.0 |
 | `stale-allow` | warn | model 2, `[[lab.archive.allow]]` | 0.12.0 |
+| `stale-derivative` | warn | a registry (`[papers] registry`) with structure files or paper cards | 0.16.0 |
 | `stale-kept-link` | warn | `[[lab.archive.kept_link]]` | 0.9.11 |
 | `status-reversed` | error | model 2, `seal = "git"` | 0.12.0 |
 | `superseded-but-active` | warn | `[[lab.archive.index]]` | 0.2.0 |

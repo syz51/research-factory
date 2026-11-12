@@ -117,7 +117,7 @@ enum Command {
     /// Index, seal and check the research archive configured in [lab.archive].
     #[command(subcommand)]
     Archive(ArchiveCommand),
-    /// Search the project's notes: ranked sections with path, line range and a snippet.
+    /// Search the project's notes, reference registry, paper texts and more: ranked units with an anchor and a snippet.
     ///
     /// Words rank sections that hold all of them first, then sections that
     /// hold some. Put a phrase in double quotes inside one argument
@@ -127,8 +127,10 @@ enum Command {
     Search {
         /// The words, or several phrasings, to search for.
         query: Vec<String>,
-        /// The scope to search (repeatable): notes.
-        #[arg(long = "in", value_name = "SCOPE", default_value = "notes")]
+        /// The scopes to search, repeatable or comma-separated: notes, refs,
+        /// texts, files, sessions, board, or all (default: [lab.search]
+        /// default_scopes, which is notes and refs).
+        #[arg(long = "in", value_name = "SCOPE", value_delimiter = ',')]
         scopes: Vec<String>,
         /// At most this many hits (default 8).
         #[arg(long)]
@@ -456,6 +458,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                             .map(|i| i.output.clone())
                             .collect(),
                         mcp: brief::lab_mcp_configured(&project.root),
+                        registry: project
+                            .root
+                            .join(&project.registry)
+                            .is_file()
+                            .then(|| project.registry.clone()),
                     };
                     Some(if a.model >= 2 {
                         let printed: Vec<String> = a

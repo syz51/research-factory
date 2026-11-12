@@ -144,6 +144,11 @@ impl Fallback {
         Ok(self.ignored([rel])?.pop_first().map(|p| self.main.join(p)))
     }
 
+    /// `rel` in the main checkout, for a path that `resolve` returned.
+    pub fn main_file(&self, rel: &str) -> PathBuf {
+        self.main.join(rel)
+    }
+
     /// The ignored ones of `paths`, from one `git check-ignore --stdin`.
     fn ignored<'a>(
         &self,

@@ -1075,7 +1075,7 @@ impl Related {
 
 /// `lab related`.
 pub fn run(project: &Project, name: &str, limit: usize, json: bool) -> Result<ExitCode, String> {
-    let ctx = Context::new(project)?;
+    let ctx = Context::new(project, project.lab.search.default_scopes.clone())?;
     let opened = index::open(&ctx, false)?;
     if let Some(why) = &opened.stale {
         eprintln!("lab: partial: the index is stale: {why}");

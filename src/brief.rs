@@ -409,6 +409,8 @@ pub struct Archive {
     pub indexes: Vec<String>,
     /// The project's `.mcp.json` runs `lab mcp` (see `lab_mcp_configured`).
     pub mcp: bool,
+    /// The reference registry, when it exists.
+    pub registry: Option<String>,
 }
 
 /// Whether the project's `.mcp.json` has a server whose command is `lab`
@@ -472,6 +474,12 @@ pub fn archive(a: &Archive) -> String {
             "- Agents search more through MCP: add \
              `{\"mcpServers\":{\"lab\":{\"type\":\"stdio\",\"command\":\"lab\",\"args\":[\"mcp\"]}}}` \
              to `.mcp.json`.\n",
+        );
+    }
+    if let Some(registry) = &a.registry {
+        let _ = writeln!(
+            out,
+            "- Before `papers search` or `papers fetch`, check the registry {registry}: `lab search --in refs <title words or author>`."
         );
     }
     out.push_str("- Before finishing: `lab archive update`, then `lab check --new-only`.\n");
@@ -884,6 +892,7 @@ mod tests {
             start: None,
             indexes: Vec::new(),
             mcp: false,
+            registry: None,
         };
         let text = archive_model_2(&a, &["decisions".into()]);
         assert!(text.contains("`lab archive index --print <name>`; the names are decisions."));
@@ -897,6 +906,7 @@ mod tests {
             start: Some(("docs/START.md".into(), Some(6246))),
             indexes: vec!["docs/history/INDEX.md".into()],
             mcp: false,
+            registry: Some("references.jsonl".into()),
         };
         assert_eq!(
             archive(&a),
@@ -905,12 +915,14 @@ mod tests {
              - Agents search more through MCP: add \
              `{\"mcpServers\":{\"lab\":{\"type\":\"stdio\",\"command\":\"lab\",\"args\":[\"mcp\"]}}}` \
              to `.mcp.json`.\n\
+             - Before `papers search` or `papers fetch`, check the registry references.jsonl: `lab search --in refs <title words or author>`.\n\
              - Before finishing: `lab archive update`, then `lab check --new-only`.\n"
         );
         let missing = archive(&Archive {
             start: Some(("docs/START.md".into(), None)),
             indexes: vec![],
             mcp: false,
+            registry: None,
         });
         assert!(missing.contains("The start page docs/START.md does not exist yet"));
         assert!(missing.contains("`lab search <words>`.\n"));
@@ -940,6 +952,7 @@ mod tests {
             start: None,
             indexes: vec![],
             mcp: true,
+            registry: None,
         });
         assert!(
             text.contains("the `archive_search` tool before a grep"),

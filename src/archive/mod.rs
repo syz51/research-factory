@@ -608,10 +608,30 @@ pub fn update(project: &Project) -> Result<ExitCode, String> {
     Ok(exit(seal_files(&spec, &sealed)?))
 }
 
+/// Every archive rule's findings, with the derivatives search ignores.
+fn problems(project: &Project, spec: &Spec) -> Result<Vec<rules::Problem>, String> {
+    let mut problems = rules::problems(spec)?;
+    // A structure file or paper card made from an older text, which search
+    // ignores. A `[lab.search]` that does not load stops only this rule.
+    let stale = crate::search::stale_derivatives(project).unwrap_or_else(|e| {
+        eprintln!("lab: stale derivatives not checked: {e}");
+        Vec::new()
+    });
+    for (path, why) in stale {
+        problems.push(rules::Problem::new(
+            "stale-derivative",
+            Severity::Warn,
+            &path,
+            format!("stale derivative: {why}"),
+        ));
+    }
+    Ok(problems)
+}
+
 /// `lab archive check`: every rule, read-only.
 pub fn check(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
-    let mut problems = rules::problems(&spec)?;
+    let mut problems = problems(project, &spec)?;
     problems.extend(similar_problems(&spec));
     let errors = problems
         .iter()

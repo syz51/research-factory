@@ -15,6 +15,8 @@ pub struct Project {
     pub tz: jiff::tz::TimeZone,
     pub state_dir: PathBuf,
     pub lab: LabConfig,
+    /// The reference registry (`[papers] registry`), relative to the root.
+    pub registry: String,
 }
 
 /// The shared `[project]` table. Unknown keys are left to other tools.
@@ -32,6 +34,15 @@ struct RawConfig {
     project: ProjectTable,
     #[serde(default)]
     lab: LabConfig,
+    #[serde(default)]
+    papers: PapersTable,
+}
+
+/// The `[papers]` table, which belongs to the papers tool. lab reads only
+/// where the registry is.
+#[derive(Debug, Default, Deserialize)]
+struct PapersTable {
+    registry: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -682,6 +693,10 @@ impl Project {
             tz,
             state_dir,
             lab: raw.lab,
+            registry: raw
+                .papers
+                .registry
+                .unwrap_or_else(|| "references.jsonl".into()),
         })
     }
 

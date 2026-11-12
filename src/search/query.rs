@@ -8,8 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use super::index::{BODY_COLUMN, Fault, WEIGHTS};
+use super::refs::{normal_arxiv, normal_doi};
 use super::thesaurus::Entry;
-use super::{Class, Context, graph};
+use super::{Class, Context, Scope, graph};
 
 /// Candidates taken from each retrieval of one phrasing.
 const CANDIDATES: usize = 100;
@@ -138,7 +139,34 @@ pub fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parses one phrasing. Punctuation splits words; `"…"` makes a phrase.
+/// A decimal number as the words the index holds, without a fraction of only
+/// zeros: `47.0%` is `47`, `0.50` is `0 50`. `None` for other words.
+fn number(word: &str) -> Option<Vec<String>> {
+    let core = word.trim_matches(|c: char| !c.is_ascii_digit());
+    let (int, frac) = core.split_once('.')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let rest = word.replacen(core, "", 1);
+    if !digits(int) || !digits(frac) || rest.chars().any(char::is_alphanumeric) {
+        return None;
+    }
+    // A fraction of only zeros adds nothing (`47.0` is `47`); any other is
+    // kept as written, since the index holds the text's tokens as written.
+    let frac = if frac.bytes().all(|b| b == b'0') {
+        ""
+    } else {
+        frac
+    };
+    Some(
+        [int, frac]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// Parses one phrasing. Punctuation splits words; `"…"` makes a phrase; a
+/// decimal number is one term.
 pub fn parse(text: &str) -> Result<Phrasing, String> {
     let mut terms: Vec<Term> = Vec::new();
     let mut add = |tokens: Vec<String>| {
@@ -155,8 +183,11 @@ pub fn parse(text: &str) -> Result<Phrasing, String> {
         if i % 2 == 1 {
             add(words(piece));
         } else {
-            for word in words(piece) {
-                add(vec![word]);
+            for chunk in piece.split_whitespace() {
+                match number(chunk) {
+                    Some(tokens) => add(tokens),
+                    None => words(chunk).into_iter().for_each(|w| add(vec![w])),
+                }
             }
         }
     }
@@ -220,8 +251,12 @@ pub struct Explain {
 #[derive(Debug, Serialize)]
 pub struct Hit {
     pub rank: usize,
-    /// `path#Lstart-Lend`: 1-based inclusive lines of the source file.
+    /// `path#Lstart-Lend`: 1-based inclusive lines of the source file;
+    /// `ref:<key>` for a registry entry; `board:<id>` or `board:<id>#note-<n>`
+    /// for a board task; `transcript#L<n>` for a session message.
     pub anchor: String,
+    pub scope: Scope,
+    /// The source's key: a path, `ref:<key>`, `session:<source>:<id>` or `board:<id>`.
     pub path: String,
     pub start: i64,
     pub end: i64,
@@ -230,6 +265,12 @@ pub struct Hit {
     /// The content hash of the unit's indexed text.
     pub hash: String,
     pub record: RecordInfo,
+    /// The registry key of a `refs` or `texts` hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Scope-specific facts: year, first author, depth and text of an entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub info: Option<serde_json::Value>,
     /// The query terms the unit lacks.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing: Vec<String>,
@@ -320,6 +361,10 @@ struct Candidate {
     heading: String,
     hash: String,
     path: String,
+    scope: Scope,
+    anchor: Option<String>,
+    key: Option<String>,
+    info: Option<serde_json::Value>,
     record: RecordInfo,
 }
 
@@ -340,9 +385,40 @@ fn retrieve(
     index: usize,
     phrasing: &Phrasing,
     opts: &Options,
+    scopes: Option<&str>,
     allowed: Option<&HashSet<i64>>,
 ) -> Result<(Vec<Candidate>, Vec<usize>), Fault> {
     let statuses = opts.statuses;
+    // The status and scope filters are part of each retrieval, so that they
+    // apply before the cut to the best candidates.
+    let mut conds = Vec::new();
+    if !statuses.is_empty() {
+        let list: Vec<String> = statuses
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect();
+        conds.push(format!("f.status IN ({})", list.join(", ")));
+    }
+    if let Some(list) = scopes {
+        conds.push(format!("f.scope IN ({list})"));
+    }
+    // The unary `+` keeps SQLite from handing a list to FTS5 as a rowid
+    // constraint, which runs the whole match once per listed unit.
+    let filter = |column: &str| {
+        let mut out = String::new();
+        if !conds.is_empty() {
+            out = format!(
+                " AND +{column} IN (SELECT u.id FROM units u JOIN files f ON f.id = u.file_id \
+                 WHERE {})",
+                conds.join(" AND ")
+            );
+        }
+        if let Some(sql) = opts.filter {
+            out.push_str(&format!(" AND +{column} IN ({sql})"));
+        }
+        out
+    };
+    let in_scope = scopes.map_or(String::new(), |list| format!(" AND f.scope IN ({list})"));
     // Unit id to its BM25 score, trigram score and matched terms.
     let mut found: HashMap<i64, (f64, f64, u64)> = HashMap::new();
     let mut known = Vec::new();
@@ -350,7 +426,10 @@ fn retrieve(
     for (i, term) in phrasing.terms.iter().enumerate() {
         let hit = conn
             .query_row(
-                "SELECT 1 FROM units_fts WHERE units_fts MATCH ?1 LIMIT 1",
+                &format!(
+                    "SELECT 1 FROM units_fts WHERE units_fts MATCH ?1{} LIMIT 1",
+                    filter("rowid")
+                ),
                 [term.fts()],
                 |_| Ok(()),
             )
@@ -361,31 +440,11 @@ fn retrieve(
             unknown.push(i);
         }
     }
-    // The status filter is part of each retrieval, so that it applies before
-    // the cut to the best candidates.
-    let with_status = |column: &str| {
-        let filter = opts
-            .filter
-            .map(|sql| format!(" AND {column} IN ({sql})"))
-            .unwrap_or_default();
-        if statuses.is_empty() {
-            return filter;
-        }
-        let list: Vec<String> = statuses
-            .iter()
-            .map(|s| format!("'{}'", s.replace('\'', "''")))
-            .collect();
-        format!(
-            " AND {column} IN (SELECT u.id FROM units u JOIN files f ON f.id = u.file_id \
-             WHERE f.status IN ({})){filter}",
-            list.join(", ")
-        )
-    };
     // Words: the units with every known term, then those with any.
     let ranked = format!(
         "SELECT rowid, rank FROM units_fts WHERE units_fts MATCH ?1 \
          AND rank MATCH 'bm25({WEIGHTS})'{} ORDER BY rank LIMIT {CANDIDATES}",
-        with_status("rowid")
+        filter("rowid")
     );
     let mut lexical = conn.prepare(&ranked)?;
     let mut joins = vec![" OR "];
@@ -427,7 +486,7 @@ fn retrieve(
         let mut holders = conn.prepare_cached(&format!(
             "SELECT doc, count(*) FROM units_inst WHERE term = ?1{} \
              GROUP BY doc ORDER BY 2 DESC LIMIT {CANDIDATES}",
-            with_status("doc")
+            filter("doc")
         ))?;
         for word in &words {
             let rows =
@@ -443,13 +502,24 @@ fn retrieve(
     }
     // An exact record id: every retrieved unit of the record, or its first unit.
     let mut exact_files = HashSet::new();
+    let mut names: Vec<String> = Vec::new();
     for word in &phrasing.raw {
-        let mut stmt = conn.prepare_cached(
-            "SELECT f.id, (SELECT min(u.id) FROM units u WHERE u.file_id = f.id) \
-             FROM files f WHERE f.record_id = ?1 COLLATE NOCASE",
-        )?;
         // `D002,` and `H158?` name the ids D002 and H158.
         let id = word.trim_matches(|c: char| !c.is_alphanumeric());
+        names.extend([id.to_string(), normal_arxiv(id), normal_doi(id)]);
+        // A registry key alone: `232` names `ref:232`.
+        if phrasing.raw.len() == 1 && !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+            names.push(format!("ref:{id}"));
+        }
+    }
+    names.sort();
+    names.dedup();
+    for id in names.iter().filter(|n| !n.is_empty()) {
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT f.id, (SELECT min(u.id) FROM units u WHERE u.file_id = f.id) \
+             FROM files f WHERE (f.record_id = ?1 COLLATE NOCASE \
+             OR f.id IN (SELECT file_id FROM aliases WHERE alias = ?1 COLLATE NOCASE)){in_scope}"
+        ))?;
         let rows = stmt.query_map([id], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?))
         })?;
@@ -519,7 +589,8 @@ fn load(
     let mut c = conn
         .prepare_cached(
             "SELECT u.file_id, u.start_line, u.end_line, u.heading, u.hash, f.path, f.class, \
-             f.record_id, f.title, f.date, f.status, f.kind, f.task, f.superseded_by \
+             f.record_id, f.title, f.date, f.status, f.kind, f.task, f.superseded_by, \
+             f.scope, f.anchor, f.ref_key, f.info \
              FROM units u JOIN files f ON f.id = u.file_id WHERE u.id = ?1",
         )?
         .query_row([unit], |r| {
@@ -544,6 +615,12 @@ fn load(
                 heading: r.get(3)?,
                 hash: r.get(4)?,
                 path: r.get(5)?,
+                scope: Scope::parse(&r.get::<_, String>(14)?).unwrap_or(Scope::Notes),
+                anchor: r.get(15)?,
+                key: r.get(16)?,
+                info: r
+                    .get::<_, Option<String>>(17)?
+                    .and_then(|i| serde_json::from_str(&i).ok()),
                 record: RecordInfo {
                     id: r.get(7)?,
                     title: r.get(8)?,
@@ -725,8 +802,17 @@ pub fn search(
     // Unit id to the rank and the candidate of the phrasing that ranks it best.
     let mut best: HashMap<i64, (usize, Candidate)> = HashMap::new();
     let mut unknown: Vec<Unknown> = Vec::new();
+    let scopes = scope_filter(conn, ctx)?;
     for (i, phrasing) in phrasings.iter().enumerate() {
-        let (candidates, absent) = retrieve(conn, ctx, i, phrasing, opts, allowed.as_ref())?;
+        let (candidates, absent) = retrieve(
+            conn,
+            ctx,
+            i,
+            phrasing,
+            opts,
+            scopes.as_deref(),
+            allowed.as_ref(),
+        )?;
         for (rank, mut c) in candidates.into_iter().enumerate() {
             let share = 1.0 / (RRF_K + rank as f64 + 1.0);
             // The phrasing that ranks a unit best describes it; every phrasing adds its share.
@@ -818,7 +904,7 @@ pub fn search(
         let linked_by = graph::linked_by(conn, c.file, &c.path)?;
         hits.push(Hit {
             rank: hits.len() + 1,
-            anchor: format!("{}#L{}-L{}", c.path, c.start, c.end),
+            anchor: anchor(&c),
             snippet: snippet(conn, c.unit, phrasing)?,
             explain: Some(Explain {
                 exact_id: c.exact_id,
@@ -844,11 +930,14 @@ pub fn search(
             also_in: also
                 .into_iter()
                 .map(|a| AlsoIn {
-                    anchor: format!("{}#L{}-L{}", a.path, a.start, a.end),
+                    anchor: anchor(&a),
                     id: a.record.id,
                     title: a.record.title,
                 })
                 .collect(),
+            scope: c.scope,
+            key: c.key,
+            info: c.info,
             record: c.record,
         });
     }
@@ -858,6 +947,59 @@ pub fn search(
         unknown,
         candidates,
     })
+}
+
+/// The SQL list of the scopes searched, when the index holds others too.
+fn scope_filter(conn: &Connection, ctx: &Context) -> Result<Option<String>, Fault> {
+    let held: Vec<String> = conn
+        .prepare_cached("SELECT DISTINCT scope FROM files")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let wanted: Vec<&str> = ctx.searched.iter().map(|s| s.as_str()).collect();
+    if held.iter().all(|h| wanted.contains(&h.as_str())) {
+        return Ok(None);
+    }
+    Ok(Some(
+        wanted
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    ))
+}
+
+/// Where a hit points (see `Hit::anchor`).
+fn anchor(c: &Candidate) -> String {
+    let base = c.anchor.as_deref().unwrap_or(&c.path);
+    match c.scope {
+        Scope::Refs if c.anchor.is_none() => c.path.clone(),
+        Scope::Files => c.path.clone(),
+        Scope::Board if c.start == 0 => c.path.clone(),
+        Scope::Board => format!("{}#note-{}", c.path, c.start),
+        Scope::Sessions => format!("{base}#L{}", c.start),
+        _ => format!("{base}#L{}-L{}", c.start, c.end),
+    }
+}
+
+/// The head line of a registry entry hit: key, year, first author, title,
+/// depth and the local text.
+pub fn ref_line(hit: &Hit) -> Option<String> {
+    let info = hit.info.as_ref()?;
+    if hit.scope != Scope::Refs || info.get("card").is_some() {
+        return None;
+    }
+    let field = |k: &str| match info.get(k)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    };
+    let mut parts = vec![hit.path.clone()];
+    parts.extend(field("year"));
+    parts.extend(field("first_author"));
+    parts.extend(hit.record.title.clone());
+    parts.extend(field("depth"));
+    parts.push(field("text").unwrap_or_else(|| "no local text".into()));
+    Some(parts.join(" · "))
 }
 
 /// Moves each record that is no longer in force below the successor it names,
@@ -1055,6 +1197,15 @@ mod tests {
         assert_eq!(p.terms[2].fts(), "\"fiscal year\"");
         // An unclosed quote runs to the end.
         assert_eq!(parse("\"a b").unwrap().terms, [term(&["a", "b"])]);
+    }
+
+    #[test]
+    fn a_decimal_number_is_one_term_without_a_zero_fraction() {
+        assert_eq!(parse("47.0%").unwrap().terms, [term(&["47"])]);
+        assert_eq!(parse("47.00").unwrap().terms, [term(&["47"])]);
+        assert_eq!(parse("(0.50)").unwrap().terms, [term(&["0", "50"])]);
+        assert_eq!(parse("47").unwrap().terms, [term(&["47"])]);
+        assert_eq!(parse("v1.2").unwrap().terms, [term(&["v1"]), term(&["2"])]);
     }
 
     #[test]

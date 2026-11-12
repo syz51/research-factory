@@ -4,11 +4,12 @@
 //! States (docs/state-machines.md 3.1): an absent file, one of another schema
 //! version or configuration, or a corrupt one is built anew in a temporary
 //! file that then replaces it by rename. A current file is refreshed in place
-//! for the sources whose size, modification time and content hash changed.
+//! for the sources whose stamp and content hash changed. A query builds only
+//! the scopes it searches; a scope searched for the first time is added whole.
 //! One lock file admits one writer; a reader that finds it held answers from
 //! the last committed state and says so.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -16,12 +17,13 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-use super::Context;
-use super::{graph, units};
-use crate::archive::front;
+use super::sources::{self, Doc, Loader, Resolver};
+use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
 const SCHEMA_VERSION: &str = "2";
+/// How many stale derivatives a notice names.
+const STALE_NAMED: usize = 3;
 
 /// BM25 column weights of `units_fts`, in column order: id and aliases, then
 /// title, then summary, heading path and file path, then body.
@@ -31,11 +33,17 @@ pub const BODY_COLUMN: usize = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+-- One row per source: a file, a registry entry, a session or a board task.
 CREATE TABLE files(
     id INTEGER PRIMARY KEY,
-    path TEXT NOT NULL UNIQUE,
-    size INTEGER NOT NULL,
-    mtime_ns INTEGER NOT NULL,
+    -- The source's key within its scope: a path, `ref:<key>`,
+    -- `session:<source>:<id>` or `board:<id>`. A tracked text is a source of
+    -- both `files` and `texts`.
+    path TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    -- What anchors name instead of the key, such as a card's text.
+    anchor TEXT,
+    stamp TEXT NOT NULL,
     hash TEXT NOT NULL,
     class TEXT NOT NULL,
     record_id TEXT,
@@ -46,9 +54,20 @@ CREATE TABLE files(
     kind TEXT,
     task TEXT,
     -- Record ids, one per line.
-    superseded_by TEXT NOT NULL
+    superseded_by TEXT NOT NULL,
+    -- The registry key the source names.
+    ref_key TEXT,
+    -- Scope-specific facts shown with a hit, as JSON.
+    info TEXT
 );
 CREATE INDEX files_record ON files(record_id COLLATE NOCASE);
+CREATE UNIQUE INDEX files_scope ON files(scope, path);
+-- Names an exact lookup finds a source by, besides its record id.
+CREATE TABLE aliases(file_id INTEGER NOT NULL REFERENCES files(id), alias TEXT NOT NULL);
+CREATE INDEX aliases_alias ON aliases(alias COLLATE NOCASE);
+CREATE INDEX aliases_file ON aliases(file_id);
+-- Derived files that a source's units ignore because they no longer fit their text.
+CREATE TABLE stale(file_id INTEGER NOT NULL REFERENCES files(id), path TEXT NOT NULL, why TEXT NOT NULL);
 CREATE TABLE units(
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files(id),
@@ -105,18 +124,14 @@ impl From<Fault> for String {
     }
 }
 
-/// A source file of the `notes` scope as the walk found it.
-struct Source {
-    path: String,
-    size: i64,
-    mtime_ns: i64,
-}
-
 /// An index ready for a query.
 pub struct Opened {
     pub conn: Connection,
     /// Why the index may lack the latest text of some files.
     pub stale: Option<String>,
+    /// Why the answer from a scope may be incomplete: a source that could not
+    /// be read, a derivative that is stale.
+    pub notices: Vec<String>,
 }
 
 /// How many files and units the index holds.
@@ -144,7 +159,14 @@ pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
     for _ in 0..3 {
         if !force && let Some(mut conn) = open_current(ctx)? {
             match refresh(ctx, &mut conn) {
-                Ok(stale) => return Ok(Opened { conn, stale }),
+                Ok((stale, mut notices)) => {
+                    notices.extend(stale_notices(ctx, &conn).map_err(String::from)?);
+                    return Ok(Opened {
+                        conn,
+                        stale,
+                        notices,
+                    });
+                }
                 // Open the file that replaced it.
                 Err(Fault::Replaced) => continue,
                 Err(Fault::Corrupt(_)) => force = true,
@@ -260,6 +282,27 @@ fn build_of(conn: &Connection) -> rusqlite::Result<String> {
     })
 }
 
+/// The scopes an index holds.
+fn built(conn: &Connection) -> rusqlite::Result<BTreeSet<Scope>> {
+    let value: String = conn.query_row("SELECT value FROM meta WHERE key = 'scopes'", [], |r| {
+        r.get(0)
+    })?;
+    Ok(value
+        .split(',')
+        .filter_map(|s| Scope::ALL.into_iter().find(|c| c.as_str() == s))
+        .collect())
+}
+
+fn set_built(tx: &Transaction, scopes: &BTreeSet<Scope>) -> rusqlite::Result<()> {
+    let names: Vec<&str> = scopes.iter().map(|s| s.as_str()).collect();
+    tx.execute(
+        "INSERT OR REPLACE INTO meta VALUES ('scopes', ?1)",
+        [names.join(",")],
+    )?;
+    Ok(())
+}
+
+/// A new index of the scopes the query searches.
 fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
     let run = || -> Result<(), Fault> {
         let mut conn = Connection::open(tmp)?;
@@ -272,12 +315,18 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
             "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2), ('build', ?3)",
             params![SCHEMA_VERSION, ctx.fingerprint, build_id()],
         )?;
-        for source in sources(ctx)? {
-            index_file(ctx, &tx, &source, None)?;
+        let mut resolver = Resolver::new(&ctx.project.root)?;
+        let mut loader = Loader::new(ctx);
+        for &scope in &ctx.scopes {
+            let listing = sources::list(ctx, scope, &mut resolver)?;
+            for doc in &listing.docs {
+                index_doc(ctx, &tx, &mut loader, doc, None)?;
+            }
         }
         if let Some(papers) = graph::papers_changed(ctx, &tx)? {
             graph::write_papers(&tx, &papers)?;
         }
+        set_built(&tx, &ctx.scopes.iter().copied().collect())?;
         sync_words(&tx)?;
         tx.commit()?;
         Ok(())
@@ -285,72 +334,81 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
     run().map_err(String::from)
 }
 
-/// The files of the `notes` scope, without generated ones.
-fn sources(ctx: &Context) -> Result<Vec<Source>, String> {
-    let found = crate::archive::files::walk(&ctx.project.root, &[&ctx.notes])?
-        .pop()
-        .unwrap_or_default();
-    let mut sources = Vec::new();
-    for path in found {
-        if ctx.class_of(&path) == super::Class::Generated {
-            continue;
-        }
-        let file = ctx.project.root.join(&path);
-        let meta = match std::fs::metadata(&file) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(format!("{}: {e}", file.display())),
-        };
-        let mtime_ns = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| i64::try_from(d.as_nanos()).unwrap_or(i64::MAX));
-        sources.push(Source {
-            path,
-            size: i64::try_from(meta.len()).unwrap_or(i64::MAX),
-            mtime_ns,
-        });
-    }
-    Ok(sources)
+/// A source whose stamp differs from the stored one, or that is new.
+struct Change<'d> {
+    doc: &'d Doc,
+    existing: Option<i64>,
+    /// Of a scope the index did not hold: loaded whatever the budget.
+    added: bool,
 }
 
-/// Brings the index up to the sources: removes the units of deleted files and
-/// reads the files whose size or modification time changed. Returns why the
-/// index is still stale, when it is.
-fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault> {
-    let mut stored: HashMap<String, (i64, i64, i64)> = HashMap::new();
+/// Brings the index up to the sources of the scopes the query searches:
+/// removes the units of sources that are gone, reads the sources whose stamp
+/// changed and adds a scope the index lacks. Returns why the index is still
+/// stale, when it is, and the notices of the listings.
+fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<String>), Fault> {
+    let have = built(conn)?;
+    let mut resolver = Resolver::new(&ctx.project.root)?;
+    let mut listings = Vec::new();
+    let mut notices = Vec::new();
+    for &scope in &ctx.scopes {
+        let listing = sources::list(ctx, scope, &mut resolver)?;
+        notices.extend(listing.notices.iter().cloned());
+        listings.push((scope, listing));
+    }
+    let mut changed: Vec<Change> = Vec::new();
+    let mut gone: Vec<i64> = Vec::new();
     {
-        let mut stmt = conn.prepare("SELECT path, id, size, mtime_ns FROM files")?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))))?;
-        for row in rows {
-            let (path, file) = row?;
-            stored.insert(path, file);
+        let mut stmt = conn.prepare_cached("SELECT path, id, stamp FROM files WHERE scope = ?1")?;
+        for (scope, listing) in &listings {
+            let added = !have.contains(scope);
+            let mut stored: HashMap<String, (i64, String)> = HashMap::new();
+            let rows = stmt.query_map([scope.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, (r.get(1)?, r.get(2)?)))
+            })?;
+            for row in rows {
+                let (key, file) = row?;
+                stored.insert(key, file);
+            }
+            for doc in &listing.docs {
+                match stored.remove(&doc.key) {
+                    Some((_, stamp)) if stamp == doc.stamp => {}
+                    Some((id, _)) => changed.push(Change {
+                        doc,
+                        existing: Some(id),
+                        added,
+                    }),
+                    None => changed.push(Change {
+                        doc,
+                        existing: None,
+                        added,
+                    }),
+                }
+            }
+            // What is left has no source any more, unless the listing is incomplete.
+            if listing.complete {
+                gone.extend(stored.into_values().map(|(id, _)| id));
+            }
         }
     }
-    let mut changed = Vec::new();
-    for source in sources(ctx)? {
-        match stored.remove(&source.path) {
-            Some((_, size, mtime_ns)) if size == source.size && mtime_ns == source.mtime_ns => {}
-            Some((id, ..)) => changed.push((source, Some(id))),
-            None => changed.push((source, None)),
-        }
-    }
+    let new_scopes = ctx.scopes.iter().any(|s| !have.contains(s));
     let papers = graph::papers_changed(ctx, conn)?;
-    // What is left in `stored` has no source any more.
-    if changed.is_empty() && stored.is_empty() && papers.is_none() {
-        return Ok(None);
+    if changed.is_empty() && gone.is_empty() && !new_scopes && papers.is_none() {
+        return Ok((None, notices));
     }
-    let pending = changed.len() + stored.len();
+    let pending = changed.len() + gone.len();
     let Some(_lock) = try_lock(ctx)? else {
         let what = match (pending, papers.is_some()) {
-            (0, _) => "the changed paper citations are".to_string(),
-            (n, false) => format!("{n} changed file(s) are"),
-            (n, true) => format!("{n} changed file(s) and the changed paper citations are"),
+            (0, true) => "the changed paper citations are".to_string(),
+            (n, false) => format!("{n} changed source(s) are"),
+            (n, true) => format!("{n} changed source(s) and the changed paper citations are"),
         };
-        return Ok(Some(format!(
-            "another process is updating the index; {what} not in it yet"
-        )));
+        return Ok((
+            Some(format!(
+                "another process is updating the index; {what} not in it yet"
+            )),
+            notices,
+        ));
     };
     // A build may have renamed a new file over the one this connection
     // holds, between its opening and the lock. A write would then go to the
@@ -371,25 +429,64 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault
     if let Some(papers) = &papers {
         graph::write_papers(&tx, papers)?;
     }
-    for (id, ..) in stored.values() {
-        remove_file(&tx, *id)?;
+    for id in gone {
+        remove_file(&tx, id)?;
         left -= 1;
     }
-    for (source, id) in &changed {
-        if started.elapsed() >= budget {
+    let mut loader = Loader::new(ctx);
+    // Sources of a new scope first, as it is empty until they are in.
+    changed.sort_by_key(|c| !c.added);
+    for c in &changed {
+        if !c.added && started.elapsed() >= budget {
             break;
         }
-        index_file(ctx, &tx, source, *id)?;
+        index_doc(ctx, &tx, &mut loader, c.doc, c.existing)?;
         left -= 1;
     }
+    set_built(&tx, &have.iter().chain(&ctx.scopes).copied().collect())?;
     sync_words(&tx)?;
     tx.commit()?;
-    Ok((left > 0).then(|| {
-        format!(
-            "the refresh stopped at its budget of {} ms; {left} changed file(s) are not in the index yet",
-            ctx.cfg.refresh_budget_ms
-        )
-    }))
+    Ok((
+        (left > 0).then(|| {
+            format!(
+                "the refresh stopped at its budget of {} ms; {left} changed source(s) are not in the index yet",
+                ctx.cfg.refresh_budget_ms
+            )
+        }),
+        notices,
+    ))
+}
+
+/// One notice per scope searched that has stale derivatives.
+fn stale_notices(ctx: &Context, conn: &Connection) -> Result<Vec<String>, Fault> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT s.path, s.why FROM stale s JOIN files f ON f.id = s.file_id \
+         WHERE f.scope = ?1 ORDER BY s.path",
+    )?;
+    let mut out = Vec::new();
+    for scope in &ctx.searched {
+        let rows: Vec<(String, String)> = stmt
+            .query_map([scope.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        let Some((first, why)) = rows.first() else {
+            continue;
+        };
+        let mut names: Vec<&str> = rows
+            .iter()
+            .take(STALE_NAMED)
+            .map(|r| r.0.as_str())
+            .collect();
+        if rows.len() > STALE_NAMED {
+            names.push("…");
+        }
+        out.push(format!(
+            "scope `{}`: {} stale derivative(s) ignored ({}); {first} was {why}",
+            scope.as_str(),
+            rows.len(),
+            names.join(", ")
+        ));
+    }
+    Ok(out)
 }
 
 /// Brings the trigram table of words in line with the words of the units.
@@ -414,84 +511,87 @@ fn remove_units(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
 fn remove_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
     graph::forget_file(tx, file)?;
     remove_units(tx, file)?;
+    tx.execute("DELETE FROM aliases WHERE file_id = ?1", [file])?;
+    tx.execute("DELETE FROM stale WHERE file_id = ?1", [file])?;
     tx.execute("DELETE FROM files WHERE id = ?1", [file])?;
     Ok(())
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// Reads one source and replaces its units. `existing` is its row in `files`.
-fn index_file(
+/// Loads one source and replaces its units. `existing` is its row in `files`.
+fn index_doc(
     ctx: &Context,
     tx: &Transaction,
-    source: &Source,
+    loader: &mut Loader,
+    doc: &Doc,
     existing: Option<i64>,
 ) -> Result<(), Fault> {
-    let file = ctx.project.root.join(&source.path);
-    let bytes = match std::fs::read(&file) {
-        Ok(bytes) => bytes,
-        // Deleted since the walk.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(id) = existing {
-                remove_file(tx, id)?;
-            }
-            return Ok(());
+    let Some(loaded) = loader.load(tx, doc)? else {
+        // Gone since it was listed.
+        if let Some(id) = existing {
+            remove_file(tx, id)?;
         }
-        Err(e) => return Err(format!("{}: {e}", file.display()).into()),
+        return Ok(());
     };
-    let hash = hex(&Sha256::digest(&bytes));
     if let Some(id) = existing {
         let same: bool = tx.query_row(
             "SELECT hash = ?2 FROM files WHERE id = ?1",
-            params![id, hash],
+            params![id, loaded.hash],
             |r| r.get(0),
         )?;
         if same {
             // Touched, not changed.
             tx.execute(
-                "UPDATE files SET size = ?2, mtime_ns = ?3 WHERE id = ?1",
-                params![id, source.size, source.mtime_ns],
+                "UPDATE files SET stamp = ?2 WHERE id = ?1",
+                params![id, doc.stamp],
             )?;
             return Ok(());
         }
         remove_file(tx, id)?;
     }
-    let meta = ctx.spec.meta_of(&source.path, &bytes);
-    let (task, kind) = units::task_and_kind(&bytes);
+    let row = &loaded.row;
     tx.execute(
-        "INSERT INTO files (path, size, mtime_ns, hash, class, record_id, title, summary, date, \
-         status, kind, task, superseded_by) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO files (path, scope, anchor, stamp, hash, class, record_id, title, summary, \
+         date, status, kind, task, superseded_by, ref_key, info) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
-            source.path,
-            source.size,
-            source.mtime_ns,
-            hash,
-            ctx.class_of(&source.path).as_str(),
-            meta.id,
-            meta.title,
-            meta.summary,
-            meta.date,
-            meta.status,
-            kind,
-            task,
-            meta.superseded_by.join("\n"),
+            doc.key,
+            doc.scope.as_str(),
+            row.anchor,
+            doc.stamp,
+            loaded.hash,
+            row.class.unwrap_or(super::Class::Own).as_str(),
+            row.record_id,
+            row.title,
+            row.summary,
+            row.date,
+            row.status,
+            row.kind,
+            row.task,
+            row.superseded_by.join("\n"),
+            row.ref_key,
+            row.info.as_ref().map(|v| v.to_string()),
         ],
     )?;
     let file_id = tx.last_insert_rowid();
-    graph::index_edges(ctx, tx, file_id, &source.path, &bytes)?;
-    let ids = meta
-        .id
-        .iter()
-        .chain(&meta.aliases)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(" ; ");
-    let title = meta.title.as_deref().unwrap_or("");
-    let summary = meta.summary.as_deref().unwrap_or("");
-    let text = String::from_utf8_lossy(&bytes);
+    if let Some(bytes) = &loaded.note {
+        graph::index_edges(ctx, tx, file_id, &doc.key, bytes)?;
+    }
+    let mut alias = tx.prepare_cached("INSERT INTO aliases (file_id, alias) VALUES (?1, ?2)")?;
+    for a in &row.aliases {
+        alias.execute(params![file_id, a])?;
+    }
+    let mut stale =
+        tx.prepare_cached("INSERT INTO stale (file_id, path, why) VALUES (?1, ?2, ?3)")?;
+    for (path, why) in &loaded.stale {
+        stale.execute(params![file_id, path, why])?;
+    }
+    let title = row.title.as_deref().unwrap_or("");
+    let summary = row.summary.as_deref().unwrap_or("");
+    // Only notes and files are found by their path; other keys are not words.
+    let path = match doc.scope {
+        Scope::Notes | Scope::Files => doc.key.as_str(),
+        _ => "",
+    };
     let mut unit = tx.prepare_cached(
         "INSERT INTO units (file_id, start_line, end_line, heading, hash) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
@@ -499,22 +599,12 @@ fn index_file(
         "INSERT INTO units_fts (rowid, ids, title, summary, heading, path, body) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
-    let mut sections = units::sections(&text, front::split(&bytes).body_line);
-    if sections.is_empty() {
-        // A record with front matter or a title only is still found by them.
-        sections.push(units::Unit {
-            start: 1,
-            end: text.lines().count().max(1),
-            heading: String::new(),
-            body: String::new(),
-        });
-    }
-    for u in sections {
+    for u in &loaded.units {
         let indexed = format!(
-            "{ids}\n{title}\n{summary}\n{}\n{}\n{}",
-            u.heading, source.path, u.body
+            "{}\n{title}\n{summary}\n{}\n{path}\n{}",
+            row.ids, u.heading, u.body
         );
-        let unit_hash = hex(&Sha256::digest(indexed.as_bytes())[..16]);
+        let unit_hash = sources::hex(&Sha256::digest(indexed.as_bytes())[..16]);
         unit.execute(params![
             file_id,
             u.start as i64,
@@ -524,13 +614,7 @@ fn index_file(
         ])?;
         let id = tx.last_insert_rowid();
         fts.execute(params![
-            id,
-            ids,
-            title,
-            summary,
-            u.heading,
-            source.path,
-            u.body
+            id, row.ids, title, summary, u.heading, path, u.body
         ])?;
     }
     Ok(())

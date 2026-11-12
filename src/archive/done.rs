@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-use super::rules::{self, Problem, invalid_problem};
+use super::rules::{Problem, invalid_problem};
 use super::{Record, Spec, Texts, exit, files, gitseal, index, seal_files, unique_refs};
 use crate::config::{Project, SealMode};
 use crate::finding::Severity;
@@ -66,6 +66,10 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
             "link the record that replaced it, or say on the line that the target is historical",
         ),
         "stale-kept-link" | "stale-allow" => (Links, "remove the entry from research.toml"),
+        "stale-derivative" => (
+            Stage::Sources,
+            "rebuild the structure file or paper card from the current text with `papers`, or delete it",
+        ),
         "kept-link" => (
             Links,
             "nothing: a [[lab.archive.kept_link]] entry keeps this link on purpose",
@@ -176,7 +180,7 @@ fn findings(project: &Project, spec: &Spec) -> Result<Vec<Line>, String> {
         println!(
             "No [[lab.checks]] are configured: only the archive rules run, without a baseline."
         );
-        return Ok(rules::problems(spec)?
+        return Ok(super::problems(project, spec)?
             .iter()
             .map(|p| line("lab", p.rule, p.severity, p.text()))
             .collect());
