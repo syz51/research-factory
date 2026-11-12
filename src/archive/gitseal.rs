@@ -515,15 +515,16 @@ pub(super) fn sealed_len(spec: &Spec, file: &str, body: &[u8]) -> Result<Option<
     Ok((sealed && body.starts_with(head)).then_some(head.len()))
 }
 
-/// Whether `file`, relative to the project root, had a status in
+/// Whether `file`, a record relative to the project root, had a status in
 /// `sealed_statuses` in a version up to `rev`, as the history check reads
-/// them: the version at `seal_baseline`, when set, and each version a later
-/// commit made. A record sealed by status stays sealed when a later commit
-/// changes its status.
+/// them: the version at `seal_baseline`, when set and an ancestor of `rev`,
+/// and each version a later commit made. A record sealed by status stays
+/// sealed when a later commit changes its status; a file in no index is
+/// never sealed by status.
 pub(super) fn status_sealed_by(spec: &Spec, rev: &str, file: &str) -> Result<bool, String> {
     let cfg = spec.cfg;
     let root = spec.root();
-    if cfg.sealed_statuses.is_empty() {
+    if cfg.sealed_statuses.is_empty() || !spec.indexes.iter().any(|i| i.files.matches(file)) {
         return Ok(false);
     }
     let Some(prefix) = prefix(root) else {
@@ -535,6 +536,17 @@ pub(super) fn status_sealed_by(spec: &Spec, rev: &str, file: &str) -> Result<boo
         Some(b) => Some(commit(root, b)?.ok_or_else(|| {
             format!("[lab.archive] seal_baseline `{b}` is not a commit in this repository")
         })?),
+    };
+    // A baseline that `rev` does not contain bounds nothing before `rev`.
+    let baseline = match baseline {
+        Some(b)
+            if run(root, &["merge-base", "--is-ancestor", &b, rev], b"")?
+                .status
+                .success() =>
+        {
+            Some(b)
+        }
+        _ => None,
     };
     let range = match &baseline {
         Some(b) => format!("{b}..{rev}"),
