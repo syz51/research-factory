@@ -117,8 +117,8 @@ Open, decided by experiment E2: which extractor gives correct sections and table
 
 ### 3.4 Indexes
 
-- **Lexical.** SQLite FTS5, BM25 with field weights: id and aliases, then title, then summary and
-  heading path, then body. A trigram table serves Chinese and Japanese text and partial words.
+- **Lexical.** SQLite FTS5, BM25 with the field weights E1 fitted: title and heading path 4, body 1, id,
+  aliases and metadata 0.5, summary 0.25. A trigram table serves Chinese and Japanese text and partial words.
 - **Dense.** A local multilingual embedding model over the same units. Exact search over all
   vectors; no approximate index at this size. Model chosen by E1.
 - **Graph.** A plain relational table of edges: record supersedes record; note links note; note

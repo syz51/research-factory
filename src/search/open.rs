@@ -12,6 +12,7 @@ use serde::Serialize;
 
 use super::graph::{self, FileNode, db};
 use super::{Context, index};
+use crate::archive::front;
 use crate::config::Project;
 
 /// Lines of text `lab open` prints by default.
@@ -157,9 +158,24 @@ pub fn open(ctx: &Context, conn: &Connection, name: &str, budget: usize) -> Resu
                 })?,
         };
         let unit = match lines_of(name).filter(|_| path != name) {
-            None => unit_where(conn, "file_id = ?1", [file.id])
+            None => {
+                // The first section below the front matter, not the record's
+                // head unit, whose first lines are front-matter values. The
+                // read below reports a file it cannot read.
+                let body_line = std::fs::read(ctx.project.root.join(&file.path))
+                    .map_or(1, |b| front::split(&b).body_line as i64);
+                match unit_where(
+                    conn,
+                    "file_id = ?1 AND start_line >= ?2",
+                    params![file.id, body_line],
+                )
                 .map_err(db)?
-                .map(|(_, u)| u),
+                {
+                    Some(found) => Some(found),
+                    None => unit_where(conn, "file_id = ?1", [file.id]).map_err(db)?,
+                }
+                .map(|(_, u)| u)
+            }
             Some((a, b)) if a == b && !name.contains("#L") => {
                 // `path:line`: the unit that holds the line.
                 unit_where(

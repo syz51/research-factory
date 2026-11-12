@@ -35,14 +35,15 @@ pub fn sections(text: &str, body_line: usize) -> Vec<Unit> {
     let mut start = None;
     let mut lines: Vec<(usize, &str)> = Vec::new();
     if body_line > 1 {
-        // The lines between the `---` fences on line 1 and line `body_line - 1`.
+        // The lines between the `---` fences on line 1 and line `body_line - 1`,
+        // values only: a key such as `status` is not a word of the record.
         start = Some(1);
         lines.extend(
             text.split('\n')
                 .enumerate()
                 .take(body_line - 2)
                 .skip(1)
-                .map(|(i, l)| (i + 1, l.strip_suffix('\r').unwrap_or(l))),
+                .map(|(i, l)| (i + 1, yaml_value(l.strip_suffix('\r').unwrap_or(l)))),
         );
     }
     let mut fence = None;
@@ -72,6 +73,22 @@ pub fn sections(text: &str, body_line: usize) -> Vec<Unit> {
     }
     push(&mut units, start, &heading, &lines);
     units
+}
+
+/// A front-matter line without its top-level key: `status: accepted` gives
+/// `accepted`. Other lines, such as list items, are kept whole.
+fn yaml_value(line: &str) -> &str {
+    match line.split_once(':') {
+        Some((key, value))
+            if key.starts_with(|c: char| c.is_ascii_alphabetic())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') =>
+        {
+            value.trim_start()
+        }
+        _ => line,
+    }
 }
 
 /// Adds the section under the heading on line `start` as one unit, or as
@@ -144,7 +161,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                (1, 2, "", "id: D1"),
+                (1, 2, "", "D1"),
                 (4, 6, "Title", "Intro."),
                 (8, 11, "Title > Method", "A.\nB."),
                 (13, 15, "Title > Method > Detail", "C."),
@@ -169,10 +186,7 @@ mod tests {
             .iter()
             .map(|u| (u.start, u.end, u.heading.as_str(), u.body.as_str()))
             .collect();
-        assert_eq!(
-            seen,
-            [(1, 5, "", "id: D1\ntask: rf-9\nLead."), (7, 8, "T", "x"),]
-        );
+        assert_eq!(seen, [(1, 5, "", "D1\nrf-9\nLead."), (7, 8, "T", "x"),]);
         // Empty front matter makes no unit.
         assert_eq!(sections("---\n---\n# T\nx\n", 3)[0].start, 3);
     }

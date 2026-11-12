@@ -27,9 +27,11 @@ const STALE_NAMED: usize = 3;
 
 /// BM25 column weights of `units_fts`, in column order: ids, title, summary,
 /// heading path, meta (date, status and file path), body. They are the weights
-/// that experiment E1 of masters fitted on its judged set (DR045): the title
-/// and the heading path count most, the summary and the meta words least.
-pub const WEIGHTS: &str = "1.0, 4.0, 0.5, 4.0, 0.5, 1.0";
+/// of experiment E1 of masters after its wider grid (DR045 item 2,
+/// research-factory-308): the title and the heading path count most, the
+/// summary least. On E1's topics they gave lab 0.597 nDCG@10 against 0.595
+/// with the first fit (1, 4, 0.5, 4, 0.5, 1).
+pub const WEIGHTS: &str = "0.5, 4.0, 0.25, 4.0, 0.5, 1.0";
 /// The position of `body` among the columns of `units_fts`.
 pub const BODY_COLUMN: usize = 5;
 
@@ -638,8 +640,10 @@ fn index_doc(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )?;
     for u in &loaded.units {
+        // The path, not the date or status: a status edit keeps each
+        // section's hash, so an old anchor still finds its text.
         let indexed = format!(
-            "{}\n{title}\n{summary}\n{}\n{meta}\n{}",
+            "{}\n{title}\n{summary}\n{}\n{path}\n{}",
             row.ids, u.heading, u.body
         );
         let unit_hash = sources::hex(&Sha256::digest(indexed.as_bytes())[..16]);
@@ -663,7 +667,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_weights_rank_title_and_heading_first_then_ids_and_body_then_summary_and_meta() {
+    fn the_weights_rank_title_and_heading_first_then_body_then_ids_and_meta_then_summary() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         let names: Vec<String> = conn
@@ -699,7 +703,7 @@ mod tests {
             .collect();
         assert_eq!(
             order,
-            ["title", "heading", "ids", "body", "summary", "meta"]
+            ["title", "heading", "body", "ids", "meta", "summary"]
         );
     }
 }

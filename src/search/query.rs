@@ -532,7 +532,12 @@ fn retrieve(
     names.dedup();
     for id in names.iter().filter(|n| !n.is_empty()) {
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT f.id, (SELECT min(u.id) FROM units u WHERE u.file_id = f.id) \
+            // The record's first section, not its head unit of front-matter
+            // values, unless the head is its only unit.
+            "SELECT f.id, coalesce(\
+             (SELECT min(u.id) FROM units u WHERE u.file_id = f.id \
+              AND NOT (u.start_line = 1 AND u.heading = '')), \
+             (SELECT min(u.id) FROM units u WHERE u.file_id = f.id)) \
              FROM files f WHERE (f.record_id = ?1 COLLATE NOCASE \
              OR f.id IN (SELECT file_id FROM aliases WHERE alias = ?1 COLLATE NOCASE)){in_scope}"
         ))?;
@@ -583,14 +588,7 @@ fn retrieve(
             candidates.push(c);
         }
     }
-    // The exact id first, then the units with every term, then by score.
-    let all = (1u64 << phrasing.terms.len()) - 1;
-    candidates.sort_by(|a, b| {
-        (b.exact_id, b.matched == all)
-            .cmp(&(a.exact_id, a.matched == all))
-            .then(b.score().total_cmp(&a.score()))
-            .then_with(|| (&a.path, a.start).cmp(&(&b.path, b.start)))
-    });
+    // Unordered: `search` ranks the fused scores.
     Ok((candidates, unknown))
 }
 
@@ -867,6 +865,9 @@ pub fn search(
         Some(filter) if phrasings.is_empty() => listed(conn, ctx, opts, filter)?,
         _ => {
             let mut ranked: Vec<Candidate> = best.into_values().map(|(_, c)| c).collect();
+            // The exact id first, then by fused score. Putting the units with
+            // every term of their phrasing next cost 0.08 nDCG@10 on E1's
+            // topics (research-factory-295).
             ranked.sort_by(|a, b| {
                 b.exact_id
                     .cmp(&a.exact_id)
@@ -1028,7 +1029,8 @@ fn below_successors(groups: &mut Vec<Vec<Candidate>>) {
             if old.exact_id || !old.record.inactive {
                 return None;
             }
-            let successor = groups.iter().rposition(|g| {
+            // Just below the successor's best unit.
+            let successor = groups.iter().position(|g| {
                 g[0].record.id.as_ref().is_some_and(|id| {
                     old.record
                         .superseded_by

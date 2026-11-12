@@ -206,6 +206,17 @@ fn with_fold_a_fact_in_a_record_a_log_and_a_topic_page_is_one_hit_with_also_in_l
         text.contains("H1 docs/history/01-2026-03-02-log.md#L7-L10"),
         "{text}"
     );
+    // A run with `--fold` lists the hit, then the units folded under it.
+    let topics = dir.path().join("topics.tsv");
+    std::fs::write(&topics, "T1\tcapybara corpus\n").unwrap();
+    let run = ok(
+        dir.path(),
+        &["search", "--run", topics.to_str().unwrap(), "--fold"],
+    );
+    let ids: Vec<&str> = run.lines().map(|l| l.split(' ').nth(2).unwrap()).collect();
+    let mut expected = vec![report["hits"][0]["anchor"].as_str().unwrap()];
+    expected.extend(&also);
+    assert_eq!(ids, expected, "{run}");
     // By default, and with the old `--all`, each copy is a hit of its own.
     let all = json(dir.path(), &["search", "capybara corpus"]);
     assert_eq!(
