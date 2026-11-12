@@ -258,7 +258,7 @@ reason = "the first report has no single result"
 | `unindexed_exclude` | Globs of Markdown files that `unindexed-file` leaves alone. |
 | `[[lab.archive.page_group]]` | `name`, `include`, optional `exclude` and `current`. At least one page of the group must have a status in `current`. |
 | `[lab.archive.historical_link]` | A link from a record with a status in `from` to a record with a status in `to` must have one of `marks` on its line, in any letter case. |
-| `[[lab.archive.allow]]` | `rule`, `subject` and `reason`, and for `historical-link` an optional `target` (the link destination as written). Accepts one finding of `duplicate-id`, `missing-summary`, `unindexed-file`, `no-current-page`, `historical-link`, `task-without-record` or (since lab 0.13.1) `open-item`. `subject` is the finding's subject without a line number: a path, the duplicated id, the page group's name or the task id. |
+| `[[lab.archive.allow]]` | `rule`, `subject` and `reason`, and for `historical-link` an optional `target` (the link destination as written). Accepts the findings that match its rule and subject (and target), for `duplicate-id`, `missing-summary`, `unindexed-file`, `no-current-page`, `historical-link`, `task-without-record` or (since lab 0.13.1) `open-item`. An `open-item` entry accepts every miss in the file, including items appended later. `subject` is the finding's subject without a line number: a path, the duplicated id, the page group's name or the task id. |
 
 Model 2 adds these front matter fields. A value of the wrong type is a `front-matter-invalid` error in model 2, and is ignored in model 1.
 
