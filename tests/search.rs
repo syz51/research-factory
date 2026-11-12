@@ -272,6 +272,19 @@ fn an_exact_id_ranks_first_and_a_superseded_record_below_its_successor() {
 #[test]
 fn source_classes_label_and_rank_and_generated_files_are_not_indexed() {
     let dir = fixture();
+    // A long page that names the pilot once is the weakest hit, so the three
+    // short pages below rank by their class.
+    let filler = "Other words fill this section. ".repeat(40);
+    write(
+        dir.path(),
+        "docs/notes/long.md",
+        &format!(
+            "# Notes
+
+{filler}The pilot.
+"
+        ),
+    );
     let report = json(dir.path(), &["--records", "pilot"]);
     let found = paths(&report);
     assert!(!found.contains(&"docs/decisions/INDEX.md"), "{found:?}");
@@ -289,6 +302,38 @@ fn source_classes_label_and_rank_and_generated_files_are_not_indexed() {
     assert!(own < copied && copied < old, "{found:?}");
     let text = search(dir.path(), &["--records", "pilot"]);
     assert!(text.contains(" · historical · An old plan"), "{text}");
+}
+
+#[test]
+fn a_class_prior_moves_no_other_units_share_of_a_phrasing() {
+    let dir = fixture();
+    let report = json(dir.path(), &["--explain", "--limit", "100", "pilot"]);
+    let explains: Vec<&Value> = report["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| &h["explain"])
+        .collect();
+    let num = |e: &Value, k: &str| e[k].as_f64().unwrap();
+    assert!(explains.iter().any(|e| num(e, "prior") < 1.0), "{report}");
+    // One phrasing: the scale is the lowest and highest raw score, so a lower
+    // prior of one unit does not move the share of any other.
+    let raw: Vec<f64> = explains.iter().map(|e| num(e, "score")).collect();
+    let low = raw.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = raw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    for (e, s) in explains.iter().zip(&raw) {
+        let share = num(e, "prior") * (s - low) / (high - low);
+        assert!((num(e, "fused") - share).abs() < 1e-9, "{e}");
+    }
+    // Each phrasing adds 0..=1, so a phrasing a unit matches never lowers it.
+    let two = json(
+        dir.path(),
+        &["--explain", "--limit", "100", "pilot", "spring plan"],
+    );
+    for hit in two["hits"].as_array().unwrap() {
+        let fused = num(&hit["explain"], "fused");
+        assert!((0.0..=2.0).contains(&fused), "{hit}");
+    }
 }
 
 #[test]
