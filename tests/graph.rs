@@ -246,18 +246,19 @@ fn as_of_ranks_by_the_records_in_force_on_that_date() {
             "2026-03-15",
         ],
     );
-    // The topic page that links the second decision is a hit of its own,
-    // above the first decision, which was no longer in force.
-    assert_eq!(paths(&then), [DR002, TOPIC, DR001], "{then}");
+    // The first decision was no longer in force: it keeps a quarter of its
+    // share and ranks below the second. The topic page that links the second
+    // is a hit of its own; it lacks a word and is last on the raw score.
+    assert_eq!(paths(&then), [DR002, DR001, TOPIC], "{then}");
     assert_eq!(then["hits"][0]["record"]["inactive"], false);
-    assert_eq!(then["hits"][2]["record"]["inactive"], true);
+    assert_eq!(then["hits"][1]["record"]["inactive"], true);
     // A successor dated after the date is not listed; an earlier one is.
     assert!(
         then["hits"][0]["record"]["superseded_by"].is_null(),
         "{then}"
     );
     assert_eq!(
-        then["hits"][2]["record"]["superseded_by"],
+        then["hits"][1]["record"]["superseded_by"],
         serde_json::json!(["DR002"])
     );
     // Before the second decision, the first ranks first.

@@ -241,7 +241,7 @@ pub struct Explain {
     pub prior: f64,
     /// `bm25 + trigram`.
     pub score: f64,
-    /// The sum over the phrasings of `(score * prior - low) / (high - low)`,
+    /// The sum over the phrasings of `prior * (score - low) / (high - low)`,
     /// where `low` and `high` are the phrasing's lowest and highest score.
     pub fused: f64,
     /// The query terms the unit holds, of the phrasing that ranked it best.
@@ -374,11 +374,10 @@ impl Candidate {
     }
 }
 
-/// Each `(score, prior)` scaled by the lowest and highest score of the list:
-/// `(score * prior - low) / (high - low)`, or the prior when all scores are
+/// Each `(score, prior)` as the prior times the score scaled to 0..=1 by the
+/// lowest and highest score of the list; the prior alone when all scores are
 /// equal. The phrasings' lists are summed on this scale. The scale ignores
-/// the priors, so a low prior moves no other unit's share, and it can sink its
-/// unit below the lowest score.
+/// the priors, so a low prior moves no other unit's share.
 fn normalised(scores: &[(f64, f64)]) -> Vec<f64> {
     let low = scores.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
     let high = scores.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
@@ -386,7 +385,7 @@ fn normalised(scores: &[(f64, f64)]) -> Vec<f64> {
         .iter()
         .map(|&(s, prior)| {
             if high > low {
-                (s * prior - low) / (high - low)
+                prior * (s - low) / (high - low)
             } else {
                 prior
             }
@@ -1243,15 +1242,14 @@ mod tests {
             [1.0, 0.5, 0.0]
         );
         assert_eq!(normalised(&[(3.0, 1.0), (3.0, 0.5)]), [1.0, 0.5]);
-        // A prior scales the score on the list's scale and moves no other share.
+        // A prior scales its own share, moves no other one, and keeps every
+        // share within 0..=1 however close the scores are.
         assert_eq!(
             normalised(&[(10.0, 0.5), (6.0, 1.0), (2.0, 1.0)]),
-            [0.375, 0.5, 0.0]
+            [0.5, 0.5, 0.0]
         );
-        assert_eq!(
-            normalised(&[(10.0, 1.0), (6.0, 0.25), (2.0, 1.0)]),
-            [1.0, -0.0625, 0.0]
-        );
+        let close = normalised(&[(10.0, 0.25), (10.0 - 1e-12, 1.0)]);
+        assert_eq!(close, [0.25, 0.0]);
         assert!(normalised(&[]).is_empty());
     }
 
