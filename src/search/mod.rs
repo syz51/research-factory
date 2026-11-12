@@ -166,6 +166,8 @@ pub struct Context<'p> {
     dir: PathBuf,
     /// Of the configuration the index depends on; a change rebuilds it.
     fingerprint: String,
+    /// false: a refresh indexes every changed file, past `refresh_budget_ms`.
+    budgeted: bool,
 }
 
 /// The directory a glob names before its first pattern character.
@@ -243,6 +245,7 @@ impl<'p> Context<'p> {
             inactive_statuses: &archive.inactive_statuses,
             dir: project.state_dir.join("lab").join("search"),
             fingerprint: fingerprint.iter().map(|b| format!("{b:02x}")).collect(),
+            budgeted: true,
         })
     }
 
@@ -333,7 +336,12 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
 /// Builds the search index, or brings it up to date with the files, without
 /// a query. Gives the files and units it holds.
 pub fn refresh(project: &Project) -> Result<(i64, i64), String> {
-    let ctx = Context::new(project)?;
+    // A gate must leave the index complete, so it is not held to the budget
+    // of a query's refresh.
+    let ctx = Context {
+        budgeted: false,
+        ..Context::new(project)?
+    };
     let opened = index::open(&ctx, false)?;
     if let Some(why) = opened.stale {
         return Err(format!("the search index is stale: {why}"));

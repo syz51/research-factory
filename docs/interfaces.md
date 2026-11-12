@@ -147,7 +147,7 @@ It checks every Markdown file that `lab archive check` scans (an index's records
 notes = ["docs/**/*.md"]             # the files of the `notes` scope
 notes_exclude = ["docs/drafts/**"]
 stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
-refresh_budget_ms = 5000             # a refresh of changed files stops after this time
+refresh_budget_ms = 5000             # a query's refresh of changed files stops after this time; `lab archive done` indexes them all
 lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
 
 [lab.search.classes]                 # source classes by path; a file in none is `own`

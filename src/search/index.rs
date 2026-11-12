@@ -350,7 +350,11 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault
     if at_path.ok() != Some(build_of(conn)?) {
         return Err(Fault::Replaced);
     }
-    let budget = Duration::from_millis(ctx.cfg.refresh_budget_ms);
+    let budget = if ctx.budgeted {
+        Duration::from_millis(ctx.cfg.refresh_budget_ms)
+    } else {
+        Duration::MAX
+    };
     let started = Instant::now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut left = pending;
