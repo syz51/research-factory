@@ -292,6 +292,29 @@ fn source_classes_label_and_rank_and_generated_files_are_not_indexed() {
 }
 
 #[test]
+fn a_class_prior_moves_no_other_units_share_of_a_phrasing() {
+    let dir = fixture();
+    let report = json(dir.path(), &["--explain", "--limit", "100", "pilot"]);
+    let explains: Vec<&Value> = report["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| &h["explain"])
+        .collect();
+    let num = |e: &Value, k: &str| e[k].as_f64().unwrap();
+    assert!(explains.iter().any(|e| num(e, "prior") < 1.0), "{report}");
+    // One phrasing: the scale is the lowest and highest raw score, so a lower
+    // prior of one unit does not move the share of any other.
+    let raw: Vec<f64> = explains.iter().map(|e| num(e, "score")).collect();
+    let low = raw.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = raw.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    for (e, s) in explains.iter().zip(&raw) {
+        let share = (s * num(e, "prior") - low) / (high - low);
+        assert!((num(e, "fused") - share).abs() < 1e-9, "{e}");
+    }
+}
+
+#[test]
 fn a_changed_and_a_deleted_file_show_in_the_next_query() {
     let dir = fixture();
     let d = dir.path();

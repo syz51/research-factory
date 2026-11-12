@@ -239,9 +239,10 @@ pub struct Explain {
     pub trigram: f64,
     /// The factor for the record's status and source class.
     pub prior: f64,
-    /// `(bm25 + trigram) * prior`.
+    /// `bm25 + trigram`.
     pub score: f64,
-    /// The sum over the phrasings of the min-max normalised score.
+    /// The sum over the phrasings of `(score * prior - low) / (high - low)`,
+    /// where `low` and `high` are the phrasing's lowest and highest score.
     pub fused: f64,
     /// The query terms the unit holds, of the phrasing that ranked it best.
     pub matched: Vec<String>,
@@ -369,22 +370,25 @@ struct Candidate {
 
 impl Candidate {
     fn score(&self) -> f64 {
-        (self.bm25 + self.trigram) * self.prior
+        self.bm25 + self.trigram
     }
 }
 
-/// Each score scaled to 0..=1 by the lowest and highest of the list; all
-/// 1 when they are equal. The phrasings' lists are summed on this scale.
-fn normalised(scores: &[f64]) -> Vec<f64> {
-    let low = scores.iter().copied().fold(f64::INFINITY, f64::min);
-    let high = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+/// Each `(score, prior)` scaled by the lowest and highest score of the list:
+/// `(score * prior - low) / (high - low)`, or the prior when all scores are
+/// equal. The phrasings' lists are summed on this scale. The scale ignores
+/// the priors, so a low prior moves no other unit's share, and it can sink its
+/// unit below the lowest score.
+fn normalised(scores: &[(f64, f64)]) -> Vec<f64> {
+    let low = scores.iter().map(|s| s.0).fold(f64::INFINITY, f64::min);
+    let high = scores.iter().map(|s| s.0).fold(f64::NEG_INFINITY, f64::max);
     scores
         .iter()
-        .map(|s| {
+        .map(|&(s, prior)| {
             if high > low {
-                (s - low) / (high - low)
+                (s * prior - low) / (high - low)
             } else {
-                1.0
+                prior
             }
         })
         .collect()
@@ -828,7 +832,14 @@ pub fn search(
             allowed.as_ref(),
         )?;
         // Each phrasing adds its min-max normalised score (E1, DR045 of masters).
-        let shares = normalised(&candidates.iter().map(Candidate::score).collect::<Vec<_>>());
+        // Before 0.19.1 the scale held the priors, so a unit's prior moved
+        // the shares of the others; 0.007 nDCG@10 lower (research-factory-309).
+        let shares = normalised(
+            &candidates
+                .iter()
+                .map(|c| (c.score(), c.prior))
+                .collect::<Vec<_>>(),
+        );
         for (share, mut c) in shares.into_iter().zip(candidates) {
             // The phrasing that scores a unit best describes it.
             match best.get_mut(&c.unit) {
@@ -1227,8 +1238,20 @@ mod tests {
 
     #[test]
     fn scales_each_score_by_the_lowest_and_highest_of_its_list() {
-        assert_eq!(normalised(&[10.0, 6.0, 2.0]), [1.0, 0.5, 0.0]);
-        assert_eq!(normalised(&[3.0, 3.0]), [1.0, 1.0]);
+        assert_eq!(
+            normalised(&[(10.0, 1.0), (6.0, 1.0), (2.0, 1.0)]),
+            [1.0, 0.5, 0.0]
+        );
+        assert_eq!(normalised(&[(3.0, 1.0), (3.0, 0.5)]), [1.0, 0.5]);
+        // A prior scales the score on the list's scale and moves no other share.
+        assert_eq!(
+            normalised(&[(10.0, 0.5), (6.0, 1.0), (2.0, 1.0)]),
+            [0.375, 0.5, 0.0]
+        );
+        assert_eq!(
+            normalised(&[(10.0, 1.0), (6.0, 0.25), (2.0, 1.0)]),
+            [1.0, -0.0625, 0.0]
+        );
         assert!(normalised(&[]).is_empty());
     }
 

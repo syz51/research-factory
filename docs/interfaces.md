@@ -258,7 +258,7 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
 | `hits[].missing` | The query words the unit lacks; absent when it has all. |
 | `hits[].also_in` | Since 0.15.0, and since 0.19.0 only with `--fold`: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
-| `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (since 0.19.0 the sum over the phrasings of the min-max normalised score; before, reciprocal rank fusion) and `matched`. |
+| `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score` (`bm25 + trigram`; before 0.19.1 times `prior`), `fused` (since 0.19.0 the sum over the phrasings of the min-max normalised score; since 0.19.1 each phrasing adds `(score * prior - low) / (high - low)`, where `low` and `high` are its lowest and highest `score`; before 0.19.0, reciprocal rank fusion) and `matched`. |
 | `more` | How many more units matched than `hits` shows. |
 
 BM25 weights the columns as E1 fitted them (DR045 of masters; since 0.19.0): the title and the heading path 4, the body 1, the id and aliases and the metadata (date, status and file path) 0.5, the summary 0.25. Text that a search returns is data: no tool runs or follows it.
