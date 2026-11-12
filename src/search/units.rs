@@ -23,8 +23,10 @@ pub struct Unit {
 }
 
 /// The sections of `text`, whose Markdown starts on file line `body_line`
-/// (after the front matter). Headings inside fenced code are text. A section
-/// without text below its heading is not a unit.
+/// (after the front matter). The front matter opens the first unit, the
+/// record's head: it starts on line 1 and holds the front-matter lines and any
+/// text before the first heading. Headings inside fenced code are text. A
+/// section without text below its heading is not a unit.
 pub fn sections(text: &str, body_line: usize) -> Vec<Unit> {
     let mut units = Vec::new();
     let mut path: Vec<(usize, String)> = Vec::new();
@@ -32,6 +34,17 @@ pub fn sections(text: &str, body_line: usize) -> Vec<Unit> {
     // The section being read: its heading line and the lines below it.
     let mut start = None;
     let mut lines: Vec<(usize, &str)> = Vec::new();
+    if body_line > 1 {
+        // The lines between the `---` fences on line 1 and line `body_line - 1`.
+        start = Some(1);
+        lines.extend(
+            text.split('\n')
+                .enumerate()
+                .take(body_line - 2)
+                .skip(1)
+                .map(|(i, l)| (i + 1, l.strip_suffix('\r').unwrap_or(l))),
+        );
+    }
     let mut fence = None;
     for (i, line) in text.split('\n').enumerate().skip(body_line - 1) {
         let lineno = i + 1;
@@ -131,6 +144,7 @@ mod tests {
         assert_eq!(
             seen,
             [
+                (1, 2, "", "id: D1"),
                 (4, 6, "Title", "Intro."),
                 (8, 11, "Title > Method", "A.\nB."),
                 (13, 15, "Title > Method > Detail", "C."),
@@ -146,6 +160,21 @@ mod tests {
         assert_eq!((units[0].start, units[0].end), (2, 2));
         assert_eq!(units[0].heading, "");
         assert_eq!((units[1].start, units[1].end), (6, 7));
+    }
+
+    #[test]
+    fn the_front_matter_and_the_lead_text_are_one_head_unit_from_line_1() {
+        let units = sections("---\nid: D1\ntask: rf-9\n---\nLead.\n\n# T\nx\n", 5);
+        let seen: Vec<(usize, usize, &str, &str)> = units
+            .iter()
+            .map(|u| (u.start, u.end, u.heading.as_str(), u.body.as_str()))
+            .collect();
+        assert_eq!(
+            seen,
+            [(1, 5, "", "id: D1\ntask: rf-9\nLead."), (7, 8, "T", "x"),]
+        );
+        // Empty front matter makes no unit.
+        assert_eq!(sections("---\n---\n# T\nx\n", 3)[0].start, 3);
     }
 
     #[test]

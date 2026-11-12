@@ -10,7 +10,6 @@
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
@@ -20,52 +19,10 @@ use crate::config::Project;
 /// The protocol versions this server speaks, newest first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// The state of the model of the dense and rerank stages. No query waits for
-/// it: until it is `Ready`, the tools answer from the lexical and graph
-/// stages and say so.
-#[derive(Debug, Clone, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the loader of the dense stage sets the other states; no such stage is built yet"
-)]
-pub enum ModelState {
-    Unloaded,
-    Loading,
-    Ready,
-    Failed(String),
-}
-
-/// Shared between the request loop and a loader thread, when a model stage
-/// is built. The lock is held only to read or set the state.
-#[derive(Clone)]
-pub struct Model(Arc<Mutex<ModelState>>);
-
-impl Default for Model {
-    fn default() -> Self {
-        Model(Arc::new(Mutex::new(ModelState::Unloaded)))
-    }
-}
-
-impl Model {
-    #[allow(dead_code, reason = "called by the loader of the dense stage")]
-    pub fn set(&self, state: ModelState) {
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = state;
-    }
-
-    pub fn state(&self) -> ModelState {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    /// The retrieval mode of a query now, and the model's state in words.
-    pub fn mode(&self) -> (&'static str, String) {
-        match self.state() {
-            ModelState::Ready => ("dense", "ready".into()),
-            ModelState::Unloaded => ("lexical", "unloaded".into()),
-            ModelState::Loading => ("lexical", "loading".into()),
-            ModelState::Failed(why) => ("lexical", format!("failed: {why}")),
-        }
-    }
-}
+/// The line under the state of an `archive_search` result. Lexical retrieval
+/// with the graph stage is the chosen configuration (masters DR045): no stage
+/// loads a model, so no query waits for one.
+const MODE_LINE: &str = "mode: lexical";
 
 const SEARCH_HELP: &str = "Search the project's research archive (decision records, history reports, \
 logs, topic pages, notes) by words. Use it first, instead of grep or reading files, whenever a question \
@@ -111,7 +68,7 @@ fn tools() -> Value {
                     "as_of": {"type": "string", "description": "YYYY-MM-DD: rank by the records in force on that date."},
                     "since": {"type": "string", "description": "YYYY-MM-DD: only records dated on or after it."},
                     "until": {"type": "string", "description": "YYYY-MM-DD: only records dated on or before it."},
-                    "all": {"type": "boolean", "description": "Show copies of a fact as hits of their own."}
+                    "fold": {"type": "boolean", "description": "Fold a passage that links a better hit's record under that hit."}
                 }
             }
         },
@@ -194,9 +151,7 @@ impl Input<'_> {
 /// for, below a line with the terminal state. Only text, no structured
 /// content: a client may show structured content to its model in place of
 /// the text, at several times the tokens. `Err` is a tool error.
-fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<String, String> {
-    let (mode, model_state) = model.mode();
-    let mode_line = format!("mode: {mode} (model: {model_state})");
+fn call(project: &Project, name: &str, input: &Input) -> Result<String, String> {
     match name {
         "archive_search" => {
             let query = input.strings("query")?;
@@ -207,7 +162,8 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
                 as_of: input.string("as_of")?,
                 since: input.string("since")?,
                 until: input.string("until")?,
-                all: input.flag("all")?,
+                fold: input.flag("fold")?,
+                all: false,
             };
             let phrasings = phrasings(&query);
             let given = input.count("limit")?;
@@ -235,7 +191,7 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
                 super::budget(given),
                 &found.searched,
             );
-            Ok(format!("{}\n{mode_line}\n{text}", found.state_line()))
+            Ok(format!("{}\n{MODE_LINE}\n{text}", found.state_line()))
         }
         "archive_open" => {
             let anchor = input.string("anchor")?.ok_or("`anchor` is required")?;
@@ -273,7 +229,7 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// The answer to one message; `None` for a notification.
-pub fn handle(project: &Project, model: &Model, message: &str) -> Option<Value> {
+pub fn handle(project: &Project, message: &str) -> Option<Value> {
     let Ok(request) = serde_json::from_str::<Value>(message) else {
         return Some(error(
             Value::Null,
@@ -322,7 +278,7 @@ pub fn handle(project: &Project, model: &Model, message: &str) -> Option<Value> 
                 .get("arguments")
                 .and_then(Value::as_object)
                 .unwrap_or(&empty);
-            match call(project, model, name, &Input(args)) {
+            match call(project, name, &Input(args)) {
                 Ok(text) => json!({
                     "content": [{"type": "text", "text": text}],
                     "isError": false
@@ -340,7 +296,6 @@ pub fn handle(project: &Project, model: &Model, message: &str) -> Option<Value> 
 
 /// `lab mcp`: answers requests until stdin closes.
 pub fn run(project: &Project) -> Result<ExitCode, String> {
-    let model = Model::default();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     eprintln!(
@@ -352,7 +307,7 @@ pub fn run(project: &Project) -> Result<ExitCode, String> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = handle(project, &model, &line) {
+        if let Some(reply) = handle(project, &line) {
             writeln!(stdout, "{reply}").map_err(|e| format!("stdout: {e}"))?;
             stdout.flush().map_err(|e| format!("stdout: {e}"))?;
         }
@@ -365,27 +320,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_query_never_waits_for_the_model_and_says_which_mode_it_ran_in() {
-        let model = Model::default();
-        assert_eq!(model.mode().0, "lexical");
-        model.set(ModelState::Loading);
-        assert_eq!(model.mode(), ("lexical", "loading".to_string()));
-        model.set(ModelState::Failed("no weights".into()));
-        assert_eq!(model.mode(), ("lexical", "failed: no weights".to_string()));
-        model.set(ModelState::Ready);
-        assert_eq!(model.mode().0, "dense");
-    }
-
-    #[test]
     fn reads_tool_arguments_by_their_schema_types() {
-        let map = json!({"query": ["a b", "c"], "limit": 3, "all": true, "cites": 5})
+        let map = json!({"query": ["a b", "c"], "limit": 3, "fold": true, "cites": 5})
             .as_object()
             .unwrap()
             .clone();
         let input = Input(&map);
         assert_eq!(input.strings("query").unwrap(), ["a b", "c"]);
         assert_eq!(input.count("limit").unwrap(), Some(3));
-        assert!(input.flag("all").unwrap());
+        assert!(input.flag("fold").unwrap());
         assert!(input.string("cites").is_err());
         assert_eq!(input.string("as_of").unwrap(), None);
     }

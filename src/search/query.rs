@@ -14,10 +14,9 @@ use super::{Class, Context, Scope, graph};
 
 /// Candidates taken from each retrieval of one phrasing.
 const CANDIDATES: usize = 100;
-/// A query with more terms is refused.
-const MAX_TERMS: usize = 32;
-/// The constant of reciprocal rank fusion.
-const RRF_K: f64 = 60.0;
+/// A query keeps its first this many terms; the match mask of a candidate has
+/// one bit per term.
+pub const MAX_TERMS: usize = 32;
 const SNIPPET_CHARS: usize = 160;
 /// A unit of a record that is no longer in force scores this share.
 const INACTIVE_PRIOR: f64 = 0.25;
@@ -63,6 +62,8 @@ pub struct Phrasing {
     raw: Vec<String>,
     /// Every word in order, for the thesaurus.
     seq: Vec<String>,
+    /// How many terms past `MAX_TERMS` the query lost.
+    pub dropped: usize,
 }
 
 /// One thesaurus entry that a query used.
@@ -166,7 +167,8 @@ fn number(word: &str) -> Option<Vec<String>> {
 }
 
 /// Parses one phrasing. Punctuation splits words; `"…"` makes a phrase; a
-/// decimal number is one term.
+/// decimal number is one term. Terms past the first `MAX_TERMS` are dropped
+/// and counted.
 pub fn parse(text: &str) -> Result<Phrasing, String> {
     let mut terms: Vec<Term> = Vec::new();
     let mut add = |tokens: Vec<String>| {
@@ -194,12 +196,8 @@ pub fn parse(text: &str) -> Result<Phrasing, String> {
     if terms.is_empty() {
         return Err(format!("bad query: `{text}` holds no word"));
     }
-    if terms.len() > MAX_TERMS {
-        return Err(format!(
-            "bad query: {} terms; a query takes at most {MAX_TERMS}",
-            terms.len()
-        ));
-    }
+    let dropped = terms.len().saturating_sub(MAX_TERMS);
+    terms.truncate(MAX_TERMS);
     let raw = text
         .split_whitespace()
         .map(|w| w.trim_matches('"').to_string())
@@ -209,6 +207,7 @@ pub fn parse(text: &str) -> Result<Phrasing, String> {
         terms,
         raw,
         seq: words(text),
+        dropped,
     })
 }
 
@@ -242,7 +241,7 @@ pub struct Explain {
     pub prior: f64,
     /// `(bm25 + trigram) * prior`.
     pub score: f64,
-    /// The sum over the phrasings of `1 / (60 + rank)`.
+    /// The sum over the phrasings of the min-max normalised score.
     pub fused: f64,
     /// The query terms the unit holds, of the phrasing that ranked it best.
     pub matched: Vec<String>,
@@ -332,7 +331,7 @@ pub fn weights(conn: &Connection, phrasing: &Phrasing) -> Result<Vec<(String, f6
 
 pub struct Options<'a> {
     pub limit: usize,
-    /// One hit per record instead of two.
+    /// One hit per record, its best unit, instead of one per unit.
     pub records: bool,
     /// Keep only records with one of these statuses; empty keeps all.
     pub statuses: &'a [String],
@@ -372,6 +371,23 @@ impl Candidate {
     fn score(&self) -> f64 {
         (self.bm25 + self.trigram) * self.prior
     }
+}
+
+/// Each score scaled to 0..=1 by the lowest and highest of the list; all
+/// 1 when they are equal. The phrasings' lists are summed on this scale.
+fn normalised(scores: &[f64]) -> Vec<f64> {
+    let low = scores.iter().copied().fold(f64::INFINITY, f64::min);
+    let high = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    scores
+        .iter()
+        .map(|s| {
+            if high > low {
+                (s - low) / (high - low)
+            } else {
+                1.0
+            }
+        })
+        .collect()
 }
 
 fn id_list(ids: impl Iterator<Item = i64>) -> String {
@@ -799,8 +815,8 @@ pub fn search(
         ),
         None => None,
     };
-    // Unit id to the rank and the candidate of the phrasing that ranks it best.
-    let mut best: HashMap<i64, (usize, Candidate)> = HashMap::new();
+    // Unit id to the share and the candidate of the phrasing that scores it best.
+    let mut best: HashMap<i64, (f64, Candidate)> = HashMap::new();
     let mut unknown: Vec<Unknown> = Vec::new();
     let scopes = scope_filter(conn, ctx)?;
     for (i, phrasing) in phrasings.iter().enumerate() {
@@ -813,15 +829,16 @@ pub fn search(
             scopes.as_deref(),
             allowed.as_ref(),
         )?;
-        for (rank, mut c) in candidates.into_iter().enumerate() {
-            let share = 1.0 / (RRF_K + rank as f64 + 1.0);
-            // The phrasing that ranks a unit best describes it; every phrasing adds its share.
+        // Each phrasing adds its min-max normalised score (E1, DR045 of masters).
+        let shares = normalised(&candidates.iter().map(Candidate::score).collect::<Vec<_>>());
+        for (share, mut c) in shares.into_iter().zip(candidates) {
+            // The phrasing that scores a unit best describes it.
             match best.get_mut(&c.unit) {
-                Some((seen_rank, seen)) => {
+                Some((seen_share, seen)) => {
                     c.fused = seen.fused + share;
                     c.exact_id |= seen.exact_id;
-                    if rank < *seen_rank {
-                        *seen_rank = rank;
+                    if share > *seen_share {
+                        *seen_share = share;
                         *seen = c;
                     } else {
                         seen.fused = c.fused;
@@ -830,7 +847,7 @@ pub fn search(
                 }
                 None => {
                     c.fused = share;
-                    best.insert(c.unit, (rank, c));
+                    best.insert(c.unit, (share, c));
                 }
             }
         }
@@ -864,19 +881,16 @@ pub fn search(
         .take(TRACED)
         .map(|c| (format!("{}#L{}-L{}", c.path, c.start, c.end), c.fused))
         .collect();
-    // Group by record: its units follow its best one.
-    let per_record = if opts.records { 1 } else { 2 };
-    let mut groups: Vec<Vec<Candidate>> = Vec::new();
-    let mut place: HashMap<i64, usize> = HashMap::new();
-    for c in ranked {
-        let i = *place.entry(c.file).or_insert_with(|| {
-            groups.push(Vec::new());
-            groups.len() - 1
-        });
-        if groups[i].len() < per_record {
-            groups[i].push(c);
-        }
-    }
+    // Each unit ranks on its own score. Grouping a record's units under its
+    // best one, at most two, cost 0.02 nDCG@10 on E1's topics
+    // (research-factory-295). With `records`, a record's best unit stands
+    // for it.
+    let mut seen = HashSet::new();
+    let mut groups: Vec<Vec<Candidate>> = ranked
+        .into_iter()
+        .filter(|c| !opts.records || seen.insert(c.file))
+        .map(|c| vec![c])
+        .collect();
     below_successors(&mut groups);
     let groups = if opts.fold {
         fold(conn, groups)?
@@ -888,6 +902,7 @@ pub fn search(
         terms: Vec::new(),
         raw: Vec::new(),
         seq: Vec::new(),
+        dropped: 0,
     };
     let mut hits = Vec::new();
     let units = groups.into_iter().flat_map(|(g, also)| {
@@ -1209,10 +1224,20 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_query_without_a_word_or_with_too_many() {
+    fn scales_each_score_by_the_lowest_and_highest_of_its_list() {
+        assert_eq!(normalised(&[10.0, 6.0, 2.0]), [1.0, 0.5, 0.0]);
+        assert_eq!(normalised(&[3.0, 3.0]), [1.0, 1.0]);
+        assert!(normalised(&[]).is_empty());
+    }
+
+    #[test]
+    fn refuses_a_query_without_a_word_and_keeps_the_first_terms_of_a_long_one() {
         assert!(parse(" -- \"\" ").unwrap_err().starts_with("bad query"));
-        let many: Vec<String> = (0..=MAX_TERMS).map(|i| format!("w{i}")).collect();
-        assert!(parse(&many.join(" ")).unwrap_err().contains("at most"));
+        let many: Vec<String> = (0..MAX_TERMS + 3).map(|i| format!("w{i}")).collect();
+        let p = parse(&many.join(" ")).unwrap();
+        assert_eq!((p.terms.len(), p.dropped), (MAX_TERMS, 3));
+        assert_eq!(p.terms.last(), Some(&term(&["w31"])));
+        assert_eq!(parse("a b").unwrap().dropped, 0);
     }
 
     #[test]

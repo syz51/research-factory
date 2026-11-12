@@ -129,7 +129,7 @@ enum Command {
         query: Vec<String>,
         /// The scopes to search, repeatable or comma-separated: notes, refs,
         /// texts, files, sessions, board, or all (default: [lab.search]
-        /// default_scopes, which is notes and refs).
+        /// default_scopes, which is notes, refs and texts).
         #[arg(long = "in", value_name = "SCOPE", value_delimiter = ',')]
         scopes: Vec<String>,
         /// At most this many hits. Without it: 8 hits, packed to about 2 KB.

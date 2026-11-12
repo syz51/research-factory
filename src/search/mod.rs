@@ -77,7 +77,7 @@ impl Scope {
 }
 
 fn default_scopes() -> Vec<Scope> {
-    vec![Scope::Notes, Scope::Refs]
+    vec![Scope::Notes, Scope::Refs, Scope::Texts]
 }
 
 /// The scopes a query searches: those named, `all`, or else the configured default.
@@ -215,17 +215,18 @@ impl Class {
     }
 
     /// The share of its score a unit of this class keeps: the project's own
-    /// notes rank above copied pages, and historical pages rank last.
+    /// notes rank above copied pages, and historical pages rank last. Papers
+    /// and paper cards keep their whole score: a prior of 0.8 on papers cost
+    /// the masters judged set 0.04 nDCG@10, mostly on reference and passage
+    /// topics, and 0.5 on paper cards cost it 0.01 (research-factory-295).
     fn prior(self) -> f64 {
         match self {
-            Self::Own => 1.0,
-            Self::Paper => 0.8,
+            // Generated text is only paper cards, which route to a paper;
+            // generated notes are never indexed.
+            Self::Own | Self::Paper | Self::Generated => 1.0,
             Self::Chat => 0.6,
             Self::Copied => 0.5,
             Self::Historical => 0.25,
-            // Paper cards: model output that routes to a paper, never evidence.
-            // Generated notes are never indexed.
-            Self::Generated => 0.5,
         }
     }
 }
@@ -431,8 +432,12 @@ pub struct GraphArgs {
     /// Only records dated on or before this date (YYYY-MM-DD).
     #[arg(long, value_name = "DATE")]
     pub until: Option<String>,
-    /// Show each unit that links a record as a hit of its own, not as an "also in" line.
+    /// Fold a unit that links a better hit's record under that hit, as an
+    /// "also in" line, instead of showing it as a hit of its own.
     #[arg(long)]
+    pub fold: bool,
+    /// No effect since 0.19.0, when each unit became a hit of its own by default.
+    #[arg(long, hide = true)]
     pub all: bool,
 }
 
@@ -840,7 +845,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
             statuses: req.statuses,
             filter: filter.as_deref(),
             as_of: filters.as_of.as_deref(),
-            fold: !req.graph.all,
+            fold: req.graph.fold,
         };
         let searched = query::search(&opened.conn, &ctx, &parsed, &opts).and_then(|outcome| {
             let weights = if req.weigh {
@@ -867,6 +872,13 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
         .into_iter()
         .map(|why| format!("the index is stale: {why}"))
         .chain(notices)
+        .chain(parsed.iter().filter(|p| p.dropped > 0).map(|p| {
+            format!(
+                "a phrasing has more than {} terms; its last {} were left out",
+                query::MAX_TERMS,
+                p.dropped
+            )
+        }))
         .collect();
     let mut missing_stages = Vec::new();
     for stage in ctx.cfg.stages.iter().filter(|s| s.state() != "ready") {

@@ -209,9 +209,12 @@ fn texts_hit_with_line_range_and_key_and_leave_out_the_references() {
     // The structured extraction is preferred over the plain one.
     assert_eq!(keys(&json(d, &["--in", "texts", "wallaby"])), ["15"]);
     assert_eq!(json(d, &["--in", "texts", "kangaroo"])["state"], "zero");
-    // Texts are not searched by default.
+    // Since 0.19.0 texts are searched by default.
     let plain = json(d, &["quantum", "annealing"]);
-    assert!(hits(&plain).iter().all(|h| h["scope"] != "texts"));
+    assert!(
+        hits(&plain).iter().any(|h| h["scope"] == "texts"),
+        "{plain}"
+    );
 }
 
 #[test]

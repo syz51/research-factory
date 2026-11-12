@@ -845,7 +845,7 @@ fn done_is_the_completion_gate_and_writes_no_index_file() {
     let (code, text) = done(d);
     assert_eq!(code, Some(0), "{text}");
     assert!(
-        text.contains("search index: up to date, 3 unit(s) of 3 file(s)"),
+        text.contains("search index: up to date, 5 unit(s) of 3 file(s)"),
         "{text}"
     );
     assert!(text.contains("done: links resolve"), "{text}");

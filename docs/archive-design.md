@@ -80,7 +80,8 @@ Copied pages are indexed but rank below `own`. A project sets classes by path in
 
 A fact that appears in a record, a month log and a topic page is one fact. The record is canonical:
 hits from one record group together, and a log entry or topic paragraph that links to a record
-folds under it.
+folds under it. E1 measured both and lab 0.19.0 dropped them as defaults: each unit is a hit of
+its own, and `--fold` folds (section 3.6, stage 5).
 
 ### 3.2 Parsing
 
@@ -150,6 +151,8 @@ Target pipeline. Each stage after the first is kept only if E1 shows it earns it
 3. Priors: status (current, historical, superseded), source class, mild recency.
 4. Rerank the top 30 with a local cross-encoder.
 5. Group by record; at most two units per record; fold duplicates under the canonical record.
+   E1 dropped this stage: each unit ranks on its own score, and folding is opt-in (`--fold`),
+   because grouping cost 0.02 nDCG@10 and folding 0.01 (lab 0.19.0, research-factory-295).
 6. Expand from the graph: attach to each hit its successor, its parent record and its count of
    citing notes.
 7. Pack to a budget: 8 hits and about 2 KB by default.
@@ -222,7 +225,7 @@ search use measures `grep_share` or `greps`. `agentprof` does not compute the ot
 | Vector search | exact scan | approximate indexes (not needed below about a million vectors) | — |
 | Model summaries | paper cards with checked quotes, as routing text only | unchecked summaries; no model text at all (earlier choice, reversed) | deleting the cards |
 | Raw paper text | unchanged; structured text is a second entry | replacing it (breaks pinned quotes) | — |
-| Duplicated facts | record is canonical; others fold under it | indexing each copy equally | a flag that shows all |
+| Duplicated facts | record is canonical; others fold under it (opt-in `--fold` since lab 0.19.0: E1 found folding cost 0.01 nDCG@10) | indexing each copy equally | a flag that shows all |
 | Sessions and board | experiment first | index now (unreviewed text may outrank records) | — |
 | Prototype language | Python under `uv` for experiments; Rust for what wins | Rust first (slow to try models) | — |
 | Agent delivery (E4, 2026-11-12) | `lab mcp` tools by default; `lab search` where they are not configured | grep hint and archivist subagent as defaults (no gain; the hint speaks after grep has answered); the command line alone (agents searched in 1 of 24 sessions, against 20 with MCP) | removing `lab mcp` from `.mcp.json`; see [experiments/e4-delivery](experiments/e4-delivery/README.md) |

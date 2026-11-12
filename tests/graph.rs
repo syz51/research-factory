@@ -183,9 +183,9 @@ fn cites_selects_the_notes_that_cite_a_key_and_no_other() {
 }
 
 #[test]
-fn a_fact_in_a_record_a_log_and_a_topic_page_is_one_hit_with_also_in_lines() {
+fn with_fold_a_fact_in_a_record_a_log_and_a_topic_page_is_one_hit_with_also_in_lines() {
     let dir = fixture();
-    let report = json(dir.path(), &["search", "capybara corpus"]);
+    let report = json(dir.path(), &["search", "capybara corpus", "--fold"]);
     assert_eq!(paths(&report), [DR002], "{report}");
     let also: Vec<&str> = report["hits"][0]["also_in"]
         .as_array()
@@ -199,14 +199,19 @@ fn a_fact_in_a_record_a_log_and_a_topic_page_is_one_hit_with_also_in_lines() {
     // The hit shows its successor and how many notes link it.
     assert_eq!(report["hits"][0]["record"]["superseded_by"][0], "DR003");
     assert_eq!(report["hits"][0]["linked_by"], 2);
-    let text = ok(dir.path(), &["search", "capybara corpus"]);
+    let text = ok(dir.path(), &["search", "capybara corpus", "--fold"]);
     assert!(text.contains("superseded by DR003 · linked by 2"), "{text}");
     assert!(text.contains("   also in: "), "{text}");
     assert!(
         text.contains("H1 docs/history/01-2026-03-02-log.md#L7-L10"),
         "{text}"
     );
-    let all = json(dir.path(), &["search", "capybara corpus", "--all"]);
+    // By default, and with the old `--all`, each copy is a hit of its own.
+    let all = json(dir.path(), &["search", "capybara corpus"]);
+    assert_eq!(
+        all,
+        json(dir.path(), &["search", "capybara corpus", "--all"])
+    );
     let mut found = paths(&all);
     found.sort_unstable();
     let mut expected = [DR002, TOPIC, LOG];
@@ -230,16 +235,18 @@ fn as_of_ranks_by_the_records_in_force_on_that_date() {
             "2026-03-15",
         ],
     );
-    assert_eq!(paths(&then)[..2], [DR002, DR001], "{then}");
+    // The topic page that links the second decision is a hit of its own,
+    // above the first decision, which was no longer in force.
+    assert_eq!(paths(&then), [DR002, TOPIC, DR001], "{then}");
     assert_eq!(then["hits"][0]["record"]["inactive"], false);
-    assert_eq!(then["hits"][1]["record"]["inactive"], true);
+    assert_eq!(then["hits"][2]["record"]["inactive"], true);
     // A successor dated after the date is not listed; an earlier one is.
     assert!(
         then["hits"][0]["record"]["superseded_by"].is_null(),
         "{then}"
     );
     assert_eq!(
-        then["hits"][1]["record"]["superseded_by"],
+        then["hits"][2]["record"]["superseded_by"],
         serde_json::json!(["DR002"])
     );
     // Before the second decision, the first ranks first.

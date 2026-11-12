@@ -2,6 +2,8 @@
 //! TREC run, `topic Q0 docid rank score tag`, that `ireval eval` scores
 //! against a qrels file. A docid is a hit's anchor, `path#Lstart-Lend` (or
 //! `ref:<key>` for a scope with keys), or with `--records` the record's path.
+//! The run lists the docids in the order the output shows them: each hit,
+//! then the units folded under it as `also in` lines.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -86,6 +88,24 @@ fn docid(id: &str) -> String {
     id.replace('%', "%25").replace(' ', "%20")
 }
 
+/// The first `limit` docids of hits given as (docid, docids folded under it),
+/// in the order the output shows them. A docid that came before is skipped.
+fn shown<'a>(
+    hits: impl IntoIterator<Item = (&'a str, Vec<&'a str>)>,
+    limit: usize,
+) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = Vec::new();
+    for (id, also) in hits {
+        for id in std::iter::once(id).chain(also) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.truncate(limit);
+    ids
+}
+
 pub fn run(project: &Project, args: &Args, file: &Path) -> Result<ExitCode, String> {
     if !args.query.is_empty() {
         return Err("--run takes its queries from the topics file; give no query words".into());
@@ -118,16 +138,31 @@ pub fn run(project: &Project, args: &Args, file: &Path) -> Result<ExitCode, Stri
             traced(project, "run", &request).map_err(|e| format!("topic `{}`: {e}", topic.id))?;
         // Build at most once.
         rebuild = false;
-        for hit in &answer.hits {
-            let id = if args.records { &hit.path } else { &hit.anchor };
+        let ids = shown(
+            answer.hits.iter().map(|hit| {
+                let also = hit.also_in.iter().map(|a| {
+                    if args.records {
+                        a.anchor
+                            .split_once("#L")
+                            .map_or(a.anchor.as_str(), |(path, _)| path)
+                    } else {
+                        a.anchor.as_str()
+                    }
+                });
+                let id = if args.records { &hit.path } else { &hit.anchor };
+                (id.as_str(), also.collect())
+            }),
+            limit,
+        );
+        for (i, id) in ids.iter().enumerate() {
             // Distinct scores, the best the highest: ties would let the scorer reorder.
             let _ = writeln!(
                 out,
                 "{} Q0 {} {} {} {TAG}",
                 topic.id,
                 docid(id),
-                hit.rank,
-                limit + 1 - hit.rank
+                i + 1,
+                limit - i
             );
             hits += 1;
         }
@@ -160,6 +195,20 @@ mod tests {
     fn refuses_a_repeated_topic() {
         let err = parse("A\tx\nA\ty\n", Path::new("t")).unwrap_err();
         assert!(err.contains("repeats"), "{err}");
+    }
+
+    #[test]
+    fn lists_the_units_folded_under_a_hit_after_it_once_up_to_the_limit() {
+        let hits = [
+            ("a#L1-L2", vec!["b#L1-L2", "c#L1-L2"]),
+            ("b#L1-L2", vec![]),
+            ("d#L1-L2", vec!["e#L1-L2"]),
+        ];
+        assert_eq!(
+            shown(hits.clone(), 10),
+            ["a#L1-L2", "b#L1-L2", "c#L1-L2", "d#L1-L2", "e#L1-L2"]
+        );
+        assert_eq!(shown(hits, 2), ["a#L1-L2", "b#L1-L2"]);
     }
 
     #[test]
