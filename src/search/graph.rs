@@ -200,18 +200,14 @@ pub fn index_edges(
 /// The versions of a file whose units' anchors the index keeps.
 pub const OLD_VERSIONS: i64 = 10;
 
-/// Removes the edges of a file. A changed file (`changed`) keeps its units'
-/// anchors as its next version, so that an anchor into the text it had still
-/// resolves by content hash, and loses those of versions older than
-/// [`OLD_VERSIONS`]. A file whose source is gone loses all of them.
-pub fn forget_file(tx: &Transaction, file: i64, changed: bool) -> rusqlite::Result<()> {
+/// Removes the edges of a file and keeps its units' anchors as the file's
+/// next version, so that an anchor into the text it had still resolves by
+/// content hash. Versions older than [`OLD_VERSIONS`] are dropped; so are the
+/// anchors of a path that no source holds any more ([`drop_orphan_anchors`]).
+pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM edges WHERE file_id = ?1", [file])?;
     let path: String =
         tx.query_row("SELECT path FROM files WHERE id = ?1", [file], |r| r.get(0))?;
-    if !changed {
-        tx.execute("DELETE FROM old_anchors WHERE path = ?1", [&path])?;
-        return Ok(());
-    }
     let version: i64 = tx.query_row(
         "SELECT coalesce(max(version), 0) + 1 FROM old_anchors WHERE path = ?1",
         [&path],
@@ -227,6 +223,17 @@ pub fn forget_file(tx: &Transaction, file: i64, changed: bool) -> rusqlite::Resu
     tx.execute(
         "DELETE FROM old_anchors WHERE path = ?1 AND version <= ?2",
         params![path, version - OLD_VERSIONS],
+    )?;
+    Ok(())
+}
+
+/// Drops the anchors of each path that no source of any scope holds. It runs
+/// once a refresh has indexed every change, so that a path that moved from
+/// one scope to another keeps its anchors.
+pub fn drop_orphan_anchors(tx: &Transaction) -> rusqlite::Result<()> {
+    tx.execute(
+        "DELETE FROM old_anchors WHERE path NOT IN (SELECT path FROM files)",
+        [],
     )?;
     Ok(())
 }

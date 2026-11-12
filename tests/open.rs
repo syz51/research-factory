@@ -215,7 +215,9 @@ fn an_anchor_finds_its_text_across_two_edits_and_old_versions_are_bounded() {
     let unit = json(d, &["open", &anchor]);
     assert_eq!(unit["lines"][0], "## Alpha", "{unit}");
     assert!(
-        unit["notice"].as_str().unwrap().contains("moved to"),
+        unit["notice"].as_str().unwrap().contains(
+            "the latest text of L7-L9 is gone, and the text it held 1 version(s) earlier moved to"
+        ),
         "{unit}"
     );
     assert_ne!(unit["anchor"], anchor);

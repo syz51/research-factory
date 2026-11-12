@@ -464,7 +464,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
         graph::write_papers(&tx, papers)?;
     }
     for id in gone {
-        remove_file(&tx, id, false)?;
+        remove_file(&tx, id)?;
         left -= 1;
     }
     let mut loader = Loader::new(ctx);
@@ -477,6 +477,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
         index_doc(ctx, &tx, &mut loader, c.doc, c.existing)?;
         left -= 1;
     }
+    graph::drop_orphan_anchors(&tx)?;
     set_built(&tx, &have.iter().chain(&ctx.scopes).copied().collect())?;
     sync_words(&tx)?;
     tx.commit()?;
@@ -542,9 +543,8 @@ fn remove_units(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
 }
 
 /// A unit never outlives its source, nor do the edges that start at it.
-/// `changed`: the file is about to be indexed again, so its anchors stay.
-fn remove_file(tx: &Transaction, file: i64, changed: bool) -> rusqlite::Result<()> {
-    graph::forget_file(tx, file, changed)?;
+fn remove_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
+    graph::forget_file(tx, file)?;
     remove_units(tx, file)?;
     tx.execute("DELETE FROM aliases WHERE file_id = ?1", [file])?;
     tx.execute("DELETE FROM stale WHERE file_id = ?1", [file])?;
@@ -563,7 +563,7 @@ fn index_doc(
     let Some(loaded) = loader.load(tx, doc)? else {
         // Gone since it was listed.
         if let Some(id) = existing {
-            remove_file(tx, id, false)?;
+            remove_file(tx, id)?;
         }
         return Ok(());
     };
@@ -581,7 +581,7 @@ fn index_doc(
             )?;
             return Ok(());
         }
-        remove_file(tx, id, true)?;
+        remove_file(tx, id)?;
     }
     let row = &loaded.row;
     tx.execute(
@@ -672,6 +672,48 @@ mod tests {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_path_removed_and_indexed_again_in_one_refresh_keeps_its_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n",
+        );
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts.\n");
+        write(root, "docs/b.md", "# Hare\n\nThe hare runs.\n");
+        let project = Project::discover(root, None).unwrap();
+        let ctx = Context::new(&project, vec![Scope::Notes]).unwrap();
+        let mut conn = open(&ctx, false).unwrap().conn;
+        let id = |conn: &Connection, path: &str| -> i64 {
+            conn.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+                .unwrap()
+        };
+        let anchors = |conn: &Connection, path: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM old_anchors WHERE path = ?1",
+                [path],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // As a refresh does when a path leaves one scope and enters another:
+        // the source of one scope is gone, the other's is new.
+        let tx = conn.transaction().unwrap();
+        let (a, b) = (id(&tx, "docs/a.md"), id(&tx, "docs/b.md"));
+        remove_file(&tx, a).unwrap();
+        remove_file(&tx, b).unwrap();
+        let listed = sources::list(&ctx, Scope::Notes, &mut Resolver::new(root).unwrap()).unwrap();
+        let doc = listed.docs.iter().find(|d| d.key == "docs/a.md").unwrap();
+        index_doc(&ctx, &tx, &mut Loader::new(&ctx), doc, None).unwrap();
+        graph::drop_orphan_anchors(&tx).unwrap();
+        tx.commit().unwrap();
+        assert!(anchors(&conn, "docs/a.md") > 0);
+        // A path that no source holds loses them.
+        assert_eq!(anchors(&conn, "docs/b.md"), 0);
     }
 
     #[test]

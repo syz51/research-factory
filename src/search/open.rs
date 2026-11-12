@@ -286,14 +286,23 @@ fn relocate(
         // A range that was never a unit: print it as asked.
         return Ok((Some(fallback), None));
     }
-    for hash in &old {
+    for (i, hash) in old.iter().enumerate() {
         if let Some((_, u)) =
             unit_where(conn, "file_id = ?1 AND hash = ?2", params![file.id, hash]).map_err(db)?
         {
-            let why = format!(
-                "the file changed; the text of L{a}-L{b} moved to L{}-L{} (same content hash)",
-                u.start, u.end
-            );
+            // The range's later texts are gone, and the anchor may have been
+            // made for one of them: say that this is an earlier one.
+            let why = if i == 0 {
+                format!(
+                    "the file changed; the text of L{a}-L{b} moved to L{}-L{} (same content hash)",
+                    u.start, u.end
+                )
+            } else {
+                format!(
+                    "the file changed; the latest text of L{a}-L{b} is gone, and the text it held {i} version(s) earlier moved to L{}-L{} (same content hash)",
+                    u.start, u.end
+                )
+            };
             return Ok((Some(u), Some(why)));
         }
     }
