@@ -525,11 +525,17 @@ fn structure(file: &std::path::Path, text_sha: &str) -> Result<Sections, String>
 fn relocate(old: Structure, text: &str) -> Vec<Section> {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let lines: Vec<&str> = text.lines().collect();
-    let mut at: HashMap<String, Vec<usize>> = HashMap::new();
+    // The lines of the text that equal an old heading.
+    let mut at: HashMap<String, Vec<usize>> = old
+        .sections
+        .iter()
+        .filter_map(|s| s.heading.as_deref().map(norm))
+        .filter(|h| !h.is_empty())
+        .map(|h| (h, Vec::new()))
+        .collect();
     for (i, line) in lines.iter().enumerate() {
-        let line = norm(line);
-        if !line.is_empty() {
-            at.entry(line).or_default().push(i + 1);
+        if let Some(found) = at.get_mut(&norm(line)) {
+            found.push(i + 1);
         }
     }
     // How far the edits so far moved the text, and the first line the next
@@ -551,7 +557,8 @@ fn relocate(old: Structure, text: &str) -> Vec<Section> {
             });
         let first = match found {
             Some(n) => n,
-            None => expected.clamp(floor as isize, lines.len() as isize + 1) as usize,
+            // Past the end of a shorter text, the section is empty.
+            None => expected.min(lines.len() as isize + 1).max(floor as isize) as usize,
         };
         shift = first as isize - s.first_line as isize;
         firsts.push(first);
@@ -1040,6 +1047,17 @@ mod tests {
         ];
         let found = relocate(structure_of(&text, &gap), &gone);
         assert_eq!(ranges(&found), [(1, 2), (4, 29), (30, 59)]);
+        // A text that got shorter or empty leaves the sections past its end
+        // empty, and their passages none.
+        for short in ["", "Title\n"] {
+            let found = relocate(structure_of(&text, &sections), short);
+            assert!(
+                found.iter().all(|s| s.first_line > 0),
+                "{:?}",
+                ranges(&found)
+            );
+            assert!(passages(short, found).len() <= 1);
+        }
     }
 
     #[test]
