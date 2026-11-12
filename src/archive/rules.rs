@@ -526,7 +526,7 @@ impl<'a> Offloaded<'a> {
 }
 
 /// The append-only files and their seals.
-enum Seals<'a> {
+pub(super) enum Seals<'a> {
     Manifest {
         /// The files that match `[lab.archive] sealed`.
         sealed: BTreeSet<&'a str>,
@@ -559,26 +559,37 @@ impl Seals<'_> {
     /// Whether file line `line` (from 1) of `file`, whose content is `bytes`,
     /// lies wholly in the text its seal covers: the file is append-only, its
     /// seal holds, and the line ends within the sealed bytes of the body.
-    fn covers(&self, file: &str, bytes: &[u8], line: usize) -> Result<bool, String> {
-        let body = front::sealed_body(bytes);
-        let Some(sealed) = self.sealed_len(file, body)? else {
-            return Ok(false);
-        };
-        // The body is the end of the file, so the sealed span starts where it does.
-        let sealed_end = bytes.len() - body.len() + sealed;
-        let mut start = 0;
-        for _ in 1..line {
-            match bytes[start..].iter().position(|&b| b == b'\n') {
-                Some(i) => start += i + 1,
-                None => return Ok(false),
-            }
-        }
-        let end = bytes[start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(bytes.len(), |i| start + i);
-        Ok(end <= sealed_end)
+    pub(super) fn covers(&self, file: &str, bytes: &[u8], line: usize) -> Result<bool, String> {
+        Ok(self
+            .sealed_end(file, bytes)?
+            .is_some_and(|end| line_ends_by(bytes, line, end)))
     }
+
+    /// The byte offset in `bytes` where the sealed text of `file` ends, if
+    /// it has any.
+    pub(super) fn sealed_end(&self, file: &str, bytes: &[u8]) -> Result<Option<usize>, String> {
+        let body = front::sealed_body(bytes);
+        // The body is the end of the file, so the sealed span starts where it does.
+        Ok(self
+            .sealed_len(file, body)?
+            .map(|sealed| bytes.len() - body.len() + sealed))
+    }
+}
+
+/// Whether line `line` (from 1) of `bytes` ends at or before `sealed_end`.
+pub(super) fn line_ends_by(bytes: &[u8], line: usize, sealed_end: usize) -> bool {
+    let mut start = 0;
+    for _ in 1..line {
+        match bytes[start..].iter().position(|&b| b == b'\n') {
+            Some(i) => start += i + 1,
+            None => return false,
+        }
+    }
+    let end = bytes[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(bytes.len(), |i| start + i);
+    end <= sealed_end
 }
 
 /// One `[[lab.archive.kept_link]]` entry and whether a missing link matched it.
