@@ -3,10 +3,10 @@
 //! append-only files, and checks ids, links, sizes and seals, so agents can
 //! find a record by id or a few words instead of reading large files whole.
 
-mod files;
-mod front;
+pub(crate) mod files;
+pub(crate) mod front;
 mod index;
-mod markdown;
+pub(crate) mod markdown;
 mod rules;
 mod seal;
 
@@ -199,30 +199,9 @@ impl<'p> Spec<'p> {
         for (i, (ix, paths)) in self.indexes.iter().zip(found).enumerate() {
             for path in paths.iter().filter(|p| !outputs.contains(p.as_str())) {
                 let bytes = texts.bytes(&self.root().join(path))?;
-                let split = front::split(&bytes);
-                let parsed = match (split.yaml, split.unterminated) {
-                    (Some(yaml), _) => front::parse(yaml, &self.cfg.statuses),
-                    (None, true) => Err(Invalid {
-                        line: 1,
-                        message: "front matter starts with `---` but no closing `---` line follows"
-                            .into(),
-                    }),
-                    (None, false) => Ok(Meta::default()),
-                };
-                let (mut meta, invalid) = match parsed {
-                    Ok(meta) => (meta, None),
-                    Err(e) => (Meta::default(), Some(e)),
-                };
-                if meta.id.is_none() {
-                    meta.id = index::derive_id(ix.spec, ix.id_from.as_ref(), path);
-                }
-                if meta.title.is_none() {
-                    let heading = texts.doc(&self.root().join(path))?.title.clone();
-                    meta.title = heading.map(|t| without_id(&t, meta.id.as_deref()).to_string());
-                }
-                if meta.date.is_none() {
-                    meta.date = front::date_in(path);
-                }
+                let (meta, invalid) = self.meta(Some(ix), path, &bytes, || {
+                    Ok(texts.doc(&self.root().join(path))?.title.clone())
+                })?;
                 records.push(Record {
                     index: i,
                     path: path.clone(),
@@ -232,6 +211,59 @@ impl<'p> Spec<'p> {
             }
         }
         Ok(records)
+    }
+
+    /// The front matter of `path`, with `id`, `title` and `date` derived
+    /// where absent: the id as index `ix` derives it, the title from
+    /// `heading` (the file's first level-1 heading) and the date from the path.
+    fn meta(
+        &self,
+        ix: Option<&Index>,
+        path: &str,
+        bytes: &[u8],
+        heading: impl FnOnce() -> Result<Option<String>, String>,
+    ) -> Result<(Meta, Option<Invalid>), String> {
+        let split = front::split(bytes);
+        let parsed = match (split.yaml, split.unterminated) {
+            (Some(yaml), _) => front::parse(yaml, &self.cfg.statuses),
+            (None, true) => Err(Invalid {
+                line: 1,
+                message: "front matter starts with `---` but no closing `---` line follows".into(),
+            }),
+            (None, false) => Ok(Meta::default()),
+        };
+        let (mut meta, invalid) = match parsed {
+            Ok(meta) => (meta, None),
+            Err(e) => (Meta::default(), Some(e)),
+        };
+        if meta.id.is_none()
+            && let Some(ix) = ix
+        {
+            meta.id = index::derive_id(ix.spec, ix.id_from.as_ref(), path);
+        }
+        if meta.title.is_none() {
+            meta.title = heading()?.map(|t| without_id(&t, meta.id.as_deref()).to_string());
+        }
+        if meta.date.is_none() {
+            meta.date = front::date_in(path);
+        }
+        Ok((meta, invalid))
+    }
+
+    /// For `lab search`: the front matter of the file `path` holding `bytes`,
+    /// with the values that the first index listing it derives. A file in no
+    /// index gets its title and date the same way and no derived id.
+    pub fn meta_of(&self, path: &str, bytes: &[u8]) -> Meta {
+        let ix = self.indexes.iter().find(|ix| ix.files.matches(path));
+        let heading = || {
+            let split = front::split(bytes);
+            let body = String::from_utf8_lossy(split.body);
+            Ok(markdown::parse(&body, split.body_line).title)
+        };
+        match self.meta(ix, path, bytes, heading) {
+            Ok((meta, _)) => meta,
+            Err(_) => unreachable!("the heading closure never fails"),
+        }
     }
 
     /// Index `i`'s records in its order.
@@ -539,75 +571,6 @@ pub fn check(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     }
     Ok(exit(errors == 0))
 }
-/// `lab archive find`.
-pub fn find(project: &Project, terms: &[String], limit: usize) -> Result<ExitCode, String> {
-    let spec = Spec::new(project)?;
-    let found = spec.walk(&[])?;
-    let records = spec.records(&found, &mut Texts::new())?;
-    let ordered: Vec<&Record> = (0..spec.indexes.len())
-        .flat_map(|i| spec.rows(&records, i))
-        .collect();
-    let terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
-    let mut hits = Vec::new();
-    for (pos, r) in unique_refs(&ordered).into_iter().enumerate() {
-        let m = &r.meta;
-        let fields: Vec<String> = [&m.id, &m.title, &m.summary]
-            .into_iter()
-            .flatten()
-            .chain(&m.aliases)
-            .chain([&r.path])
-            .map(|f| f.to_lowercase())
-            .collect();
-        if !terms.iter().all(|t| fields.iter().any(|f| f.contains(t))) {
-            continue;
-        }
-        let id = m.id.as_deref().map(str::to_lowercase).unwrap_or_default();
-        let rank = if terms.contains(&id) {
-            0
-        } else if !id.is_empty() && terms.iter().any(|t| id.starts_with(t.as_str())) {
-            1
-        } else {
-            2
-        };
-        hits.push((rank, pos, r));
-    }
-    hits.sort_by_key(|&(rank, pos, _)| (rank, pos));
-    if hits.is_empty() {
-        let indexes: Vec<String> = spec
-            .cfg
-            .index
-            .iter()
-            .map(|i| format!("{} ({})", i.name, i.output))
-            .collect();
-        eprintln!(
-            "No record matches all of: {}. Searched ids, titles, summaries, aliases and paths in the indexes {}.",
-            terms.join(" "),
-            indexes.join(", ")
-        );
-        return Ok(ExitCode::from(1));
-    }
-    for (_, _, r) in hits.iter().take(limit) {
-        let m = &r.meta;
-        let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
-        println!(
-            "{}\t{}\t{}\t{}\t{}",
-            or_dash(&m.id),
-            or_dash(&m.date),
-            or_dash(&m.status),
-            r.path,
-            or_dash(&m.title)
-        );
-    }
-    if hits.len() > limit {
-        eprintln!(
-            "{} more match(es); add a word or pass --limit {}",
-            hits.len() - limit,
-            hits.len()
-        );
-    }
-    Ok(ExitCode::SUCCESS)
-}
-
 /// The first record of each path (a file can belong to several indexes).
 fn unique_refs<'r>(records: &[&'r Record]) -> Vec<&'r Record> {
     let mut seen = BTreeSet::new();

@@ -17,6 +17,7 @@ mod lesson_loop;
 mod lessons;
 mod replay;
 mod retro;
+mod search;
 mod signals;
 mod stats;
 mod worktree;
@@ -111,6 +112,38 @@ enum Command {
     /// Index, seal and check the research archive configured in [lab.archive].
     #[command(subcommand)]
     Archive(ArchiveCommand),
+    /// Search the project's notes: ranked sections with path, line range and a snippet.
+    ///
+    /// Words rank sections that hold all of them first, then sections that
+    /// hold some. Put a phrase in double quotes inside one argument
+    /// (`'"fiscal calendar" lag'`). Several arguments of which one holds a
+    /// space are several phrasings of one question. Exit 0 with hits, with a
+    /// partial answer and with no hit; exit 2 on an error.
+    Search {
+        /// The words, or several phrasings, to search for.
+        query: Vec<String>,
+        /// The scope to search (repeatable): notes.
+        #[arg(long = "in", value_name = "SCOPE", default_value = "notes")]
+        scopes: Vec<String>,
+        /// At most this many hits (default 8).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Only records with one of these statuses (repeatable).
+        #[arg(long, value_name = "STATUS")]
+        status: Vec<String>,
+        /// One hit for each record.
+        #[arg(long)]
+        records: bool,
+        /// Print one JSON object (schema rf.search/1) with `state`: hits, partial, zero or error.
+        #[arg(long)]
+        json: bool,
+        /// Show the score of each stage for each hit.
+        #[arg(long)]
+        explain: bool,
+        /// Build the index anew before the query; alone, only build it.
+        #[arg(long)]
+        rebuild: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -133,12 +166,12 @@ enum ArchiveCommand {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
-    /// Find records whose id, title, summary, aliases or path contain every term.
+    /// The same as `lab search --in notes --records`.
     Find {
         #[arg(required = true)]
         terms: Vec<String>,
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
+        #[arg(long)]
+        limit: Option<usize>,
     },
     /// Print the next free id with this prefix, such as `H159` for `H`.
     Next {
@@ -347,9 +380,43 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
             ArchiveCommand::Update => archive::update(&project),
             ArchiveCommand::Check { format } => archive::check(&project, format == Format::Jsonl),
-            ArchiveCommand::Find { terms, limit } => archive::find(&project, &terms, limit),
+            ArchiveCommand::Find { terms, limit } => search::run(
+                &project,
+                &search::Args {
+                    query: terms,
+                    limit,
+                    statuses: Vec::new(),
+                    records: true,
+                    json: false,
+                    scopes: vec!["notes".into()],
+                    explain: false,
+                    rebuild: false,
+                },
+            ),
             ArchiveCommand::Next { prefix, width } => archive::next(&project, &prefix, width),
         },
+        Command::Search {
+            query,
+            scopes,
+            limit,
+            status,
+            records,
+            json,
+            explain,
+            rebuild,
+        } => search::run(
+            &project,
+            &search::Args {
+                query,
+                limit,
+                statuses: status,
+                records,
+                json,
+                scopes,
+                explain,
+                rebuild,
+            },
+        ),
         Command::Retro {
             agent_findings: path,
             since,
