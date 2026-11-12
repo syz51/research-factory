@@ -208,20 +208,28 @@ pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM edges WHERE file_id = ?1", [file])?;
     let path: String =
         tx.query_row("SELECT path FROM files WHERE id = ?1", [file], |r| r.get(0))?;
-    let version: i64 = tx.query_row(
-        "SELECT coalesce(max(version), 0) + 1 FROM old_anchors WHERE path = ?1",
-        [&path],
+    keep_anchors(tx, &path, "main.units", file)
+}
+
+/// Stores the units of `file` in the table `units` (this index's, or those
+/// of the index a rebuild replaces) as the next version of `path`'s anchors.
+fn keep_anchors(conn: &Connection, path: &str, units: &str, file: i64) -> rusqlite::Result<()> {
+    let version: i64 = conn.query_row(
+        "SELECT coalesce(max(version), 0) + 1 FROM main.old_anchors WHERE path = ?1",
+        [path],
         |r| r.get(0),
     )?;
     // A range and text that an earlier version also had moves to this one.
-    tx.execute(
-        "INSERT INTO old_anchors (path, start_line, end_line, hash, version) \
-         SELECT ?2, start_line, end_line, hash, ?3 FROM units WHERE file_id = ?1 \
-         ON CONFLICT DO UPDATE SET version = excluded.version",
+    conn.execute(
+        &format!(
+            "INSERT INTO main.old_anchors (path, start_line, end_line, hash, version) \
+             SELECT ?2, start_line, end_line, hash, ?3 FROM {units} WHERE file_id = ?1 \
+             ON CONFLICT DO UPDATE SET version = excluded.version"
+        ),
         params![file, path, version],
     )?;
-    tx.execute(
-        "DELETE FROM old_anchors WHERE path = ?1 AND version <= ?2",
+    conn.execute(
+        "DELETE FROM main.old_anchors WHERE path = ?1 AND version <= ?2",
         params![path, version - OLD_VERSIONS],
     )?;
     Ok(())
@@ -230,12 +238,47 @@ pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
 /// Drops the anchors of each path that no source of any scope holds. It runs
 /// once a refresh has indexed every change, so that a path that moved from
 /// one scope to another keeps its anchors.
-pub fn drop_orphan_anchors(tx: &Transaction) -> rusqlite::Result<()> {
-    tx.execute(
-        "DELETE FROM old_anchors WHERE path NOT IN (SELECT path FROM files)",
+pub fn drop_orphan_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM main.old_anchors WHERE path NOT IN (SELECT path FROM main.files)",
         [],
     )?;
     Ok(())
+}
+
+/// The columns of `old_anchors` that [`carry_anchors`] can copy.
+const ANCHOR_COLUMNS: [&str; 5] = ["path", "start_line", "end_line", "hash", "version"];
+
+/// Carries the anchors of the index a rebuild replaces, attached as `old`,
+/// into the new one: the anchors it kept, then, as the next version, the
+/// units of each file whose text changed since. Returns false, and copies
+/// nothing, when the old `old_anchors` table has other columns.
+pub fn carry_anchors(conn: &Connection) -> rusqlite::Result<bool> {
+    let columns: Vec<String> = conn
+        .prepare("SELECT name FROM pragma_table_info('old_anchors', 'old') ORDER BY cid")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if columns != ANCHOR_COLUMNS {
+        return Ok(false);
+    }
+    conn.execute(
+        "INSERT INTO main.old_anchors (path, start_line, end_line, hash, version) \
+         SELECT path, start_line, end_line, hash, version FROM old.old_anchors",
+        [],
+    )?;
+    let changed: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT o.id, o.path FROM old.files o \
+             JOIN main.files n ON n.scope = o.scope AND n.path = o.path \
+             WHERE n.hash IS NOT o.hash ORDER BY o.id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (file, path) in changed {
+        keep_anchors(conn, &path, "old.units", file)?;
+    }
+    drop_orphan_anchors(conn)?;
+    Ok(true)
 }
 
 /// The citation edges between papers, read from the structure sidecars of

@@ -151,6 +151,71 @@ fn an_old_anchor_finds_its_text_after_the_lines_moved_and_says_so() {
     assert_eq!(unit["lines"][0], "## Table");
 }
 
+/// Moves DR001's table down by three lines.
+fn move_dr001_table(dir: &Path) {
+    let path = dir.join(DR001);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(
+        &path,
+        text.replace(
+            "Retrieval uses BM25.\n",
+            "Retrieval uses BM25.\n\nA note.\nAnother.\n",
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_old_anchor_finds_its_text_after_a_rebuild() {
+    let anchor = format!("{DR001}#L11-L42");
+    let moved = |unit: &Value| {
+        assert_eq!(unit["anchor"], format!("{DR001}#L14-L45"), "{unit}");
+        assert!(
+            unit["notice"]
+                .as_str()
+                .unwrap()
+                .contains("moved to L14-L45"),
+            "{unit}"
+        );
+        assert_eq!(unit["lines"][0], "## Table");
+    };
+    // The text moved before the last refresh: the rebuild copies the anchor.
+    let dir = fixture();
+    ok(dir.path(), &["open", &anchor]);
+    move_dr001_table(dir.path());
+    ok(dir.path(), &["search", "wombat"]);
+    ok(dir.path(), &["search", "--rebuild", "wombat"]);
+    moved(&json(dir.path(), &["open", &anchor]));
+    // The text moved after the last refresh: the rebuild keeps the units the
+    // replaced index had as the file's last version.
+    let dir = fixture();
+    ok(dir.path(), &["open", &anchor]);
+    move_dr001_table(dir.path());
+    ok(dir.path(), &["search", "--rebuild", "wombat"]);
+    moved(&json(dir.path(), &["open", &anchor]));
+    // A second rebuild still holds the anchor.
+    ok(dir.path(), &["search", "--rebuild", "wombat"]);
+    moved(&json(dir.path(), &["open", &anchor]));
+}
+
+#[test]
+fn a_rebuild_over_a_corrupt_index_starts_without_old_anchors_and_says_so() {
+    let dir = fixture();
+    let anchor = format!("{DR001}#L11-L42");
+    ok(dir.path(), &["open", &anchor]);
+    let db = dir.path().join(".research/lab/search/index.db");
+    std::fs::write(&db, "not a database").unwrap();
+    let out = lab(dir.path(), &["search", "--rebuild", "wombat"]);
+    assert!(out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("the anchors of the replaced index were not carried over"),
+        "{err}"
+    );
+    let unit = json(dir.path(), &["open", &anchor]);
+    assert_eq!(unit["anchor"], anchor, "{unit}");
+}
+
 #[test]
 fn an_old_anchor_finds_its_text_after_a_front_matter_edit_moved_it() {
     let dir = fixture();
