@@ -58,6 +58,21 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 - Optional fields are omitted when empty, and readers keep fields they do not know. `papers` adds `authors_truncated` (the source lists only the first authors), `author_variants` (an index's misspellings of the first author, accepted by `verify`) and `citekey`; its README describes them.
 - Unknown values are `null`, never invented.
 
+**Paper cards: `rf.paper-card/1`.** `papers card --key <key>` (papers 0.6.0) writes `<card_dir>/<key>.json`, only when `[papers] cards = true`. It is one JSON object with these fields:
+
+- `schema`, `key`, `class` (`generated`), `text {path, sha256}`, `model`, `created`, `prompt_sha256` and `checker`.
+- `usage {input_tokens, output_tokens, cost_usd}`. `cost_usd` is absent when the model reply gives none.
+- `written`, `dropped`, and `dropped_by {field, short, not_found, number}`.
+- `items [{field, value, quote, lines}]`. `field` is `task`, `dataset`, `method`, `metric`, `result` or `limit`.
+
+Each kept item meets these conditions:
+
+- Its `quote` occurs in the text within `lines`, after claimcheck's normalisation. `lines` are 1-based, inclusive and raw.
+- Its `quote` has at least 8 words. A CJK character counts as a word.
+- Every number in its `value` occurs in its `quote`.
+
+A card that keeps under 80% of its items is not stored. A card is stale when `text.path` no longer has `text.sha256`. `papers registry check` reports a stale card as `derivative-stale`, and `lab archive check` reports it as `stale-derivative`. A card is routing text, never a citable source. papers' default `card_dir` is `sources/cards` under the project root. The `refs` scope of `lab search` reads `[lab.search] cards`, by default `sources/cards/*.json` beside the registry. The two defaults agree when the registry is at the project root. The full definition is in [papers `docs/interfaces.md`](https://github.com/syz51/papers/blob/main/docs/interfaces.md#paper-cards-rfpaper-card1), section "Paper cards: `rf.paper-card/1`".
+
 ## 4. Provenance records: `rf.run/1` and `rf.manifest/1`
 
 `prov` owns these. Other tools may read them. Their schemas are in the `prov` README.
