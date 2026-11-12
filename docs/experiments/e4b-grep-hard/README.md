@@ -14,7 +14,10 @@ The rule was written down before any topic was scored or any session was run. [s
 2. **Terms.** The session prompt holds the topic's `need`. Its terms are the lowercase alphanumeric tokens of the `need`, of 3 or more characters, without the fixed stop list in the script.
 3. **Corpus.** The git-tracked Markdown files of the scratch copy, outside `private/` (2,363 files). The document frequency of a term is the number of corpus files that contain it as a whole word, case-insensitive.
 4. **Grep handle.** A topic's handle is the smallest document frequency among the need's terms that occur in at least one of its grade-2 records. A small handle means that a grep for one word of the question lists few files, and a grade-2 record is among them. A topic whose grade-2 records contain no need term has no handle.
-5. **Order and cut.** Topics without a handle come first, then topics by handle in descending order; ties keep test-set order. T09 comes first in any case: it failed in all four E4 conditions. The other E4 `cli` failure cannot be named, because E4's transcripts were not kept. The first 24 topics are the set. 24 leaves room above the minimum of 20, should a session fail to run.
+5. **E4's topics.** E4's `cli` sessions answered 22 of its 24 topics correctly, so those topics are at ceiling. T09 failed in all four E4 conditions and stays in the pool. The other 23 E4 topics leave it: the second E4 `cli` failure cannot be named, because E4's transcripts were not kept.
+6. **Order and cut.** T09 comes first. Then come topics without a handle, then topics by handle in descending order; ties keep test-set order. The first 24 topics are the set. 24 leaves room above the minimum of 20, should a session fail to run.
+
+Amendment, before any session ran: the first draft of this rule (commit fd6e57a) had no step 5. Its 24 topics held 11 E4 topics, at least 10 of them answered correctly by E4's `cli`. Step 5 removes them, because a set of known-ceiling topics cannot answer the question.
 
 This is a proxy for "the answer has no distinctive words": paraphrase questions, whose words differ from the record's, and cross-record questions, whose words are common across the archive. Whether the `cli` baseline is below ceiling on these topics is a result, reported below.
 
