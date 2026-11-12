@@ -17,11 +17,11 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavio
 use sha2::{Digest, Sha256};
 
 use super::Context;
-use super::units;
+use super::{graph, units};
 use crate::archive::front;
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
 /// BM25 column weights of `units_fts`, in column order: id and aliases, then
 /// title, then summary, heading path and file path, then body.
@@ -266,6 +266,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
         // The file is thrown away on failure, so it needs no journal.
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
         conn.execute_batch(SCHEMA)?;
+        conn.execute_batch(graph::SCHEMA)?;
         let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2), ('build', ?3)",
@@ -273,6 +274,9 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
         )?;
         for source in sources(ctx)? {
             index_file(ctx, &tx, &source, None)?;
+        }
+        if let Some(papers) = graph::papers_changed(ctx, &tx)? {
+            graph::write_papers(&tx, &papers)?;
         }
         sync_words(&tx)?;
         tx.commit()?;
@@ -332,14 +336,20 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault
             None => changed.push((source, None)),
         }
     }
+    let papers = graph::papers_changed(ctx, conn)?;
     // What is left in `stored` has no source any more.
-    if changed.is_empty() && stored.is_empty() {
+    if changed.is_empty() && stored.is_empty() && papers.is_none() {
         return Ok(None);
     }
     let pending = changed.len() + stored.len();
     let Some(_lock) = try_lock(ctx)? else {
+        let what = match (pending, papers.is_some()) {
+            (0, _) => "the changed paper citations are".to_string(),
+            (n, false) => format!("{n} changed file(s) are"),
+            (n, true) => format!("{n} changed file(s) and the changed paper citations are"),
+        };
         return Ok(Some(format!(
-            "another process is updating the index; {pending} changed file(s) are not in it yet"
+            "another process is updating the index; {what} not in it yet"
         )));
     };
     // A build may have renamed a new file over the one this connection
@@ -358,6 +368,9 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<Option<String>, Fault
     let started = Instant::now();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let mut left = pending;
+    if let Some(papers) = &papers {
+        graph::write_papers(&tx, papers)?;
+    }
     for (id, ..) in stored.values() {
         remove_file(&tx, *id)?;
         left -= 1;
@@ -397,8 +410,9 @@ fn remove_units(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// A unit never outlives its source.
+/// A unit never outlives its source, nor do the edges that start at it.
 fn remove_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
+    graph::forget_file(tx, file)?;
     remove_units(tx, file)?;
     tx.execute("DELETE FROM files WHERE id = ?1", [file])?;
     Ok(())
@@ -467,6 +481,7 @@ fn index_file(
         ],
     )?;
     let file_id = tx.last_insert_rowid();
+    graph::index_edges(ctx, tx, file_id, &source.path, &bytes)?;
     let ids = meta
         .id
         .iter()

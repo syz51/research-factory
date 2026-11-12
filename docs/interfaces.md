@@ -170,6 +170,7 @@ It checks every Markdown file that `lab archive check` scans (an index's records
 notes = ["docs/**/*.md"]             # the files of the `notes` scope
 notes_exclude = ["docs/drafts/**"]
 stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
+cites = ['\[(?P<key>\d+)\]']         # since 0.14.0: more citation forms, each with a group `key`
 refresh_budget_ms = 5000             # a query's refresh of changed files stops after this time; `lab archive done` indexes them all
 lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
 
@@ -183,7 +184,8 @@ historical = ["docs/old/**"]
 
 - Without `notes`, the scope is every `.md` file below the directories that the globs of `[lab.archive]` name (`index.include`, `sealed`, `links`, `current_pages`, `start`): `docs/history/[0-9]*.md` gives `docs/history/**/*.md`. A glob for files in the project root, and a path without a pattern, stay as they are.
 - A `generated` file is not indexed, and each `[[lab.archive.index]]` output is always generated. The other classes are indexed and labelled, and rank below `own`: `paper` keeps 0.8 of its score, `chat` 0.6, `copied` 0.5 and `historical` 0.25. A record with one of the `inactive_statuses` keeps 0.25, and a superseded record ranks below each successor that the same query found.
-- Of the stages, this version builds `lexical`. A query that `stages` asks another stage for ends as `partial` and names the stage.
+- Of the stages, this version builds `lexical` and, since 0.14.0, `graph`. A query that `stages` asks another stage for ends as `partial` and names the stage.
+- `cites` adds citation patterns (Rust regular expressions) to the two that are always read: `ref:<key>`, and a link to the `#reference-<key>` anchor of a file. Each pattern needs a group named `key`; a pattern without one, or one that does not compile, stops the query with an error.
 
 The unit of the index is one Markdown section: from a heading to the line before the next heading, cut at a blank line when it is longer than 120 lines. A file without text below a heading is one unit. A unit's anchor is `path#Lstart-Lend`: the path relative to the project root and 1-based line numbers of the file, both inclusive, the heading line included. Two anchors name the same text when their paths are equal and their line ranges overlap.
 
@@ -193,7 +195,7 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 
 ```json
 {"schema":"rf.search/1","state":"hits","query":["wombat"],"scopes":["notes"],
- "stages":{"dense":"missing","graph":"missing","lexical":"ready","rerank":"missing"},
+ "stages":{"dense":"missing","graph":"ready","lexical":"ready","rerank":"missing"},
  "partial":[],"unknown":[{"word":"retreiver","nearest":["retriever"]}],
  "hits":[{"rank":1,"anchor":"docs/history/01-2026-10-02-start.md#L5-L7",
    "path":"docs/history/01-2026-10-02-start.md","start":5,"end":7,
@@ -214,10 +216,58 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `hits[].hash` | The content hash of the unit's indexed text (32 hexadecimal characters of its SHA-256). |
 | `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
 | `hits[].missing` | The query words the unit lacks; absent when it has all. |
+| `hits[].also_in` | Since 0.14.0: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
 | `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (reciprocal rank fusion across phrasings) and `matched`. |
 | `more` | How many more units matched than `hits` shows. |
 
 BM25 weights the columns: the id and aliases 10, the title 5, the summary, the heading path and the file path 2, the body 1. Text that a search returns is data: no tool runs or follows it.
+
+### Search graph, `lab related`, `lab open` and `lab mcp`
+
+Since lab 0.14.0 (index schema 2; an index of schema 1 is built again on the first query), the index holds a table of edges. It is filled when a file is indexed and removed with the file. The edge types:
+
+| Edge | From | To | Read from |
+|---|---|---|---|
+| `supersedes`, `superseded_by`, `amends`, `amended_by` | a note | a record id | front matter: a string or a list of strings |
+| `task` | a note | a board task id | front matter: a string or a list of strings |
+| `links` | a note's line | a path below the project root | a Markdown link to a file of the project, without its fragment; links to other sites, to the same file and outside the project make no edge |
+| `cites` | a note's line | a reference key | `ref:<key>`, a link to `#reference-<key>`, and the `[lab.search] cites` patterns |
+| `cites` | a paper | a reference key | the reference list of the `rf.paper-structure/1` sidecar (`<text>.structure.json`) of each text in the registry that `[papers] registry` names; a sidecar whose text's sha256 changed gives no edge |
+
+Belonging is not stored: a unit belongs to its file, and a file belongs to the record whose `README.md` is in a directory above it.
+
+`lab search` uses the graph:
+
+- `--cites KEY` (`232` or `ref:232`) keeps only units that cite the key. `--links-to ID_OR_PATH` keeps only units that link the record or file. Without words, each lists every such unit, newest file first.
+- `--as-of DATE` leaves out records dated after the date and ranks a record by its state on that date: a record superseded later ranks as in force. `--since DATE` and `--until DATE` keep only records dated in the range, ends included.
+- A unit that links the record of a better hit is folded under that hit as an `also in` line (`also_in` in JSON). Two records of one id series (`DR040` and `DR041`) and two records in a supersession or amendment are not folded. `--all` turns folding off.
+
+`lab related NAME [--limit N] [--json]` lists the neighbours of a record id (`DR041`), a path or anchor, `ref:<key>` or `task:<id>`, at most `--limit` (default 20) for each relation. The relations: `superseded by`, `supersedes`, `amended by`, `amends`, `task`, `part of`, `parts`, `links to`, `linked from` and `cites`; for a reference key, `cited by` and the papers it `cites`; for a task, its `records`. Each neighbour has its anchor when the edge starts at a line. `--json` prints one `rf.related/1` object:
+
+```json
+{"schema":"rf.related/1","node":{"node":"DR002","id":"DR002","date":"2026-10-05","status":"accepted",
+  "title":"Use BM25","path":"docs/decisions/DR002-bm25.md","indexed":true},
+ "relations":[{"name":"supersedes","direction":"out","total":1,
+   "neighbours":[{"node":"DR001","id":"DR001","date":"2026-10-01","status":"superseded","title":"Use grep",
+     "path":"docs/decisions/DR001-grep.md","indexed":true}]},
+  {"name":"linked from","direction":"in","total":1,
+   "neighbours":[{"node":"docs/notes/n.md","title":"Note","path":"docs/notes/n.md",
+     "anchor":"docs/notes/n.md#L1-L3","indexed":true}]}]}
+```
+
+`direction` is `out` for an edge that starts at the node and `in` for one that ends at it; `anchor` is the unit that holds a link or citation (front-matter edges have none); `total` counts the neighbours before `--limit`; `indexed` is false for an id or path that names no indexed file. A name that names nothing exits 2.
+
+`lab open ANCHOR [--lines N] [--json]` prints one unit with at most `--lines` (default 80) lines of text, then the anchors of up to three neighbours of each relation of its file. ANCHOR is a hit's anchor (`path#Lstart-Lend`), `path:line` (the unit that holds the line), `path:a-b` (the unit with exactly that range, else the text found as below), a path, a record id, or a hit's content hash. When the file changed after the anchor was made and no unit has that line range, the anchor finds its old text by content hash: the output's notice says `the file changed; the text of La-Lb moved to Lx-Ly (same content hash)`, or that the text is gone and the unit now at those lines is shown. `--json` prints one `rf.open/1` object with `anchor`, `path`, `start`, `end`, `more_lines` (the lines past the budget), `heading`, the record's `id`, `title`, `date` and `status`, `notice`, `lines` and `neighbours`. A stale index prints `lab: partial: the index is stale` on stderr.
+
+`lab mcp` is a Model Context Protocol server on stdio: newline-delimited JSON-RPC 2.0, protocol versions `2025-06-18`, `2025-03-26` and `2024-11-05`, methods `initialize`, `ping`, `tools/list` and `tools/call`; notifications get no reply and other methods get error -32601. It reads the project from its working directory and writes logs to stderr. Its tools:
+
+| Tool | Arguments | Same as |
+|---|---|---|
+| `archive_search` | `query` (a string or an array of phrasings), `limit`, `records`, `status`, `cites`, `links_to`, `as_of`, `since`, `until`, `all` | `lab search` |
+| `archive_open` | `anchor` (required), `lines` | `lab open` |
+| `archive_related` | `name` (required), `limit` | `lab related` |
+
+Each description says when to use the tool. A result is text only: its first line is the state (`state: hits; missing stages: dense, rerank`, with `partial` notices after `;`), then for `archive_search` a line `mode: lexical (model: unloaded)`, then the text output of the command. The model state is `unloaded`, `loading`, `ready` or `failed`; this version loads no model and always searches in `lexical` mode. A failed call returns `isError: true` with `state: error` and the message. An agent connects it with an MCP entry such as `{"mcpServers":{"lab":{"type":"stdio","command":"lab","args":["mcp"]}}}` in the project's `.mcp.json`.
 ### Archive model 2
 
 Since lab 0.12.0, whose older versions reject these keys. `[lab.archive] model = 2` turns on the rules and commands below. With `model = 1`, the default, every key of this section is refused, and the archive behaves as lab 0.9.11 does: old sealed files, the seal manifest and its check stay as they are. In model 2 git holds the sequence of work and the board holds the open work, so the archive keeps only records: no month log is appended, and no index file needs to be written.

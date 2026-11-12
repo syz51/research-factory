@@ -5,7 +5,10 @@
 //!
 //! Retrieved text is data: nothing here runs or follows what a note says.
 
+mod graph;
 mod index;
+mod mcp;
+mod open;
 mod query;
 mod units;
 
@@ -45,6 +48,9 @@ pub struct SearchConfig {
     pub refresh_budget_ms: u64,
     /// How long a query waits for another process that builds the index.
     pub lock_timeout_ms: u64,
+    /// Regular expressions of a citation, each with a group named `key`
+    /// (default: `ref:<key>` and a link to `#reference-<key>`).
+    pub cites: Vec<String>,
 }
 
 impl Default for SearchConfig {
@@ -56,6 +62,7 @@ impl Default for SearchConfig {
             stages: vec![Stage::Lexical],
             refresh_budget_ms: 5_000,
             lock_timeout_ms: 30_000,
+            cites: Vec::new(),
         }
     }
 }
@@ -144,11 +151,12 @@ impl Stage {
         }
     }
 
-    /// `ready`, `missing` or `failed`.
+    /// `ready`, `missing` or `failed`. An index of this version always holds
+    /// the edge table of `graph`; an older one is rebuilt before a query.
     fn state(self) -> &'static str {
         match self {
-            Self::Lexical => "ready",
-            Self::Dense | Self::Rerank | Self::Graph => "missing",
+            Self::Lexical | Self::Graph => "ready",
+            Self::Dense | Self::Rerank => "missing",
         }
     }
 }
@@ -162,6 +170,8 @@ pub struct Context<'p> {
     notes: FileSet,
     classes: Vec<(Class, FileSet)>,
     inactive_statuses: &'p [String],
+    /// The citation patterns of `[lab.search] cites`.
+    cites: Vec<regex::Regex>,
     /// Where this checkout keeps its index. A linked worktree has its own.
     dir: PathBuf,
     /// Of the configuration the index depends on; a change rebuilds it.
@@ -230,8 +240,8 @@ impl<'p> Context<'p> {
             (Class::Historical, &cfg.classes.historical),
         ];
         let fingerprint = Sha256::digest(format!(
-            "{archive:?}\n{notes:?}\n{:?}\n{:?}",
-            cfg.notes_exclude, cfg.classes
+            "{archive:?}\n{notes:?}\n{:?}\n{:?}\n{:?}",
+            cfg.notes_exclude, cfg.classes, cfg.cites
         ));
         Ok(Self {
             project,
@@ -243,6 +253,7 @@ impl<'p> Context<'p> {
                 .map(|(class, globs)| Ok((class, set(class.as_str(), globs, &[])?)))
                 .collect::<Result<_, String>>()?,
             inactive_statuses: &archive.inactive_statuses,
+            cites: graph::cite_patterns(&cfg.cites)?,
             dir: project.state_dir.join("lab").join("search"),
             fingerprint: fingerprint.iter().map(|b| format!("{b:02x}")).collect(),
             budgeted: true,
@@ -257,6 +268,41 @@ impl<'p> Context<'p> {
     }
 }
 
+/// The graph and date filters of `lab search`.
+#[derive(Debug, Default, Clone, clap::Args)]
+pub struct GraphArgs {
+    /// Only units that cite this reference key (`232` or `ref:232`); without words, list them all.
+    #[arg(long, value_name = "KEY")]
+    pub cites: Option<String>,
+    /// Only units that link this record id or path; without words, list them all.
+    #[arg(long, value_name = "ID_OR_PATH")]
+    pub links_to: Option<String>,
+    /// Rank by the records in force on this date (YYYY-MM-DD); later records are left out.
+    #[arg(long, value_name = "DATE")]
+    pub as_of: Option<String>,
+    /// Only records dated on or after this date (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE")]
+    pub since: Option<String>,
+    /// Only records dated on or before this date (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE")]
+    pub until: Option<String>,
+    /// Show each unit that links a record as a hit of its own, not as an "also in" line.
+    #[arg(long)]
+    pub all: bool,
+}
+
+impl GraphArgs {
+    fn filters(&self) -> graph::Filters {
+        graph::Filters {
+            as_of: self.as_of.clone(),
+            since: self.since.clone(),
+            until: self.until.clone(),
+            cites: self.cites.clone(),
+            links_to: self.links_to.clone(),
+        }
+    }
+}
+
 /// The arguments of `lab search`.
 pub struct Args {
     pub query: Vec<String>,
@@ -267,6 +313,7 @@ pub struct Args {
     pub scopes: Vec<String>,
     pub explain: bool,
     pub rebuild: bool,
+    pub graph: GraphArgs,
 }
 
 /// How a query ended (docs/state-machines.md 3.3). `error` is the `Err` of `run`.
@@ -296,41 +343,141 @@ struct Report<'a> {
     more: usize,
 }
 
+/// The answer to one query, before it is printed.
+pub struct Answer {
+    pub phrasings: Vec<String>,
+    state: State,
+    partial: Vec<String>,
+    unknown: Vec<Unknown>,
+    hits: Vec<Hit>,
+    more: usize,
+    limit: usize,
+}
+
+impl Answer {
+    /// The `rf.search/1` object.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::to_value(Report {
+            schema: "rf.search/1",
+            state: self.state,
+            error: None,
+            query: &self.phrasings,
+            scopes: SCOPES,
+            stages: stages(),
+            partial: &self.partial,
+            unknown: &self.unknown,
+            hits: &self.hits,
+            more: self.more,
+        })
+        .unwrap_or_default()
+    }
+
+    /// The text output.
+    pub fn text(&self) -> String {
+        render(&self.hits, self.more, &self.unknown, self.limit)
+    }
+
+    /// One line: how the query ended and the stages it ran without.
+    pub fn state_line(&self) -> String {
+        let state = match self.state {
+            State::Hits => "hits",
+            State::Partial => "partial",
+            State::Zero => "zero",
+            State::Error => "error",
+        };
+        let missing: Vec<&str> = Stage::ALL
+            .into_iter()
+            .filter(|s| s.state() != "ready")
+            .map(|s| s.name())
+            .collect();
+        let mut line = format!("state: {state}");
+        if !missing.is_empty() {
+            let _ = write!(line, "; missing stages: {}", missing.join(", "));
+        }
+        for notice in &self.partial {
+            let _ = write!(line, "; {notice}");
+        }
+        line
+    }
+}
+
+/// The `rf.search/1` object of a query that failed.
+pub fn error_json(phrasings: &[String], error: &str) -> serde_json::Value {
+    serde_json::to_value(Report {
+        schema: "rf.search/1",
+        state: State::Error,
+        error: Some(error),
+        query: phrasings,
+        scopes: SCOPES,
+        stages: stages(),
+        partial: &[],
+        unknown: &[],
+        hits: &[],
+        more: 0,
+    })
+    .unwrap_or_default()
+}
+
+/// Several arguments are several phrasings when one of them holds a space;
+/// otherwise they are the words of one.
+pub fn phrasings(query: &[String]) -> Vec<String> {
+    if query.len() > 1 && query.iter().any(|q| q.contains(char::is_whitespace)) {
+        query.to_vec()
+    } else if query.is_empty() {
+        Vec::new()
+    } else {
+        vec![query.join(" ")]
+    }
+}
+
+/// `lab related`.
+pub fn related(
+    project: &Project,
+    name: &str,
+    limit: usize,
+    json: bool,
+) -> Result<ExitCode, String> {
+    graph::run(project, name, limit, json)
+}
+
+/// Lines of text `lab open` prints by default.
+pub const OPEN_LINES: usize = open::DEFAULT_LINES;
+
+/// `lab open`.
+pub fn open(project: &Project, anchor: &str, lines: usize, json: bool) -> Result<ExitCode, String> {
+    open::run(project, anchor, lines, json)
+}
+
+/// `lab mcp`.
+pub fn mcp(project: &Project) -> Result<ExitCode, String> {
+    mcp::run(project)
+}
+
 /// `lab search`. Exit 0 for hits, a partial answer or no hit; `Err` (exit 2)
 /// for a bad query, an unreadable index or a lock timeout.
 pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
-    // Several arguments are several phrasings when one of them holds a
-    // space; otherwise they are the words of one.
-    let phrasings: Vec<String> =
-        if args.query.len() > 1 && args.query.iter().any(|q| q.contains(char::is_whitespace)) {
-            args.query.clone()
-        } else if args.query.is_empty() {
-            Vec::new()
-        } else {
-            vec![args.query.join(" ")]
-        };
-    let answered = answer(project, args, &phrasings);
-    if args.json
-        && let Err(e) = &answered
-    {
-        let report = Report {
-            schema: "rf.search/1",
-            state: State::Error,
-            error: Some(e),
-            query: &phrasings,
-            scopes: SCOPES,
-            stages: stages(),
-            partial: &[],
-            unknown: &[],
-            hits: &[],
-            more: 0,
-        };
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(|e| e.to_string())?
-        );
+    let phrasings = phrasings(&args.query);
+    match answer(project, args, &phrasings) {
+        Err(e) => {
+            if args.json {
+                println!("{}", error_json(&phrasings, &e));
+            }
+            Err(e)
+        }
+        // Only a rebuild was asked for.
+        Ok(None) => Ok(ExitCode::SUCCESS),
+        Ok(Some(answer)) => {
+            for notice in &answer.partial {
+                eprintln!("lab: partial: {notice}");
+            }
+            if args.json {
+                println!("{}", answer.json());
+            } else {
+                print!("{}", answer.text());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
-    answered
 }
 
 /// Builds the search index, or brings it up to date with the files, without
@@ -356,7 +503,13 @@ fn stages() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
-fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCode, String> {
+/// Runs a query. `None` when the arguments ask only for a rebuild, which is
+/// reported here.
+pub fn answer(
+    project: &Project,
+    args: &Args,
+    phrasings: &[String],
+) -> Result<Option<Answer>, String> {
     if let Some(unknown) = args.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
         return Err(format!(
             "unknown scope `{unknown}`; the scopes are: {}",
@@ -378,28 +531,33 @@ fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCo
             archive_statuses.join(", ")
         ));
     }
-    if phrasings.is_empty() {
+    let filters = args.graph.filters();
+    if phrasings.is_empty() && !filters.lists() {
         if !args.rebuild {
-            return Err("give the words to search for, or --rebuild".into());
+            return Err("give the words to search for, --cites, --links-to or --rebuild".into());
         }
         let opened = index::open(&ctx, true)?;
         let (files, units) = index::counts(&opened.conn).map_err(String::from)?;
         println!("Search index rebuilt: {units} unit(s) of {files} file(s).");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(None);
     }
     let parsed: Vec<query::Phrasing> = phrasings
         .iter()
         .map(|p| query::parse(p))
         .collect::<Result<_, _>>()?;
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
-    let opts = query::Options {
-        limit,
-        records: args.records,
-        statuses: &args.statuses,
-    };
     let mut rebuild = args.rebuild;
     let (outcome, stale) = loop {
         let opened = index::open(&ctx, rebuild)?;
+        let filter = filters.units_sql(&opened.conn)?;
+        let opts = query::Options {
+            limit,
+            records: args.records,
+            statuses: &args.statuses,
+            filter: filter.as_deref(),
+            as_of: filters.as_of.as_deref(),
+            fold: !args.graph.all,
+        };
         match query::search(&opened.conn, &ctx, &parsed, &opts) {
             Ok(outcome) => break (outcome, opened.stale),
             // Corruption that only a query met: build anew, once.
@@ -435,30 +593,15 @@ fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCo
     } else {
         State::Partial
     };
-    for notice in &partial {
-        eprintln!("lab: partial: {notice}");
-    }
-    if args.json {
-        let report = Report {
-            schema: "rf.search/1",
-            state,
-            error: None,
-            query: phrasings,
-            scopes: SCOPES,
-            stages: stages(),
-            partial: &partial,
-            unknown: &unknown,
-            hits: &hits,
-            more,
-        };
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(|e| e.to_string())?
-        );
-    } else {
-        print!("{}", render(&hits, more, &unknown, limit));
-    }
-    Ok(ExitCode::SUCCESS)
+    Ok(Some(Answer {
+        phrasings: phrasings.to_vec(),
+        state,
+        partial,
+        unknown,
+        hits,
+        more,
+        limit,
+    }))
 }
 
 fn unknown_line(unknown: &[Unknown]) -> String {
@@ -504,6 +647,9 @@ fn render(hits: &[Hit], more: usize, unknown: &[Unknown], limit: usize) -> Strin
             if !r.superseded_by.is_empty() {
                 parts.push(format!("superseded by {}", r.superseded_by.join(", ")));
             }
+            if hit.linked_by > 0 {
+                parts.push(format!("linked by {}", hit.linked_by));
+            }
             parts.extend(r.title.clone());
             let _ = writeln!(text, "{}. {}", hit.rank, parts.join(" · "));
         }
@@ -512,6 +658,17 @@ fn render(hits: &[Hit], more: usize, unknown: &[Unknown], limit: usize) -> Strin
             let _ = write!(text, " · {}", hit.heading);
         }
         let _ = writeln!(text, "\n   {}", hit.snippet);
+        if !hit.also_in.is_empty() {
+            let places: Vec<String> = hit
+                .also_in
+                .iter()
+                .map(|a| match a.id.as_ref().or(a.title.as_ref()) {
+                    Some(name) => format!("{name} {}", a.anchor),
+                    None => a.anchor.clone(),
+                })
+                .collect();
+            let _ = writeln!(text, "   also in: {}", places.join("; "));
+        }
         if !hit.missing.is_empty() {
             let _ = writeln!(text, "   missing: {}", hit.missing.join(", "));
         }

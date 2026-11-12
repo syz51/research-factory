@@ -144,7 +144,43 @@ enum Command {
         /// Build the index anew before the query; alone, only build it.
         #[arg(long)]
         rebuild: bool,
+        #[command(flatten)]
+        graph: search::GraphArgs,
     },
+    /// List the neighbours of a record, file, anchor, reference key (`ref:232`) or board task in the search graph.
+    ///
+    /// The relations: superseded by, supersedes, amended by, amends, task,
+    /// part of, parts, links to, linked from and cites; for a reference key,
+    /// cited by and the papers it cites; for a task, its records.
+    Related {
+        /// A record id (`DR041`), a path or anchor (`docs/a.md#L3-L9`), `ref:<key>` or `task:<id>`.
+        name: String,
+        /// At most this many neighbours of each relation.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Print one JSON object (schema rf.related/1).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print one unit of the search index within a line budget, with its neighbours' anchors.
+    ///
+    /// When the file changed since the anchor was made, the anchor finds its
+    /// text again by content hash and the output says so.
+    Open {
+        /// A hit's anchor (`docs/a.md#L3-L9`), `path:line`, a path, a record id or a hit's content hash.
+        anchor: String,
+        /// Print at most this many lines of text.
+        #[arg(long, default_value_t = search::OPEN_LINES)]
+        lines: usize,
+        /// Print one JSON object (schema rf.open/1).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve the archive search to an agent as an MCP server on stdio.
+    ///
+    /// Tools: archive_search, archive_open and archive_related, which run the
+    /// same code as `lab search`, `lab open` and `lab related`.
+    Mcp,
 }
 
 #[derive(Subcommand)]
@@ -364,6 +400,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                             .filter(files)
                             .map(|i| i.output.clone())
                             .collect(),
+                        mcp: brief::lab_mcp_configured(&project.root),
                     };
                     Some(if a.model >= 2 {
                         let printed: Vec<String> = a
@@ -446,6 +483,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     scopes: vec!["notes".into()],
                     explain: false,
                     rebuild: false,
+                    graph: search::GraphArgs::default(),
                 },
             ),
             ArchiveCommand::Next {
@@ -471,6 +509,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             json,
             explain,
             rebuild,
+            graph,
         } => search::run(
             &project,
             &search::Args {
@@ -482,8 +521,16 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 scopes,
                 explain,
                 rebuild,
+                graph,
             },
         ),
+        Command::Related { name, limit, json } => search::related(&project, &name, limit, json),
+        Command::Open {
+            anchor,
+            lines,
+            json,
+        } => search::open(&project, &anchor, lines, json),
+        Command::Mcp => search::mcp(&project),
         Command::Retro {
             agent_findings: path,
             since,

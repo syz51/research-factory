@@ -225,6 +225,7 @@ search use measures `grep_share` or `greps`. `agentprof` does not compute the ot
 | Duplicated facts | record is canonical; others fold under it | indexing each copy equally | a flag that shows all |
 | Sessions and board | experiment first | index now (unreviewed text may outrank records) | — |
 | Prototype language | Python under `uv` for experiments; Rust for what wins | Rust first (slow to try models) | — |
+| Agent delivery (E4, 2026-11-12) | `lab mcp` tools by default; `lab search` where they are not configured | grep hint and archivist subagent as defaults (no gain; the hint speaks after grep has answered); the command line alone (agents searched in 1 of 24 sessions, against 20 with MCP) | removing `lab mcp` from `.mcp.json`; see [experiments/e4-delivery](experiments/e4-delivery/README.md) |
 
 ## 5. Experiments
 
