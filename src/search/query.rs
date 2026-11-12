@@ -612,13 +612,14 @@ fn prefix_distances(a: &[char], b: &[char]) -> Vec<usize> {
 }
 
 /// A word stem lacks at most this many of its word's last characters.
-const STEM_CUT: usize = 5;
+const STEM_CUT: usize = 3;
 
 /// How far the indexed `stem` is from `word`: the edit distance to the word
 /// or to the word without an ending, whichever is less.
 fn stem_distance(stem: &[char], word: &[char]) -> usize {
     let row = prefix_distances(stem, word);
-    let shortest = word.len().saturating_sub(STEM_CUT).max(4).min(word.len());
+    // A short word has a short ending: at most a quarter of it.
+    let shortest = word.len() - STEM_CUT.min(word.len() / 4);
     row[shortest..].iter().copied().min().unwrap_or(usize::MAX)
 }
 
@@ -636,7 +637,7 @@ fn nearest(conn: &Connection, word: &str) -> Result<Vec<String>, Fault> {
     while let Some(row) = rows.next()? {
         let term = row.get_ref(0)?.as_str().map_err(rusqlite::Error::from)?;
         let distance = if term.starts_with(word) {
-            1
+            0
         } else if term.len().abs_diff(word.len()) <= reach * 4 {
             stem_distance(&term.chars().collect::<Vec<_>>(), &chars)
         } else {
@@ -721,8 +722,9 @@ mod tests {
         // `retriev` is the stem of `retriever`.
         assert_eq!(d("retriev", "retriever"), 0);
         assert_eq!(d("retriev", "retreiver"), 2);
-        // A short word keeps all of its characters.
-        assert_eq!(d("ca", "cart"), 2);
+        // A short word loses at most one character.
+        assert_eq!(d("call", "calend"), 2);
+        assert_eq!(d("ca", "car"), 1);
     }
 
     #[test]
