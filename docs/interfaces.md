@@ -182,7 +182,7 @@ It checks every Markdown file that `lab archive check` scans (an index's records
 
 ```toml
 [lab.search]
-notes = ["docs/**/*.md"]             # the files of the `notes` scope
+notes = ["docs/**/*.md"]             # the files of the `notes` scope; since 0.19.2 without the texts the registry lists, which are units of `texts` only
 notes_exclude = ["docs/drafts/**"]
 stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
 cites = ['\[(?P<key>\d+)\]']         # since 0.15.0: more citation forms, each with a group `key`

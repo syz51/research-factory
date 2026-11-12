@@ -188,23 +188,25 @@ impl<'a> Resolver<'a> {
 /// The sources of `scope`.
 pub fn list(ctx: &Context, scope: Scope, resolver: &mut Resolver) -> Result<Listing, String> {
     match scope {
-        Scope::Notes => notes(ctx).map(Listing::complete),
+        Scope::Notes => notes(ctx, resolver).map(Listing::complete),
         Scope::Refs => refs::list_refs(ctx, resolver),
         Scope::Texts => refs::list_texts(ctx, resolver),
-        Scope::Files => files(ctx).map(Listing::complete),
+        Scope::Files => files(ctx, resolver).map(Listing::complete),
         Scope::Sessions => chat::list_sessions(ctx, resolver),
         Scope::Board => Ok(chat::list_board(ctx)),
     }
 }
 
-/// The files of the `notes` scope, without generated ones.
-fn notes(ctx: &Context) -> Result<Vec<Doc>, String> {
+/// The files of the `notes` scope, without generated ones and without the
+/// paper texts that the registry lists, which are units of `texts`.
+fn notes(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
     let found = crate::archive::files::walk(&ctx.project.root, &[&ctx.notes])?
         .pop()
         .unwrap_or_default();
+    let texts = refs::text_paths(ctx, resolver)?;
     Ok(found
         .into_iter()
-        .filter(|p| ctx.class_of(p) != Class::Generated)
+        .filter(|p| ctx.class_of(p) != Class::Generated && !texts.contains(p))
         .filter_map(|path| {
             let stamp = file_stamp(&ctx.project.root.join(&path))?;
             Some(Doc {
@@ -219,7 +221,7 @@ fn notes(ctx: &Context) -> Result<Vec<Doc>, String> {
 
 /// The files of the `files` scope: the configured globs, or else the files
 /// git tracks that are not Markdown.
-fn files(ctx: &Context) -> Result<Vec<Doc>, String> {
+fn files(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
     let root = &ctx.project.root;
     let paths: Vec<String> = match &ctx.files {
         Some(set) => crate::archive::files::walk(root, &[set])?
@@ -246,7 +248,7 @@ fn files(ctx: &Context) -> Result<Vec<Doc>, String> {
     // A file's unit names the record whose note lies in one of its
     // directories, so the stamps of those notes are part of its stamp.
     let mut notes_in: HashMap<String, Vec<String>> = HashMap::new();
-    for note in notes(ctx)? {
+    for note in notes(ctx, resolver)? {
         let dir = note
             .key
             .rsplit_once('/')
