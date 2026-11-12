@@ -279,7 +279,7 @@ Accepted: depth describes how far a person or an agent read, and a re-read at a 
 | Rerun output | snapshot taken, compared | explicit |
 | Import pairing | paired, unpaired | **(implicit)** |
 
-No defect was found that affects the redesign. The run record placeholder is accepted: `prov` reports it.
+No defect was found that affects the redesign. Both implicit states are proposed in research-factory-231: a `state` field on the run record, and a named finding for an unpaired import.
 
 ### 4.6 Citation
 
@@ -309,7 +309,7 @@ Explicit, with a file lock. Defect: a corrupt `last.json` is ignored, so "too re
 |---|---|---|
 | Signal kind | fixed list | None |
 | Send state | pending, sent, resolved | Resolve clears `pending` before a send succeeds. Proposed in 217. |
-| Board task for a signal **(implicit)** | none, filed, repeated | `board-notify.sh` files or adds to a task. The state is on the board, not in lab. Accepted: the board is the owner of work state (rule 1). |
+| Board task for a signal **(implicit)** | none, filed, repeated | `board-notify.sh` files or adds to a task. The state is on the board, not in lab: the board owns work state (rule 1). Proposed in a note on research-factory-217: lab stores the filed task id with the signal's send state. |
 
 ### 5.4 Evaluation
 
@@ -321,7 +321,7 @@ Explicit, with a file lock. Defect: a corrupt `last.json` is ignored, so "too re
 |---|---|---|
 | Check run status | ok, findings, failed | Exit 0 with Error findings is recorded as `ok`. `--new-only` is ignored with `--at`. Proposed in 217. |
 | Baseline | none, recorded | explicit |
-| Finding severity | Error, Warn | A Warn never fails a gate. Accepted as the meaning of Warn; each rule this document depends on is an Error. |
+| Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn never fails a gate. Accepted as the meaning of Warn; each rule this document depends on is an Error. |
 
 ### 5.6 Replay and worktree
 
@@ -338,8 +338,10 @@ Fixed by research-factory-205 together with section 3.4 (stored rejections).
 
 ### 5.8 Rule lifecycle **(implicit)**
 
-A check rule is `proposed ─► Warn ─► Error ─► retired`. Nothing records when a rule moved.
-The redesign records each new rule's severity in the changelog entry of its lab version. Accepted beyond that: the rule count is small.
+A check rule is `proposed ─► Warn ─► Error ─► retired`.
+Fixed by research-factory-232: `src/rules.rs` holds every rule with its default severity, and docs/interfaces.md "Rule table" adds the config that enables it and the lab version that added it.
+A test keeps the two tables equal. Debug builds stop on a finding whose rule is not in the table or whose severity differs from it.
+A rule that moves from Warn to Error, or is retired, changes both tables in one change, so git history records each move.
 
 ### 5.9 Session
 
@@ -361,7 +363,7 @@ Sessions as a search scope (transcripts) are indexed from agentprof's session li
 | Lease | held, expired, released | advisory | Accepted: leases are hints |
 | Agent session | joined, working, idle, ended | none | No transition guard |
 | Handoff | version n → n+1 | server | None |
-| Feedback | reported; routed; resolved | two fields | **(implicit)** state from two fields |
+| Feedback | reported; routed; resolved | two fields | **(implicit)** state from two fields. Proposed in a note on agent-board-454: one status with a move table. |
 | Board | active, closed; temporary | server | None |
 | Retention | kept, pruned | server | None |
 
@@ -431,12 +433,12 @@ Covered in section 4.1 (stale derivative). The joint is between `papers` (writer
 | 13 | Paper lifecycle | 4.1 | Built by 188, 198, 213, 191 |
 | 14 | Stale derivative | 4.1 | Built by 198, 213, 191 |
 | 15 | Seen index | 4.3 | Fixed by 188 |
-| 16 | Run record placeholder, import pairing | 4.5 | Accepted |
-| 17 | Board task for a signal | 5.3 | Accepted |
+| 16 | Run record placeholder, import pairing | 4.5 | Proposed in 231 |
+| 17 | Board task for a signal | 5.3 | Proposed in 217 (note) |
 | 18 | Retro candidate dismissal | 5.7 | Fixed by 205 |
-| 19 | Rule lifecycle | 5.8 | Accepted, with changelog entries |
+| 19 | Rule lifecycle | 5.8 | Fixed by 232 |
 | 20 | Session order | 5.9 | Fixed by 207, 208 |
-| 21 | Feedback state | 6 | Accepted |
+| 21 | Feedback state | 6 | Proposed in agent-board-454 (note) |
 | 22 | Record and task link | 7.1 | Fixed by 189, 207, 208 |
 | 23 | Board note to record | 7.2 | Built by 187 (board scope) |
 | 24 | Experiment to build | 7.3 | Held by the umbrella task |
