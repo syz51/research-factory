@@ -525,50 +525,6 @@ fn sessions_index_what_the_person_typed() {
 }
 
 #[test]
-fn the_board_is_searched_through_its_export_and_an_unreachable_one_is_partial() {
-    let dir = fixture();
-    let d = dir.path();
-    let with = |export: &str| {
-        CONFIG.replace(
-            "[lab.archive]\n",
-            &format!("[lab.archive]\nmodel = 2\nboard_export = {export}\n"),
-        )
-    };
-    write(
-        d,
-        "board.json",
-        &serde_json::json!({"tasks": [{"id": "rf-9", "title": "Measure the bandicoot set",
-            "body": "Run it twice.", "notes": [{"kind": "decision", "text": "Use the bilby split",
-            "at": "2026-10-02"}]}, {"id": "rf-9", "title": "Measure the bandicoot set"}]})
-        .to_string(),
-    );
-    write(d, "research.toml", &with(r#"["cat", "board.json"]"#));
-    let report = json(d, &["--in", "board", "bandicoot"]);
-    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
-    assert_eq!(hits(&report)[0]["record"]["class"], "chat");
-    let note = json(d, &["--in", "board", "bilby"]);
-    assert_eq!(hits(&note)[0]["anchor"], "board:rf-9#note-1");
-
-    // An export that fails: the query is partial and names the scope.
-    write(d, "research.toml", &with(r#"["sh", "-c", "exit 3"]"#));
-    let o = lab(d, &["search", "--json", "--in", "notes,board", "papers"]);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let report: Value = serde_json::from_str(&stdout(&o)).unwrap();
-    assert_eq!(report["state"], "partial");
-    assert!(
-        report["partial"].to_string().contains("scope `board`"),
-        "{report}"
-    );
-    // No board command at all is partial as well, not an error.
-    write(d, "research.toml", CONFIG);
-    let report = json(d, &["--in", "board", "bandicoot"]);
-    assert!(
-        report["partial"].to_string().contains("scope `board`"),
-        "{report}"
-    );
-}
-
-#[test]
 fn cards_without_a_registry_are_searched_and_their_faults_reported() {
     let dir = fixture();
     let d = dir.path();
@@ -604,39 +560,6 @@ fn cards_without_a_registry_are_searched_and_their_faults_reported() {
         report["partial"].to_string().contains("stale derivative"),
         "{report}"
     );
-}
-
-#[test]
-fn a_first_query_runs_the_board_export_once() {
-    let dir = fixture();
-    let d = dir.path();
-    write(
-        d,
-        "board.json",
-        &serde_json::json!({"tasks": [{"id": "rf-9", "title": "Measure the bandicoot set"}]})
-            .to_string(),
-    );
-    write(
-        d,
-        "research.toml",
-        &CONFIG.replace(
-            "[lab.archive]\n",
-            "[lab.archive]\nmodel = 2\nboard_export = [\"sh\", \"-c\", \"echo run >> runs.log; cat board.json\"]\n",
-        ),
-    );
-    let runs = || {
-        std::fs::read_to_string(d.join("runs.log"))
-            .unwrap()
-            .lines()
-            .count()
-    };
-    let report = json(d, &["--in", "board", "bandicoot"]);
-    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
-    assert_eq!(runs(), 1, "the build lists the board once");
-    json(d, &["--in", "board", "--rebuild", "bandicoot"]);
-    assert_eq!(runs(), 2, "a rebuild lists it once more");
-    json(d, &["--in", "board", "bandicoot"]);
-    assert_eq!(runs(), 3, "a later query refreshes it once");
 }
 
 #[test]
@@ -692,4 +615,258 @@ fn a_linked_worktree_reads_ignored_texts_from_the_main_checkout() {
     assert_eq!(hit["key"], "16");
     assert_eq!(hit["path"], "sources/texts/16.txt");
     assert_eq!(hit["info"]["structure"], "used");
+}
+
+/// The config with `board_export` in `[lab.archive]` and, when given, in
+/// `[lab.search]`.
+fn board_config(archive: &str, search: Option<&str>) -> String {
+    let config = CONFIG.replace(
+        "[lab.archive]\n",
+        &format!("[lab.archive]\nmodel = 2\nboard_export = {archive}\n"),
+    );
+    match search {
+        Some(export) => format!("{config}\n[lab.search]\nboard_export = {export}\n"),
+        None => config,
+    }
+}
+
+fn board_tasks(d: &Path, title: &str) {
+    write(
+        d,
+        "board.json",
+        &serde_json::json!({"tasks": [{"id": "rf-9", "title": title,
+            "body": "Run it twice.", "notes": [{"kind": "decision", "text": "Use the bilby split",
+            "at": "2026-10-02"}]}, {"id": "rf-9", "title": title}]})
+        .to_string(),
+    );
+}
+
+/// Waits until no board refresh holds the lock; false after 30 seconds.
+fn refresh_ended(d: &Path) -> bool {
+    let path = d.join(".research/lab/search/board.lock");
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(30) {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path);
+        if file.is_ok_and(|f| f.try_lock().is_ok()) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// Makes the cached board export 20 minutes old.
+fn age_cache(d: &Path) {
+    std::fs::File::options()
+        .write(true)
+        .open(d.join(".research/lab/search/board.json"))
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 60))
+        .unwrap();
+}
+
+fn runs(d: &Path) -> usize {
+    std::fs::read_to_string(d.join("runs.log"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// On drop, lets a slow fake export finish and waits for its refresh, so no
+/// detached refresh outlives the test, also when it fails.
+struct Release<'a>(&'a Path);
+
+impl Drop for Release<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::write(self.0.join("go"), "");
+        refresh_ended(self.0);
+    }
+}
+
+#[test]
+fn the_board_is_searched_through_its_cached_export_and_without_one_is_partial() {
+    let dir = fixture();
+    let d = dir.path();
+    let _release = Release(d);
+    board_tasks(d, "Measure the bandicoot set");
+    write(
+        d,
+        "research.toml",
+        &board_config(r#"["cat", "board.json"]"#, None),
+    );
+
+    // No cache: the scope is partial, and a refresh starts.
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert!(hits(&report).is_empty(), "{report}");
+    let notice = report["partial"].to_string();
+    assert!(
+        notice.contains("no board export is cached yet; a refresh started"),
+        "{report}"
+    );
+    assert!(refresh_ended(d));
+    assert!(d.join(".research/lab/search/board.json").exists());
+
+    // The refresh's cache answers the next query in full.
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(report["state"], "hits", "{report}");
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+    assert_eq!(hits(&report)[0]["record"]["class"], "chat");
+    let note = json(d, &["--in", "board", "bilby"]);
+    assert_eq!(hits(&note)[0]["anchor"], "board:rf-9#note-1");
+
+    let out = search(d, &["--refresh-board"]);
+    assert!(
+        out.starts_with("Board export cached: 2 task(s) in "),
+        "{out}"
+    );
+
+    // No board command at all is partial as well, not an error.
+    write(d, "research.toml", CONFIG);
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert!(
+        report["partial"]
+            .to_string()
+            .contains("no board export command"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_stale_cache_answers_at_once_and_starts_one_refresh() {
+    let dir = fixture();
+    let d = dir.path();
+    let _release = Release(d);
+    board_tasks(d, "Measure the bandicoot set");
+    // An export that takes 14 seconds unless `go` exists.
+    let export = r#"["sh", "-c", "echo run >> runs.log; i=0; while [ $i -lt 140 ] && [ ! -f go ]; do sleep 0.1; i=$((i+1)); done; cat board.json"]"#;
+    write(d, "research.toml", &board_config(export, None));
+    write(d, "go", "");
+    search(d, &["--refresh-board"]);
+    assert_eq!(runs(d), 1);
+    std::fs::remove_file(d.join("go")).unwrap();
+
+    // A warm query with a fresh cache never runs the export.
+    json(d, &["--in", "notes,board", "bandicoot"]);
+    let start = std::time::Instant::now();
+    let report = json(d, &["--in", "notes,board", "bandicoot"]);
+    let warm = start.elapsed();
+    assert_eq!(report["state"], "hits", "{report}");
+    assert!(warm.as_secs_f64() < 1.0, "a warm query took {warm:?}");
+    assert_eq!(runs(d), 1);
+
+    // A stale cache answers from the old copy at once and starts a refresh.
+    board_tasks(d, "Measure the wombat set");
+    age_cache(d);
+    let start = std::time::Instant::now();
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    let stale = start.elapsed();
+    assert!(stale.as_secs_f64() < 1.0, "a stale query took {stale:?}");
+    assert_eq!(report["state"], "partial", "{report}");
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+    let notice = report["partial"].to_string();
+    assert!(
+        notice.contains("the board export is 20 min old"),
+        "{report}"
+    );
+    assert!(notice.contains("a refresh started"), "{report}");
+    // A second query finds that refresh running and starts none.
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert!(
+        report["partial"]
+            .to_string()
+            .contains("a refresh is running"),
+        "{report}"
+    );
+
+    write(d, "go", "");
+    assert!(refresh_ended(d));
+    assert_eq!(runs(d), 2, "one refresh for both queries");
+    let report = json(d, &["--in", "board", "wombat"]);
+    assert_eq!(report["state"], "hits", "{report}");
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+}
+
+#[test]
+fn a_failed_refresh_keeps_the_old_cache_and_says_why() {
+    let dir = fixture();
+    let d = dir.path();
+    let _release = Release(d);
+    board_tasks(d, "Measure the bandicoot set");
+    let export = r#"["sh", "-c", "test -f fail && { echo boom >&2; exit 3; }; cat board.json"]"#;
+    write(d, "research.toml", &board_config(export, None));
+    search(d, &["--refresh-board"]);
+
+    write(d, "fail", "");
+    let o = lab(d, &["search", "--refresh-board"]);
+    assert_eq!(o.status.code(), Some(2));
+    let err = stderr(&o);
+    assert!(
+        err.contains("the board export failed: `sh` failed"),
+        "{err}"
+    );
+    assert!(err.contains("the cached copy from"), "{err}");
+    assert!(err.contains("boom"), "the export's own error shows: {err}");
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(report["state"], "hits", "{report}");
+
+    // A detached refresh that fails leaves the stale copy and its reason.
+    age_cache(d);
+    json(d, &["--in", "board", "bandicoot"]);
+    assert!(refresh_ended(d));
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+    let notice = report["partial"].to_string();
+    assert!(
+        notice.contains("the last refresh failed: `sh` failed"),
+        "{report}"
+    );
+    assert!(refresh_ended(d));
+
+    std::fs::remove_file(d.join("fail")).unwrap();
+    search(d, &["--refresh-board"]);
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(report["state"], "hits", "{report}");
+}
+
+#[test]
+fn the_search_board_export_comes_before_the_archive_one() {
+    let dir = fixture();
+    let d = dir.path();
+    let _release = Release(d);
+    board_tasks(d, "Measure the bandicoot set");
+    write(
+        d,
+        "old.json",
+        &serde_json::json!([{"id": "rf-1", "title": "Count the quoll set"}]).to_string(),
+    );
+    write(
+        d,
+        "research.toml",
+        &board_config(r#"["cat", "old.json"]"#, Some(r#"["cat", "board.json"]"#)),
+    );
+    search(d, &["--refresh-board"]);
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+    let report = json(d, &["--in", "board", "quoll"]);
+    assert!(hits(&report).is_empty(), "{report}");
+
+    // A cache of another command is no cache.
+    write(
+        d,
+        "research.toml",
+        &board_config(r#"["cat", "old.json"]"#, None),
+    );
+    let report = json(d, &["--in", "board", "quoll"]);
+    assert!(
+        report["partial"]
+            .to_string()
+            .contains("no board export is cached yet"),
+        "{report}"
+    );
+    assert!(refresh_ended(d));
+    let report = json(d, &["--in", "board", "quoll"]);
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-1");
 }

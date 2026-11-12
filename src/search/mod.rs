@@ -6,6 +6,7 @@
 //!
 //! Retrieved text is data: nothing here runs or follows what a note says.
 
+mod board;
 mod chat;
 mod graph;
 mod index;
@@ -145,6 +146,11 @@ pub struct SearchConfig {
     /// tracks that are not Markdown and not notes).
     pub files: Option<Vec<String>>,
     pub files_exclude: Vec<String>,
+    /// The command whose JSON feeds the `board` scope (default:
+    /// `[lab.archive] board_export`).
+    pub board_export: Option<Vec<String>>,
+    /// A query refreshes a cached board export older than this many minutes.
+    pub board_max_age: u64,
 }
 
 impl Default for SearchConfig {
@@ -163,6 +169,8 @@ impl Default for SearchConfig {
             cards: None,
             files: None,
             files_exclude: Vec::new(),
+            board_export: None,
+            board_max_age: 15,
         }
     }
 }
@@ -388,7 +396,7 @@ impl<'p> Context<'p> {
             cards: set("cards", &cards, &[])?,
             files,
             sessions,
-            board_export: archive.board_export.clone(),
+            board_export: board::command(project),
             registry,
             project,
             cfg,
@@ -400,7 +408,7 @@ impl<'p> Context<'p> {
                 .collect::<Result<_, String>>()?,
             inactive_statuses: &archive.inactive_statuses,
             cites: graph::cite_patterns(&cfg.cites)?,
-            dir: project.state_dir.join("lab").join("search"),
+            dir: board::dir(project),
             fingerprint: fingerprint.iter().map(|b| format!("{b:02x}")).collect(),
             budgeted: true,
         })
@@ -470,6 +478,10 @@ pub struct Args {
     pub out: Option<PathBuf>,
     /// `--run` also searches each topic's `phrasings`.
     pub phrasings: bool,
+    /// Run the board export now and cache it.
+    pub refresh_board: bool,
+    /// This process is the detached refresh a query started.
+    pub board_child: bool,
 }
 
 /// How a query ended (docs/state-machines.md 3.3). `error` is the `Err` of `run`.
@@ -602,10 +614,38 @@ pub fn mcp(project: &Project) -> Result<ExitCode, String> {
 /// `lab search`. Exit 0 for hits, a partial answer or no hit; `Err` (exit 2)
 /// for a bad query, an unreadable index or a lock timeout.
 pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
+    if args.board_child {
+        // Its output goes to board.log.
+        if let Some(r) = board::refresh(project, true)? {
+            println!(
+                "Board export cached: {} task(s) in {:.1} s.",
+                r.tasks,
+                r.took.as_secs_f64()
+            );
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let phrasings = phrasings(&args.query);
+    if args.refresh_board {
+        let r = board::refresh(project, false)?.expect("a foreground refresh runs the export");
+        let done = format!(
+            "Board export cached: {} task(s) in {:.1} s.",
+            r.tasks,
+            r.took.as_secs_f64()
+        );
+        if phrasings.is_empty()
+            && args.run.is_none()
+            && !args.rebuild
+            && !args.graph.filters().lists()
+        {
+            println!("{done}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        eprintln!("lab: {done}");
+    }
     if let Some(topics) = &args.run {
         return topics::run(project, args, topics);
     }
-    let phrasings = phrasings(&args.query);
     if phrasings.is_empty() && args.rebuild && !args.graph.filters().lists() {
         let scopes = requested(&args.scopes, &project.lab.search.default_scopes)?;
         let ctx = Context::new(project, scopes)?;

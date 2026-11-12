@@ -165,6 +165,16 @@ enum Command {
         /// With --run: also search each topic's `phrasings`.
         #[arg(long, requires = "run")]
         phrasings: bool,
+        /// Run the board export now (limit 120 s) and cache it for the `board`
+        /// scope; alone, only refresh. A query reads the cache and never waits
+        /// for the export: a cache older than [lab.search] board_max_age
+        /// (minutes, default 15), or none, starts one detached refresh. A
+        /// failed export keeps the old cache and says why.
+        #[arg(long)]
+        refresh_board: bool,
+        /// The detached refresh that a query starts; its standard input holds the lock.
+        #[arg(long, hide = true, requires = "refresh_board")]
+        board_child: bool,
     },
     /// List the neighbours of a record, file, anchor, reference key (`ref:232`) or board task in the search graph.
     ///
@@ -564,6 +574,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     run: None,
                     out: None,
                     phrasings: false,
+                    refresh_board: false,
+                    board_child: false,
                 },
             ),
             ArchiveCommand::Similar { subject } => search::similar::run(&project, &subject),
@@ -612,6 +624,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             run,
             out,
             phrasings,
+            refresh_board,
+            board_child,
         } => search::run(
             &project,
             &search::Args {
@@ -627,6 +641,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 run,
                 out,
                 phrasings,
+                refresh_board,
+                board_child,
             },
         ),
         Command::Related { name, limit, json } => search::related(&project, &name, limit, json),

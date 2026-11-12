@@ -10,6 +10,8 @@ pub const CONFIG_FILE: &str = "research.toml";
 #[derive(Debug)]
 pub struct Project {
     pub root: PathBuf,
+    /// The `research.toml` read, if any.
+    pub config: Option<PathBuf>,
     pub name: String,
     /// Zone in which stored UTC times become calendar dates.
     pub tz: jiff::tz::TimeZone,
@@ -689,6 +691,7 @@ impl Project {
         }
         Ok(Self {
             root,
+            config,
             name,
             tz,
             state_dir,
