@@ -58,6 +58,7 @@ pub const RULES: &[Rule] = &[
         configurable: true,
     },
     rule("stale-allow", Warn),
+    rule("stale-derivative", Warn),
     rule("stale-kept-link", Warn),
     rule("status-reversed", Error),
     rule("superseded-but-active", Warn),

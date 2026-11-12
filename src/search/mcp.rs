@@ -232,13 +232,14 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
                 &found.expansions,
                 false,
                 limit,
+                &found.searched,
             );
             Ok(format!("{}\n{mode_line}\n{text}", found.state_line()))
         }
         "archive_open" => {
             let anchor = input.string("anchor")?.ok_or("`anchor` is required")?;
             let lines = input.count("lines")?.unwrap_or(open::DEFAULT_LINES);
-            let ctx = super::Context::new(project)?;
+            let ctx = super::Context::new(project, project.lab.search.default_scopes.clone())?;
             let opened = index::open(&ctx, false)?;
             let unit = open::open(&ctx, &opened.conn, &anchor, lines)?;
             super::trace::record_open(project, &unit.anchor);
@@ -251,7 +252,7 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
         "archive_related" => {
             let name = input.string("name")?.ok_or("`name` is required")?;
             let limit = input.count("limit")?.unwrap_or(20);
-            let ctx = super::Context::new(project)?;
+            let ctx = super::Context::new(project, project.lab.search.default_scopes.clone())?;
             let opened = index::open(&ctx, false)?;
             let related = graph::related(&opened.conn, &name, limit)?;
             let state = match &opened.stale {

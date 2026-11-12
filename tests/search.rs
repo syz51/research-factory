@@ -229,7 +229,7 @@ fn no_hit_exits_0_with_0_results_and_the_nearest_words() {
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     assert_eq!(
         stdout(&o),
-        "0 results\nNot in the index: retreiver (nearest: retriever)\nSearched: notes\n"
+        "0 results\nNot in the index: retreiver (nearest: retriever)\nSearched: notes, refs\nNot searched: texts, files, sessions, board (pass --in <scope> or --in all)\n"
     );
     let report = json(dir.path(), &["zzqq"]);
     assert_eq!(report["state"], "zero");
@@ -446,10 +446,10 @@ fn another_schema_version_and_a_corrupt_file_rebuild_the_index() {
 fn errors_exit_2_and_json_carries_the_state() {
     let dir = fixture();
     let d = dir.path();
-    let scope = lab(d, &["search", "--in", "refs", "wombat"]);
+    let scope = lab(d, &["search", "--in", "papers", "wombat"]);
     assert_eq!(scope.status.code(), Some(2));
     assert!(
-        stderr(&scope).contains("unknown scope `refs`; the scopes are: notes"),
+        stderr(&scope).contains("unknown scope `papers`; the scopes are: notes, refs"),
         "{}",
         stderr(&scope)
     );
@@ -545,7 +545,7 @@ fn a_stale_index_answers_from_its_last_state_and_says_so() {
         report["partial"][0]
             .as_str()
             .unwrap()
-            .contains("1 changed file(s)")
+            .contains("1 changed source(s)")
     );
     // The new file is not in the index yet: no hit, and the notice stays.
     let o = lab(d, &["search", "--json", "quokka"]);

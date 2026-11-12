@@ -22,7 +22,7 @@ use crate::config::Project;
 use super::missed::{Missed, missed};
 use super::query::words;
 use super::trace::{self, Line};
-use super::{Context, index, thesaurus};
+use super::{Context, Scope, index, thesaurus};
 
 const FILE: &str = "lab/retro.json";
 const SCHEMA: &str = "rf.retro/1";
@@ -232,12 +232,13 @@ fn unused(project: &Project, lines: &[Line]) -> Result<String, String> {
 
 /// The path of the record with this id, from the search index.
 fn record_path(project: &Project, id: &str) -> Result<Option<String>, String> {
-    let ctx = Context::new(project)?;
+    let ctx = Context::new(project, vec![Scope::Notes])?;
     let opened = index::open(&ctx, false)?;
     opened
         .conn
         .query_row(
-            "SELECT path FROM files WHERE record_id = ?1 COLLATE NOCASE ORDER BY path LIMIT 1",
+            "SELECT path FROM files WHERE scope = 'notes' AND record_id = ?1 COLLATE NOCASE \
+             ORDER BY path LIMIT 1",
             [id],
             |r| r.get(0),
         )
@@ -450,12 +451,15 @@ pub fn retire(project: &Project, line: usize) -> Result<ExitCode, String> {
 /// `lab retro seed`: an entry `alias = id` for each alias of each record
 /// that the thesaurus does not hold yet.
 pub fn seed(project: &Project) -> Result<ExitCode, String> {
-    let ctx = Context::new(project)?;
+    let ctx = Context::new(project, vec![Scope::Notes])?;
     let opened = index::open(&ctx, false)?;
     let files: Vec<(String, String)> = {
         let mut stmt = opened
             .conn
-            .prepare("SELECT path, record_id FROM files WHERE record_id IS NOT NULL ORDER BY path")
+            .prepare(
+                "SELECT path, record_id FROM files WHERE scope = 'notes' AND record_id IS NOT NULL \
+                 ORDER BY path",
+            )
             .map_err(|e| e.to_string())?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(|e| e.to_string())?

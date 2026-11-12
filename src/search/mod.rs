@@ -1,18 +1,23 @@
-//! `lab search`: ranked full-text search over the project's notes
-//! (docs/archive-design.md section 3). This is the lexical core: the `notes`
-//! scope and the `lexical` stage. Later scopes join `SCOPES`; later stages
-//! change their entry in `Stage::state`.
+//! `lab search`: ranked full-text search over the project's notes, the
+//! reference registry, extracted paper texts, run outputs, agent sessions and
+//! the work board (docs/archive-design.md section 3). This is the lexical
+//! core: every scope of `Scope` and the `lexical` stage. Later stages change
+//! their entry in `Stage::state`.
 //!
 //! Retrieved text is data: nothing here runs or follows what a note says.
 
+mod chat;
 mod graph;
 mod index;
 pub(crate) mod learn;
 mod mcp;
 mod missed;
 mod open;
+mod passages;
 mod query;
+mod refs;
 pub(crate) mod similar;
+mod sources;
 mod thesaurus;
 mod topics;
 pub(crate) mod trace;
@@ -32,8 +37,71 @@ use crate::archive::files::FileSet;
 use crate::config::Project;
 use query::{Expansion, Hit, Outcome, Unknown};
 
-/// The scopes `--in` accepts.
-const SCOPES: &[&str] = &["notes"];
+/// A part of the corpus (docs/archive-design.md 3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    Notes,
+    Refs,
+    Texts,
+    Files,
+    Sessions,
+    Board,
+}
+
+impl Scope {
+    /// In the order the index builds them: `files` names the records of `notes`.
+    pub const ALL: [Self; 6] = [
+        Self::Notes,
+        Self::Refs,
+        Self::Texts,
+        Self::Files,
+        Self::Sessions,
+        Self::Board,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Notes => "notes",
+            Self::Refs => "refs",
+            Self::Texts => "texts",
+            Self::Files => "files",
+            Self::Sessions => "sessions",
+            Self::Board => "board",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|c| c.as_str() == s)
+    }
+}
+
+fn default_scopes() -> Vec<Scope> {
+    vec![Scope::Notes, Scope::Refs]
+}
+
+/// The scopes a query searches: those named, `all`, or else the configured default.
+fn requested(named: &[String], default: &[Scope]) -> Result<Vec<Scope>, String> {
+    let mut scopes = Vec::new();
+    for name in named.iter().flat_map(|n| n.split(',')).map(str::trim) {
+        match name {
+            "" => {}
+            "all" => scopes.extend(Scope::ALL),
+            _ => scopes.push(Scope::parse(name).ok_or_else(|| {
+                format!(
+                    "unknown scope `{name}`; the scopes are: {}, all",
+                    Scope::ALL.map(Scope::as_str).join(", ")
+                )
+            })?),
+        }
+    }
+    if scopes.is_empty() {
+        scopes = default.to_vec();
+    }
+    scopes.sort();
+    scopes.dedup();
+    Ok(scopes)
+}
 const DEFAULT_LIMIT: usize = 8;
 /// The text output holds about this many bytes per hit of the limit: 2 KB at 8 hits.
 const BYTES_PER_HIT: usize = 256;
@@ -62,6 +130,15 @@ pub struct SearchConfig {
     pub thesaurus: Option<String>,
     /// `lab retro` lists a thesaurus entry that no query used in this many days.
     pub review_days: u32,
+    /// The scopes a query without `--in` searches.
+    pub default_scopes: Vec<Scope>,
+    /// Globs of the paper cards (`rf.paper-card/1`) of the `refs` scope
+    /// (default: `sources/cards/*.json` beside the registry).
+    pub cards: Option<Vec<String>>,
+    /// Globs of the files of the `files` scope (default: the files git
+    /// tracks that are not Markdown and not notes).
+    pub files: Option<Vec<String>>,
+    pub files_exclude: Vec<String>,
 }
 
 impl Default for SearchConfig {
@@ -76,6 +153,10 @@ impl Default for SearchConfig {
             cites: Vec::new(),
             thesaurus: None,
             review_days: 90,
+            default_scopes: default_scopes(),
+            cards: None,
+            files: None,
+            files_exclude: Vec::new(),
         }
     }
 }
@@ -136,8 +217,9 @@ impl Class {
             Self::Chat => 0.6,
             Self::Copied => 0.5,
             Self::Historical => 0.25,
-            // Never indexed.
-            Self::Generated => 0.0,
+            // Paper cards: model output that routes to a paper, never evidence.
+            // Generated notes are never indexed.
+            Self::Generated => 0.5,
         }
     }
 }
@@ -191,6 +273,17 @@ pub struct Context<'p> {
     fingerprint: String,
     /// false: a refresh indexes every changed file, past `refresh_budget_ms`.
     budgeted: bool,
+    /// The scopes this query searches, in build order; `files` brings `notes`.
+    scopes: Vec<Scope>,
+    /// The scopes the answer comes from.
+    searched: Vec<Scope>,
+    /// The registry, relative to the root.
+    registry: String,
+    cards: FileSet,
+    files: Option<FileSet>,
+    /// The `rf.session/1` list, relative to the root.
+    sessions: Option<String>,
+    board_export: Option<Vec<String>>,
 }
 
 /// The directory a glob names before its first pattern character.
@@ -226,7 +319,7 @@ fn default_notes(archive: &crate::config::ArchiveConfig) -> Vec<String> {
 }
 
 impl<'p> Context<'p> {
-    fn new(project: &'p Project) -> Result<Self, String> {
+    fn new(project: &'p Project, searched: Vec<Scope>) -> Result<Self, String> {
         let spec = Spec::new(project)?;
         let archive = project
             .lab
@@ -256,7 +349,40 @@ impl<'p> Context<'p> {
             "{archive:?}\n{notes:?}\n{:?}\n{:?}\n{:?}",
             cfg.notes_exclude, cfg.classes, cfg.cites
         ));
+        let registry = project.registry.clone();
+        let cards = cfg.cards.clone().unwrap_or_else(|| {
+            let dir = registry.rsplit_once('/').map_or("", |(d, _)| d);
+            let dir = if dir.is_empty() {
+                String::new()
+            } else {
+                format!("{dir}/")
+            };
+            vec![format!("{dir}sources/cards/*.json")]
+        });
+        let files = match &cfg.files {
+            Some(globs) => Some(set("files", globs, &cfg.files_exclude)?),
+            None => None,
+        };
+        // The session list beside the findings of `agentprof scan`.
+        let sessions = project.lab.agent_sessions.clone().or_else(|| {
+            let findings = project.lab.agent_findings.as_ref()?;
+            Some(match findings.rsplit_once('/') {
+                Some((dir, _)) => format!("{dir}/sessions.jsonl"),
+                None => "sessions.jsonl".into(),
+            })
+        });
+        let mut scopes = searched.clone();
+        if scopes.contains(&Scope::Files) && !scopes.contains(&Scope::Notes) {
+            scopes.insert(0, Scope::Notes);
+        }
         Ok(Self {
+            scopes,
+            searched,
+            cards: set("cards", &cards, &[])?,
+            files,
+            sessions,
+            board_export: archive.board_export.clone(),
+            registry,
             project,
             cfg,
             spec,
@@ -364,7 +490,8 @@ struct Report<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
     query: &'a [String],
-    scopes: &'a [String],
+    /// The scopes searched.
+    scopes: Vec<&'static str>,
     stages: BTreeMap<&'static str, &'static str>,
     /// Why the answer may be incomplete: a stale index, a stage that is not built.
     partial: &'a [String],
@@ -403,6 +530,8 @@ pub(crate) struct Answer {
     pub missing_stages: Vec<&'static str>,
     /// With `weigh`: each term of the first phrasing and its weight.
     pub weights: Vec<(String, f64)>,
+    /// The scopes searched.
+    pub searched: Vec<Scope>,
 }
 
 impl Answer {
@@ -467,11 +596,18 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
     }
     let phrasings = phrasings(&args.query);
     if phrasings.is_empty() && args.rebuild && !args.graph.filters().lists() {
-        check_scopes(&args.scopes)?;
-        let ctx = Context::new(project)?;
+        let scopes = requested(&args.scopes, &project.lab.search.default_scopes)?;
+        let ctx = Context::new(project, scopes)?;
         let opened = index::open(&ctx, true)?;
+        for notice in &opened.notices {
+            eprintln!("lab: partial: {notice}");
+        }
         let (files, units) = index::counts(&opened.conn).map_err(String::from)?;
-        println!("Search index rebuilt: {units} unit(s) of {files} file(s).");
+        let names: Vec<&str> = ctx.scopes.iter().map(|s| s.as_str()).collect();
+        println!(
+            "Search index rebuilt: {units} unit(s) of {files} source(s) in {}.",
+            names.join(", ")
+        );
         return Ok(ExitCode::SUCCESS);
     }
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
@@ -489,12 +625,14 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         Ok(answer) => answer,
         Err(e) => {
             if args.json {
+                let scopes =
+                    requested(&args.scopes, &project.lab.search.default_scopes).unwrap_or_default();
                 let report = Report {
                     schema: "rf.search/1",
                     state: State::Error,
                     error: Some(&e),
                     query: &phrasings,
-                    scopes: &args.scopes,
+                    scopes: scopes.iter().map(|s| s.as_str()).collect(),
                     stages: stages(),
                     partial: &[],
                     unknown: &[],
@@ -524,7 +662,7 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
             state: answer.state,
             error: None,
             query: &phrasings,
-            scopes: &args.scopes,
+            scopes: answer.searched.iter().map(|s| s.as_str()).collect(),
             stages: stages(),
             partial: &answer.partial,
             unknown: &answer.unknown,
@@ -545,21 +683,22 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
                 &answer.unknown,
                 &answer.expansions,
                 args.explain,
-                limit
+                limit,
+                &answer.searched
             )
         );
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// Builds the search index, or brings it up to date with the files, without
-/// a query. Gives the files and units it holds.
+/// Builds the search index of the default scopes, or brings it up to date
+/// with their sources, without a query. Gives the sources and units it holds.
 pub fn refresh(project: &Project) -> Result<(i64, i64), String> {
     // A gate must leave the index complete, so it is not held to the budget
     // of a query's refresh.
     let ctx = Context {
         budgeted: false,
-        ..Context::new(project)?
+        ..Context::new(project, project.lab.search.default_scopes.clone())?
     };
     let opened = index::open(&ctx, false)?;
     if let Some(why) = opened.stale {
@@ -575,14 +714,10 @@ fn stages() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
-fn check_scopes(scopes: &[String]) -> Result<(), String> {
-    match scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
-        Some(unknown) => Err(format!(
-            "unknown scope `{unknown}`; the scopes are: {}",
-            SCOPES.join(", ")
-        )),
-        None => Ok(()),
-    }
+/// Every structure file and paper card that no longer fits its text, with
+/// why: `lab archive check` reports them as `stale-derivative`.
+pub fn stale_derivatives(project: &Project) -> Result<Vec<(String, String)>, String> {
+    refs::stale(&Context::new(project, vec![Scope::Refs, Scope::Texts])?)
 }
 
 /// Answers the request and appends its line to the query trace, also when
@@ -640,7 +775,7 @@ pub(crate) fn traced(project: &Project, source: &str, req: &Request) -> Result<A
 }
 
 fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
-    check_scopes(req.scopes)?;
+    let scopes = requested(req.scopes, &project.lab.search.default_scopes)?;
     let filters = req.graph.filters();
     if req.phrasings.is_empty() && !filters.lists() {
         return Err("give the words to search for, --cites, --links-to or --rebuild".into());
@@ -648,7 +783,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
     if req.limit == 0 {
         return Err("--limit must be at least 1".into());
     }
-    let ctx = Context::new(project)?;
+    let ctx = Context::new(project, scopes)?;
     let archive_statuses = project
         .lab
         .archive
@@ -675,7 +810,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
         }
     }
     let mut rebuild = req.rebuild;
-    let (outcome, stale, weights) = loop {
+    let (outcome, stale, notices, weights) = loop {
         let opened = index::open(&ctx, rebuild)?;
         let filter = filters.units_sql(&opened.conn)?;
         let opts = query::Options {
@@ -695,7 +830,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
             Ok((outcome, weights))
         });
         match searched {
-            Ok((outcome, weights)) => break (outcome, opened.stale, weights),
+            Ok((outcome, weights)) => break (outcome, opened.stale, opened.notices, weights),
             // Corruption that only a query met: build anew, once.
             Err(index::Fault::Corrupt(_)) if !rebuild => rebuild = true,
             Err(e) => return Err(e.into()),
@@ -710,6 +845,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
     let mut partial: Vec<String> = stale
         .into_iter()
         .map(|why| format!("the index is stale: {why}"))
+        .chain(notices)
         .collect();
     let mut missing_stages = Vec::new();
     for stage in ctx.cfg.stages.iter().filter(|s| s.state() != "ready") {
@@ -737,6 +873,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
         candidates,
         missing_stages,
         weights,
+        searched: ctx.searched.clone(),
     })
 }
 
@@ -762,6 +899,7 @@ fn render(
     expansions: &[Expansion],
     explain: bool,
     limit: usize,
+    searched: &[Scope],
 ) -> String {
     let mut out = String::new();
     // The thesaurus terms a query added are always named.
@@ -782,7 +920,22 @@ fn render(
         if !unknown.is_empty() {
             out.push_str(&unknown_line(unknown));
         }
-        let _ = writeln!(out, "Searched: {}", SCOPES.join(", "));
+        let names = |want: bool| -> Vec<&str> {
+            Scope::ALL
+                .into_iter()
+                .filter(|s| searched.contains(s) == want)
+                .map(Scope::as_str)
+                .collect()
+        };
+        let _ = writeln!(out, "Searched: {}", names(true).join(", "));
+        let not = names(false);
+        if !not.is_empty() {
+            let _ = writeln!(
+                out,
+                "Not searched: {} (pass --in <scope> or --in all)",
+                not.join(", ")
+            );
+        }
         return out;
     }
     let budget = limit * BYTES_PER_HIT;
@@ -793,6 +946,8 @@ fn render(
         let r = &hit.record;
         if record == Some(&hit.path) {
             let _ = writeln!(text, "{}. (same record)", hit.rank);
+        } else if let Some(line) = query::ref_line(hit) {
+            let _ = writeln!(text, "{}. {line}", hit.rank);
         } else {
             let mut parts = vec![r.id.clone().unwrap_or_else(|| "-".into())];
             parts.extend(r.date.clone());
@@ -807,6 +962,9 @@ fn render(
                 parts.push(format!("linked by {}", hit.linked_by));
             }
             parts.extend(r.title.clone());
+            if let Some(key) = &hit.key {
+                parts.push(format!("ref:{key}"));
+            }
             let _ = writeln!(text, "{}. {}", hit.rank, parts.join(" · "));
         }
         let _ = write!(text, "   {}", hit.anchor);
