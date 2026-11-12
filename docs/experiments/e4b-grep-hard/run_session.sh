@@ -3,13 +3,16 @@
 # with Claude Opus 5.5 through the `claude` CLI, in a scratch copy of masters.
 # The flags are E4's (../e4-delivery/run_session.sh); each condition has its own copy.
 #
-#   run_session.sh <condition> <topic id> <rep>
+#   run_session.sh <condition> <topic id> <rep> [phrasing]
+#
+# Without [phrasing] the prompt asks for the topic's `need` (round 1); with 1 or 2 it
+# asks for that entry of the topic's `phrasings` (round 2).
 #
 # Environment:
 #   E4B_MASTERS  a folder with two scratch copies of masters: masters-cli (no .mcp.json,
 #                so `lab brief` teaches `lab search`) and masters-mcp (.mcp.json runs
 #                `lab mcp`, so the brief points to `archive_search`)
-#   E4B_TESTSET  the test set folder (read for the topic's `need` only)
+#   E4B_TESTSET  the test set folder (read for the topic's `need` or `phrasings` only)
 #   E4B_OUT      where the transcript goes: <out>/<condition>/<topic>-<rep>.jsonl
 #   E4B_LAB      the directory of the `lab` binary under test
 #
@@ -20,10 +23,15 @@ set -eu
 cond=$1
 topic=$2
 rep=$3
+phrasing=${4:-}
 : "${E4B_MASTERS:?}" "${E4B_TESTSET:?}" "${E4B_OUT:?}" "${E4B_LAB:?}"
 
-need=$(jq -r --arg id "$topic" 'select(.id == $id) | .need' "$E4B_TESTSET/topics.jsonl")
-[ -n "$need" ] || { echo "no topic $topic" >&2; exit 2; }
+if [ -n "$phrasing" ]; then
+    need=$(jq -r --arg id "$topic" --argjson k "$phrasing" 'select(.id == $id) | .phrasings[$k - 1]' "$E4B_TESTSET/topics.jsonl")
+else
+    need=$(jq -r --arg id "$topic" 'select(.id == $id) | .need' "$E4B_TESTSET/topics.jsonl")
+fi
+[ -n "$need" ] && [ "$need" != null ] || { echo "no topic $topic" >&2; exit 2; }
 prompt="Answer from this project's research archive. Find: $need
 Give a short answer, then the path:start-end anchor of each passage it rests on. Do not change any file."
 
