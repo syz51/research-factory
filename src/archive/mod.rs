@@ -3,10 +3,14 @@
 //! append-only files, and checks ids, links, sizes and seals, so agents can
 //! find a record by id or a few words instead of reading large files whole.
 
+mod done;
 pub(crate) mod files;
 pub(crate) mod front;
+mod gitseal;
 mod index;
 pub(crate) mod markdown;
+mod meta_rules;
+mod reserve;
 mod rules;
 mod seal;
 
@@ -17,8 +21,9 @@ use std::rc::Rc;
 
 use regex::Regex;
 
-use crate::config::{ArchiveConfig, IndexSpec, Project};
+use crate::config::{ArchiveConfig, IndexSpec, Project, SealMode};
 use crate::finding::Severity;
+pub use done::{done, log, print_index};
 use files::FileSet;
 use front::{Invalid, Meta};
 use markdown::Doc;
@@ -76,8 +81,14 @@ impl<'p> Spec<'p> {
                 "[lab.archive] inactive status `{s}` is not in `statuses`"
             ));
         }
+        meta_rules::validate(cfg)?;
         let names: Vec<String> = cfg.index.iter().map(|i| i.name.clone()).collect();
-        let outputs: Vec<String> = cfg.index.iter().map(|i| i.output.clone()).collect();
+        let outputs: Vec<String> = cfg
+            .index
+            .iter()
+            .filter(|i| !i.output.is_empty())
+            .map(|i| i.output.clone())
+            .collect();
         if names.iter().any(|n| n.trim().is_empty()) || !unique(&names) || !unique(&outputs) {
             return Err(
                 "[lab.archive] every index needs a non-empty, unique `name` and a unique `output`"
@@ -268,7 +279,14 @@ impl<'p> Spec<'p> {
 
     /// Index `i`'s records in its order.
     fn rows<'r>(&self, records: &'r [Record], i: usize) -> Vec<&'r Record> {
-        let mut rows: Vec<&Record> = records.iter().filter(|r| r.index == i).collect();
+        let kinds = &self.indexes[i].spec.kinds;
+        // An index with `kinds` lists only the records of those kinds; the
+        // others stay records, which every rule checks.
+        let mut rows: Vec<&Record> = records
+            .iter()
+            .filter(|r| r.index == i)
+            .filter(|r| kinds.is_empty() || r.meta.kind.as_ref().is_some_and(|k| kinds.contains(k)))
+            .collect();
         index::sort(&mut rows, self.indexes[i].spec.sort);
         rows
     }
@@ -446,6 +464,13 @@ fn exit(ok: bool) -> ExitCode {
 /// `lab archive index`.
 pub fn index(project: &Project) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
+    if !spec.cfg.write_indexes {
+        println!(
+            "No index file is written (`write_indexes = false`); print an index with \
+             `lab archive index --print <name>`."
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
     let found = spec.walk(&[])?;
     let records = spec.records(&found, &mut Texts::new())?;
     Ok(exit(write_indexes(&spec, &records)?))
@@ -454,11 +479,39 @@ pub fn index(project: &Project) -> Result<ExitCode, String> {
 /// `lab archive seal`, or with `accept` the re-sealing of one edited file.
 pub fn seal(project: &Project, accept: Option<(&str, &str)>) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
+    if spec.cfg.seal == SealMode::Git {
+        return git_seal(&spec, accept.is_some());
+    }
     if let Some((path, note)) = accept {
         return accept_edit(&spec, path, note);
     }
     let found = files::walk(spec.root(), &[&spec.sealed])?;
     Ok(exit(seal_files(&spec, &found[0])?))
+}
+
+/// `lab archive seal` with `seal = "git"`: git history is the seal, so
+/// nothing is written; the command checks that history.
+fn git_seal(spec: &Spec, accept: bool) -> Result<ExitCode, String> {
+    if accept {
+        println!(
+            "With `seal = \"git\"` an edit of sealed text is accepted in research.toml: add a \
+             [[lab.archive.accepted_edit]] entry with `path`, `commit` and `reason`."
+        );
+        return Ok(ExitCode::from(1));
+    }
+    let problems = gitseal::problems(spec)?;
+    for p in &problems {
+        println!("{}", p.text());
+    }
+    let errors = problems
+        .iter()
+        .filter(|p| p.severity == Severity::Error)
+        .count();
+    println!(
+        "The seal is git history (`seal = \"git\"`): no manifest is written. {errors} sealed \
+         text error(s)."
+    );
+    Ok(exit(errors == 0))
 }
 
 fn accept_edit(spec: &Spec, path: &str, note: &str) -> Result<ExitCode, String> {
@@ -527,15 +580,25 @@ fn manifest_key(spec: &Spec, manifest: &Manifest, path: &str) -> Option<String> 
     manifest.files.contains_key(&key).then_some(key)
 }
 
-/// `lab archive update`: `index`, then `seal`.
+/// `lab archive update`: `index`, then `seal`. Nothing is sealed when the
+/// index step fails: a record with invalid front matter is not finished.
 pub fn update(project: &Project) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
     let mut found = spec.walk(&[&spec.sealed])?;
     let sealed = found.pop().unwrap_or_default();
     let records = spec.records(&found, &mut Texts::new())?;
-    let indexed = write_indexes(&spec, &records)?;
-    let sealed = seal_files(&spec, &sealed)?;
-    Ok(exit(indexed && sealed))
+    if spec.cfg.write_indexes {
+        if !write_indexes(&spec, &records)? {
+            println!("Nothing sealed: the index step failed.");
+            return Ok(ExitCode::from(1));
+        }
+    } else {
+        println!("No index file written (`write_indexes = false`).");
+    }
+    if spec.cfg.seal == SealMode::Git {
+        return git_seal(&spec, false);
+    }
+    Ok(exit(seal_files(&spec, &sealed)?))
 }
 
 /// `lab archive check`: every rule, read-only.
@@ -581,13 +644,26 @@ fn unique_refs<'r>(records: &[&'r Record]) -> Vec<&'r Record> {
         .collect()
 }
 
-/// `lab archive next`.
-pub fn next(project: &Project, prefix: &str, width: Option<usize>) -> Result<ExitCode, String> {
+/// `lab archive next`. With `reserve`, or by default in model 2, the number
+/// is recorded so that no other worktree gets it; `peek` only prints it.
+pub fn next(
+    project: &Project,
+    config: Option<&Path>,
+    prefix: &str,
+    width: Option<usize>,
+    reserve: bool,
+    peek: bool,
+) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
-    let found = spec.walk(&[])?;
-    let records = spec.records(&found, &mut Texts::new())?;
-    let ids = records.iter().filter_map(|r| r.meta.id.as_deref());
-    match index::next_id(ids, prefix, width) {
+    let id = if reserve || peek || spec.cfg.model >= 2 {
+        reserve::reserve(project, config, prefix, width, !peek)?
+    } else {
+        let found = spec.walk(&[])?;
+        let records = spec.records(&found, &mut Texts::new())?;
+        let ids = records.iter().filter_map(|r| r.meta.id.as_deref());
+        index::next_id(ids, prefix, width)
+    };
+    match id {
         Some(id) => {
             println!("{id}");
             Ok(ExitCode::SUCCESS)

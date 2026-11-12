@@ -9,28 +9,30 @@ use super::front::{self, Meta};
 use super::markdown;
 use super::seal::{Entry, Manifest, State};
 use super::{Record, Spec, Texts, read_optional};
-use crate::config::{KeptLinkSpec, OffloadedSpec};
+use crate::config::{KeptLinkSpec, OffloadedSpec, SealMode};
 use crate::finding::{Evidence, Finding, Severity};
 
 /// A problem `lab archive check` reports, before it becomes an `rf.finding/1`.
 #[derive(Debug)]
 pub(super) struct Problem {
-    rule: &'static str,
+    pub(super) rule: &'static str,
     pub(super) severity: Severity,
-    path: String,
+    pub(super) path: String,
     line: Option<usize>,
     /// The subject when it is not `path[:line]`, such as a duplicated id.
-    subject: Option<String>,
-    message: String,
-    evidence: Vec<String>,
-    data: Option<serde_json::Value>,
+    pub(super) subject: Option<String>,
+    pub(super) message: String,
+    pub(super) evidence: Vec<String>,
+    pub(super) data: Option<serde_json::Value>,
     /// Shown after the message in text output only, so it can change
     /// without changing the finding's fingerprint.
-    detail: Option<String>,
+    pub(super) detail: Option<String>,
+    /// The link destination as written, for `[[lab.archive.allow]]`.
+    pub(super) target: Option<String>,
 }
 
 impl Problem {
-    fn new(rule: &'static str, severity: Severity, path: &str, message: String) -> Self {
+    pub(super) fn new(rule: &'static str, severity: Severity, path: &str, message: String) -> Self {
         Self {
             rule,
             severity,
@@ -41,12 +43,18 @@ impl Problem {
             evidence: Vec::new(),
             data: None,
             detail: None,
+            target: None,
         }
     }
 
-    fn at(mut self, line: usize) -> Self {
+    pub(super) fn at(mut self, line: usize) -> Self {
         self.line = Some(line);
         self
+    }
+
+    /// The subject without a line number: what an allow entry names.
+    pub(super) fn subject_plain(&self) -> &str {
+        self.subject.as_deref().unwrap_or(&self.path)
     }
 
     fn subject(&self) -> String {
@@ -114,7 +122,11 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
     let records = spec.records(by_index, &mut texts)?;
     let mut out = Vec::new();
     record_problems(spec, &records, &mut out);
-    index_problems(spec, &records, &mut out)?;
+    if spec.cfg.write_indexes {
+        index_problems(spec, &records, &mut out)?;
+    } else {
+        leftover_indexes(spec, &mut out);
+    }
     for (b, paths) in spec.cfg.budget.iter().zip(budgets) {
         for path in paths {
             let bytes = std::fs::metadata(spec.root().join(path))
@@ -135,13 +147,22 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
             }
         }
     }
-    let manifest = Manifest::load(&spec.manifest)?;
-    let seals = Seals {
-        sealed: sealed.iter().map(String::as_str).collect(),
-        manifest: &manifest,
-    };
-    link_problems(spec, &records, links, current, &seals, &mut texts, &mut out)?;
-    seal_problems(spec, sealed, &manifest, &mut out)?;
+    if spec.cfg.seal == SealMode::Git {
+        let seals = Seals::Git(spec);
+        link_problems(spec, &records, links, current, &seals, &mut texts, &mut out)?;
+        out.extend(super::gitseal::problems(spec)?);
+    } else {
+        let manifest = Manifest::load(&spec.manifest)?;
+        let seals = Seals::Manifest {
+            sealed: sealed.iter().map(String::as_str).collect(),
+            manifest: &manifest,
+        };
+        link_problems(spec, &records, links, current, &seals, &mut texts, &mut out)?;
+        seal_problems(spec, sealed, &manifest, &mut out)?;
+    }
+    if spec.cfg.model >= 2 {
+        super::meta_rules::problems(spec, &records, &mut texts, &mut out)?;
+    }
     out.sort_by(|a, b| {
         (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
     });
@@ -294,9 +315,27 @@ fn index_problems(spec: &Spec, records: &[Record], out: &mut Vec<Problem>) -> Re
     Ok(())
 }
 
+/// With `write_indexes = false`: an index file that is still there.
+fn leftover_indexes(spec: &Spec, out: &mut Vec<Problem>) {
+    for ix in spec.cfg.index.iter().filter(|i| !i.output.is_empty()) {
+        if spec.root().join(&ix.output).is_file() {
+            out.push(Problem::new(
+                "index-leftover",
+                Severity::Warn,
+                &ix.output,
+                format!(
+                    "is a generated index, but `write_indexes = false`; delete it and print \
+                     the index with `lab archive index --print {}`",
+                    ix.name
+                ),
+            ));
+        }
+    }
+}
+
 /// Where a link points.
 #[derive(Debug, PartialEq)]
-enum Target {
+pub(super) enum Target {
     /// A URL, or nothing to check.
     Skip,
     /// `#fragment` in the same file.
@@ -334,7 +373,7 @@ fn normalize(dir: &str, path: &str) -> Option<String> {
 }
 
 /// Resolves a link destination written in a file in directory `dir`.
-fn resolve(root: &Path, dir: &str, dest: &str) -> Target {
+pub(super) fn resolve(root: &Path, dir: &str, dest: &str) -> Target {
     let dest = dest.trim();
     if dest.is_empty() || has_scheme(dest) {
         return Target::Skip;
@@ -477,30 +516,43 @@ impl<'a> Offloaded<'a> {
 }
 
 /// The append-only files and their seals.
-struct Seals<'a> {
-    /// The files that match `[lab.archive] sealed`.
-    sealed: BTreeSet<&'a str>,
-    manifest: &'a Manifest,
+enum Seals<'a> {
+    Manifest {
+        /// The files that match `[lab.archive] sealed`.
+        sealed: BTreeSet<&'a str>,
+        manifest: &'a Manifest,
+    },
+    /// `seal = "git"`: the sealed text of a file is its body at `HEAD`.
+    Git(&'a Spec<'a>),
 }
 
 impl Seals<'_> {
+    /// How many bytes of `body`, the body of `file`, its seal covers; `None`
+    /// when the file is not sealed or its seal does not hold.
+    fn sealed_len(&self, file: &str, body: &[u8]) -> Result<Option<usize>, String> {
+        match self {
+            Self::Git(spec) => super::gitseal::sealed_len(spec, file, body),
+            Self::Manifest { sealed, manifest } => {
+                let entry = manifest.files.get(file);
+                let holds = sealed.contains(file)
+                    && matches!(
+                        Entry::state(entry, body),
+                        State::Unchanged | State::Appended
+                    );
+                Ok(entry
+                    .filter(|_| holds)
+                    .and_then(|e| usize::try_from(e.bytes).ok()))
+            }
+        }
+    }
+
     /// Whether file line `line` (from 1) of `file`, whose content is `bytes`,
     /// lies wholly in the text its seal covers: the file is append-only, its
     /// seal holds, and the line ends within the sealed bytes of the body.
-    fn covers(&self, file: &str, bytes: &[u8], line: usize) -> bool {
-        if !self.sealed.contains(file) {
-            return false;
-        }
-        let entry = self.manifest.files.get(file);
+    fn covers(&self, file: &str, bytes: &[u8], line: usize) -> Result<bool, String> {
         let body = front::sealed_body(bytes);
-        if !matches!(
-            Entry::state(entry, body),
-            State::Unchanged | State::Appended
-        ) {
-            return false;
-        }
-        let Some(sealed) = entry.and_then(|e| usize::try_from(e.bytes).ok()) else {
-            return false;
+        let Some(sealed) = self.sealed_len(file, body)? else {
+            return Ok(false);
         };
         // The body is the end of the file, so the sealed span starts where it does.
         let sealed_end = bytes.len() - body.len() + sealed;
@@ -508,14 +560,14 @@ impl Seals<'_> {
         for _ in 1..line {
             match bytes[start..].iter().position(|&b| b == b'\n') {
                 Some(i) => start += i + 1,
-                None => return false,
+                None => return Ok(false),
             }
         }
         let end = bytes[start..]
             .iter()
             .position(|&b| b == b'\n')
             .map_or(bytes.len(), |i| start + i);
-        end <= sealed_end
+        Ok(end <= sealed_end)
     }
 }
 
@@ -633,7 +685,7 @@ fn link_problems(
                             continue;
                         };
                         k.matched = true;
-                        if seals.covers(file, &texts.bytes(&abs_file)?, link.line) {
+                        if seals.covers(file, &texts.bytes(&abs_file)?, link.line)? {
                             let mut p = problem(
                                 "kept-link",
                                 format!(

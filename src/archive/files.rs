@@ -66,6 +66,11 @@ impl FileSet {
         self.include.is_match(rel) && !self.exclude.is_match(rel)
     }
 
+    /// Whether an `include` or `exclude` glob names `rel`: the set decides it.
+    pub fn names(&self, rel: &str) -> bool {
+        self.include.is_match(rel) || self.exclude.is_match(rel)
+    }
+
     /// Whether a file below the directory `rel` (components `dir`) can match.
     fn enters(&self, rel: &str, dir: &[&str]) -> bool {
         if self.pruned.is_match(rel) {

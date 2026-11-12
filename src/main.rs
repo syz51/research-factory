@@ -149,7 +149,25 @@ enum Command {
 #[derive(Subcommand)]
 enum ArchiveCommand {
     /// Regenerate every configured index from its records' front matter.
-    Index,
+    Index {
+        /// Print this index instead of writing the index files; links are
+        /// relative to the project root.
+        #[arg(long, value_name = "NAME")]
+        print: Option<String>,
+    },
+    /// The completion gate of archive model 2: refresh the derived files and
+    /// the search index, then run the checks; stop at the first failed step
+    /// and print the fix for each new finding.
+    Done,
+    /// Print the records in date order with kind and summary; with a record,
+    /// the commits that changed it.
+    Log {
+        /// Only records dated on or after this day (YYYY-MM-DD).
+        #[arg(long, value_name = "DATE")]
+        since: Option<String>,
+        /// A record id or path: print its commits instead of the timeline.
+        record: Option<String>,
+    },
     /// Seal new append-only files and record appends; report edited or missing ones.
     Seal {
         /// Re-seal this edited file at its current content (needs --note).
@@ -179,6 +197,13 @@ enum ArchiveCommand {
         /// Zero-pad the number to this width; also starts a series no record has yet.
         #[arg(long)]
         width: Option<usize>,
+        /// Record the number in the main checkout's ignored state, so no other
+        /// worktree gets it (the default with `[lab.archive] model = 2`).
+        #[arg(long, conflicts_with = "peek")]
+        reserve: bool,
+        /// Only print the number; do not reserve it.
+        #[arg(long)]
+        peek: bool,
     },
 }
 
@@ -328,9 +353,27 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                             Some((s.clone(), bytes))
                         }
                     };
-                    Some(brief::Archive {
+                    // An index without a file is printed, not read.
+                    let files = |i: &&config::IndexSpec| a.write_indexes && !i.output.is_empty();
+                    let section = brief::Archive {
                         start,
-                        indexes: a.index.iter().map(|i| i.output.clone()).collect(),
+                        indexes: a
+                            .index
+                            .iter()
+                            .filter(files)
+                            .map(|i| i.output.clone())
+                            .collect(),
+                    };
+                    Some(if a.model >= 2 {
+                        let printed: Vec<String> = a
+                            .index
+                            .iter()
+                            .filter(|i| !files(i))
+                            .map(|i| i.name.clone())
+                            .collect();
+                        brief::archive_model_2(&section, &printed)
+                    } else {
+                        brief::archive(&section)
                     })
                 }
             };
@@ -357,8 +400,14 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     )),
                 }
             });
+            let version = project
+                .lab
+                .min_version
+                .as_deref()
+                .and_then(|min| brief::version_note(env!("CARGO_PKG_VERSION"), min));
             print!(
-                "{}{}",
+                "{}{}{}",
+                version.unwrap_or_default(),
                 brief::render(
                     &project.name,
                     &project.today().to_string(),
@@ -369,12 +418,17 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     n,
                     measurements.as_deref()
                 ),
-                archive.as_ref().map(brief::archive).unwrap_or_default()
+                archive.unwrap_or_default()
             );
             Ok(ExitCode::SUCCESS)
         }
         Command::Archive(cmd) => match cmd {
-            ArchiveCommand::Index => archive::index(&project),
+            ArchiveCommand::Index { print: None } => archive::index(&project),
+            ArchiveCommand::Index { print: Some(name) } => archive::print_index(&project, &name),
+            ArchiveCommand::Done => archive::done(&project),
+            ArchiveCommand::Log { since, record } => {
+                archive::log(&project, since.as_deref(), record.as_deref())
+            }
             ArchiveCommand::Seal { accept, note } => {
                 archive::seal(&project, accept.as_deref().zip(note.as_deref()))
             }
@@ -393,7 +447,19 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     rebuild: false,
                 },
             ),
-            ArchiveCommand::Next { prefix, width } => archive::next(&project, &prefix, width),
+            ArchiveCommand::Next {
+                prefix,
+                width,
+                reserve,
+                peek,
+            } => archive::next(
+                &project,
+                cli.config.as_deref(),
+                &prefix,
+                width,
+                reserve,
+                peek,
+            ),
         },
         Command::Search {
             query,
@@ -509,7 +575,10 @@ recurrence = 3
 
 # The research archive: a short start page, records with optional YAML front matter, indexes
 # generated from it, and append-only files sealed against edits. `lab archive update` writes the
-# indexes and seals; check the archive with the other checks:
+# indexes and seals. Archive model 2 (`model = 2` with `seal = "git"`, `task_from`, `board_export`
+# and `write_indexes = false`; docs/interfaces.md "Archive model 2") makes git the seal, has each
+# record name its board task and kind, and ends a record with `lab archive done`.
+# Check the archive with the other checks:
 # [[lab.checks]]
 # name = "archive"
 # run = ["lab", "archive", "check", "--format", "jsonl"]
