@@ -5,9 +5,12 @@
 //!
 //! Retrieved text is data: nothing here runs or follows what a note says.
 
+mod graph;
 mod index;
 pub(crate) mod learn;
+mod mcp;
 mod missed;
+mod open;
 mod query;
 pub(crate) mod similar;
 mod thesaurus;
@@ -52,6 +55,9 @@ pub struct SearchConfig {
     pub refresh_budget_ms: u64,
     /// How long a query waits for another process that builds the index.
     pub lock_timeout_ms: u64,
+    /// Regular expressions of a citation, each with a group named `key`
+    /// (default: `ref:<key>` and a link to `#reference-<key>`).
+    pub cites: Vec<String>,
     /// The tracked thesaurus file of equivalent terms, relative to the root.
     pub thesaurus: Option<String>,
     /// `lab retro` lists a thesaurus entry that no query used in this many days.
@@ -67,6 +73,7 @@ impl Default for SearchConfig {
             stages: vec![Stage::Lexical],
             refresh_budget_ms: 5_000,
             lock_timeout_ms: 30_000,
+            cites: Vec::new(),
             thesaurus: None,
             review_days: 90,
         }
@@ -157,11 +164,12 @@ impl Stage {
         }
     }
 
-    /// `ready`, `missing` or `failed`.
+    /// `ready`, `missing` or `failed`. An index of this version always holds
+    /// the edge table of `graph`; an older one is rebuilt before a query.
     fn state(self) -> &'static str {
         match self {
-            Self::Lexical => "ready",
-            Self::Dense | Self::Rerank | Self::Graph => "missing",
+            Self::Lexical | Self::Graph => "ready",
+            Self::Dense | Self::Rerank => "missing",
         }
     }
 }
@@ -175,6 +183,8 @@ pub struct Context<'p> {
     notes: FileSet,
     classes: Vec<(Class, FileSet)>,
     inactive_statuses: &'p [String],
+    /// The citation patterns of `[lab.search] cites`.
+    cites: Vec<regex::Regex>,
     /// Where this checkout keeps its index. A linked worktree has its own.
     dir: PathBuf,
     /// Of the configuration the index depends on; a change rebuilds it.
@@ -243,8 +253,8 @@ impl<'p> Context<'p> {
             (Class::Historical, &cfg.classes.historical),
         ];
         let fingerprint = Sha256::digest(format!(
-            "{archive:?}\n{notes:?}\n{:?}\n{:?}",
-            cfg.notes_exclude, cfg.classes
+            "{archive:?}\n{notes:?}\n{:?}\n{:?}\n{:?}",
+            cfg.notes_exclude, cfg.classes, cfg.cites
         ));
         Ok(Self {
             project,
@@ -256,6 +266,7 @@ impl<'p> Context<'p> {
                 .map(|(class, globs)| Ok((class, set(class.as_str(), globs, &[])?)))
                 .collect::<Result<_, String>>()?,
             inactive_statuses: &archive.inactive_statuses,
+            cites: graph::cite_patterns(&cfg.cites)?,
             dir: project.state_dir.join("lab").join("search"),
             fingerprint: fingerprint.iter().map(|b| format!("{b:02x}")).collect(),
             budgeted: true,
@@ -270,6 +281,41 @@ impl<'p> Context<'p> {
     }
 }
 
+/// The graph and date filters of `lab search`.
+#[derive(Debug, Default, Clone, clap::Args)]
+pub struct GraphArgs {
+    /// Only units that cite this reference key (`232` or `ref:232`); without words, list them all.
+    #[arg(long, value_name = "KEY")]
+    pub cites: Option<String>,
+    /// Only units that link this record id or path; without words, list them all.
+    #[arg(long, value_name = "ID_OR_PATH")]
+    pub links_to: Option<String>,
+    /// Rank by the records in force on this date (YYYY-MM-DD); later records are left out.
+    #[arg(long, value_name = "DATE")]
+    pub as_of: Option<String>,
+    /// Only records dated on or after this date (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE")]
+    pub since: Option<String>,
+    /// Only records dated on or before this date (YYYY-MM-DD).
+    #[arg(long, value_name = "DATE")]
+    pub until: Option<String>,
+    /// Show each unit that links a record as a hit of its own, not as an "also in" line.
+    #[arg(long)]
+    pub all: bool,
+}
+
+impl GraphArgs {
+    fn filters(&self) -> graph::Filters {
+        graph::Filters {
+            as_of: self.as_of.clone(),
+            since: self.since.clone(),
+            until: self.until.clone(),
+            cites: self.cites.clone(),
+            links_to: self.links_to.clone(),
+        }
+    }
+}
+
 /// The arguments of `lab search`.
 pub struct Args {
     pub query: Vec<String>,
@@ -280,6 +326,7 @@ pub struct Args {
     pub scopes: Vec<String>,
     pub explain: bool,
     pub rebuild: bool,
+    pub graph: GraphArgs,
     /// A topics file to answer, one query per topic, as a TREC run.
     pub run: Option<PathBuf>,
     /// Where `--run` writes the run; default stdout.
@@ -339,6 +386,8 @@ pub(crate) struct Request<'a> {
     pub rebuild: bool,
     /// Also weigh the terms of the first phrasing, for `similar`.
     pub weigh: bool,
+    /// The graph filters (`--cites`, `--links-to`, dates) and folding.
+    pub graph: &'a GraphArgs,
 }
 
 /// The answer to one query.
@@ -356,23 +405,68 @@ pub(crate) struct Answer {
     pub weights: Vec<(String, f64)>,
 }
 
+impl Answer {
+    /// One line: how the query ended and the stages it ran without.
+    pub fn state_line(&self) -> String {
+        let missing: Vec<&str> = Stage::ALL
+            .into_iter()
+            .filter(|s| s.state() != "ready")
+            .map(|s| s.name())
+            .collect();
+        let mut line = format!("state: {}", self.state.name());
+        if !missing.is_empty() {
+            let _ = write!(line, "; missing stages: {}", missing.join(", "));
+        }
+        for notice in &self.partial {
+            let _ = write!(line, "; {notice}");
+        }
+        line
+    }
+}
+
+/// Several arguments are several phrasings when one of them holds a space;
+/// otherwise they are the words of one.
+pub fn phrasings(query: &[String]) -> Vec<String> {
+    if query.len() > 1 && query.iter().any(|q| q.contains(char::is_whitespace)) {
+        query.to_vec()
+    } else if query.is_empty() {
+        Vec::new()
+    } else {
+        vec![query.join(" ")]
+    }
+}
+
+/// `lab related`.
+pub fn related(
+    project: &Project,
+    name: &str,
+    limit: usize,
+    json: bool,
+) -> Result<ExitCode, String> {
+    graph::run(project, name, limit, json)
+}
+
+/// Lines of text `lab open` prints by default.
+pub const OPEN_LINES: usize = open::DEFAULT_LINES;
+
+/// `lab open`.
+pub fn open(project: &Project, anchor: &str, lines: usize, json: bool) -> Result<ExitCode, String> {
+    open::run(project, anchor, lines, json)
+}
+
+/// `lab mcp`.
+pub fn mcp(project: &Project) -> Result<ExitCode, String> {
+    mcp::run(project)
+}
+
 /// `lab search`. Exit 0 for hits, a partial answer or no hit; `Err` (exit 2)
 /// for a bad query, an unreadable index or a lock timeout.
 pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
     if let Some(topics) = &args.run {
         return topics::run(project, args, topics);
     }
-    // Several arguments are several phrasings when one of them holds a
-    // space; otherwise they are the words of one.
-    let phrasings: Vec<String> =
-        if args.query.len() > 1 && args.query.iter().any(|q| q.contains(char::is_whitespace)) {
-            args.query.clone()
-        } else if args.query.is_empty() {
-            Vec::new()
-        } else {
-            vec![args.query.join(" ")]
-        };
-    if phrasings.is_empty() && args.rebuild {
+    let phrasings = phrasings(&args.query);
+    if phrasings.is_empty() && args.rebuild && !args.graph.filters().lists() {
         check_scopes(&args.scopes)?;
         let ctx = Context::new(project)?;
         let opened = index::open(&ctx, true)?;
@@ -389,6 +483,7 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         statuses: &args.statuses,
         rebuild: args.rebuild,
         weigh: false,
+        graph: &args.graph,
     };
     let mut answer = match traced(project, "cli", &request) {
         Ok(answer) => answer,
@@ -491,7 +586,7 @@ fn check_scopes(scopes: &[String]) -> Result<(), String> {
 }
 
 /// Answers the request and appends its line to the query trace, also when
-/// it fails. `source` says who asked: `cli`, `run` or `similar`.
+/// it fails. `source` says who asked: `cli`, `mcp`, `run` or `similar`.
 pub(crate) fn traced(project: &Project, source: &str, req: &Request) -> Result<Answer, String> {
     let started = Instant::now();
     let answered = execute(project, req);
@@ -546,8 +641,9 @@ pub(crate) fn traced(project: &Project, source: &str, req: &Request) -> Result<A
 
 fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
     check_scopes(req.scopes)?;
-    if req.phrasings.is_empty() {
-        return Err("give the words to search for, or --rebuild".into());
+    let filters = req.graph.filters();
+    if req.phrasings.is_empty() && !filters.lists() {
+        return Err("give the words to search for, --cites, --links-to or --rebuild".into());
     }
     if req.limit == 0 {
         return Err("--limit must be at least 1".into());
@@ -578,14 +674,18 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
             }
         }
     }
-    let opts = query::Options {
-        limit: req.limit,
-        records: req.records,
-        statuses: req.statuses,
-    };
     let mut rebuild = req.rebuild;
     let (outcome, stale, weights) = loop {
         let opened = index::open(&ctx, rebuild)?;
+        let filter = filters.units_sql(&opened.conn)?;
+        let opts = query::Options {
+            limit: req.limit,
+            records: req.records,
+            statuses: req.statuses,
+            filter: filter.as_deref(),
+            as_of: filters.as_of.as_deref(),
+            fold: !req.graph.all,
+        };
         let searched = query::search(&opened.conn, &ctx, &parsed, &opts).and_then(|outcome| {
             let weights = if req.weigh {
                 query::weights(&opened.conn, &parsed[0])?
@@ -703,6 +803,9 @@ fn render(
             if !r.superseded_by.is_empty() {
                 parts.push(format!("superseded by {}", r.superseded_by.join(", ")));
             }
+            if hit.linked_by > 0 {
+                parts.push(format!("linked by {}", hit.linked_by));
+            }
             parts.extend(r.title.clone());
             let _ = writeln!(text, "{}. {}", hit.rank, parts.join(" · "));
         }
@@ -711,6 +814,17 @@ fn render(
             let _ = write!(text, " · {}", hit.heading);
         }
         let _ = writeln!(text, "\n   {}", hit.snippet);
+        if !hit.also_in.is_empty() {
+            let places: Vec<String> = hit
+                .also_in
+                .iter()
+                .map(|a| match a.id.as_ref().or(a.title.as_ref()) {
+                    Some(name) => format!("{name} {}", a.anchor),
+                    None => a.anchor.clone(),
+                })
+                .collect();
+            let _ = writeln!(text, "   also in: {}", places.join("; "));
+        }
         if !hit.missing.is_empty() {
             let _ = writeln!(text, "   missing: {}", hit.missing.join(", "));
         }

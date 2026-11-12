@@ -147,7 +147,7 @@ pub fn report(project: &Project, since: Option<jiff::civil::Date>) -> Result<Str
     let mut out = String::new();
     let queries = lines
         .iter()
-        .filter(|l| matches!(l, Line::Query(q) if q.source == "cli"))
+        .filter(|l| matches!(l, Line::Query(q) if super::trace::asked(&q.source)))
         .count();
     let _ = writeln!(
         out,
@@ -197,7 +197,9 @@ fn unused(project: &Project, lines: &[Line]) -> Result<String, String> {
         .filter_map(|l| match l {
             // Only searches people and agents ran; the duplicate check and
             // topics runs would keep every entry in use.
-            Line::Query(q) if q.source == "cli" => q.at.parse::<Timestamp>().ok().map(|t| (t, q)),
+            Line::Query(q) if super::trace::asked(&q.source) => {
+                q.at.parse::<Timestamp>().ok().map(|t| (t, q))
+            }
             Line::Query(_) | Line::Open(_) => None,
         })
         .collect();

@@ -19,6 +19,12 @@ use super::query::Expansion;
 /// The file, relative to the state directory.
 const FILE: &str = "lab/search-queries.jsonl";
 pub const QUERY_SCHEMA: &str = "rf.search-query/1";
+
+/// Whether a query line was asked by a person or an agent (`lab search`,
+/// `lab archive find`, `lab mcp`), not by `--run` or the duplicate check.
+pub fn asked(source: &str) -> bool {
+    matches!(source, "cli" | "mcp")
+}
 pub const OPEN_SCHEMA: &str = "rf.search-open/1";
 
 /// One unit a stage ranked, with its score.
@@ -172,7 +178,6 @@ pub fn record(project: &Project, line: &QueryLine) {
 
 /// Appends an open line for `anchor`: for a command that reads a hit, such
 /// as `lab open`. A failure is only a notice.
-#[allow(dead_code)]
 pub fn record_open(project: &Project, anchor: &str) {
     let line = OpenLine {
         schema: OPEN_SCHEMA.into(),

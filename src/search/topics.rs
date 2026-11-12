@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use crate::config::Project;
 
-use super::{Args, Request, traced};
+use super::{Args, GraphArgs, Request, traced};
 
 /// Hits per topic unless `--limit` says otherwise.
 const DEFAULT_LIMIT: usize = 10;
@@ -112,6 +112,7 @@ pub fn run(project: &Project, args: &Args, file: &Path) -> Result<ExitCode, Stri
             statuses: &args.statuses,
             rebuild,
             weigh: false,
+            graph: &GraphArgs::default(),
         };
         let answer =
             traced(project, "run", &request).map_err(|e| format!("topic `{}`: {e}", topic.id))?;

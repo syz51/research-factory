@@ -11,7 +11,7 @@ use crate::archive::Spec;
 use crate::config::Project;
 
 use super::query::words;
-use super::{Request, traced};
+use super::{GraphArgs, Request, traced};
 
 /// Records the check reads before it filters.
 const CANDIDATES: usize = 20;
@@ -71,6 +71,7 @@ pub fn similar(project: &Project, subject: &str, exclude: &[String]) -> Outcome 
         statuses: &[],
         rebuild: false,
         weigh: true,
+        graph: &GraphArgs::default(),
     };
     let answer = match traced(project, "similar", &request) {
         Ok(answer) => answer,

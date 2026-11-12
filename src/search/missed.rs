@@ -79,7 +79,7 @@ pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
     let mut targets: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
     for (i, line) in lines.iter().enumerate() {
         let Line::Query(q) = line else { continue };
-        if q.source != "cli" || q.state == "error" {
+        if !super::trace::asked(&q.source) || q.state == "error" {
             continue;
         }
         let Some(at) = time(&q.at) else { continue };
@@ -103,7 +103,7 @@ pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
             reasons.push("partial-hit");
         }
         let next_query = later.iter().find_map(|l| match l {
-            Line::Query(n) if n.source == "cli" => Some(n),
+            Line::Query(n) if super::trace::asked(&n.source) => Some(n),
             _ => None,
         });
         if let Some(n) = next_query {
@@ -117,7 +117,7 @@ pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
         }
         let target = later.iter().find_map(|l| match l {
             Line::Open(o) => Some(path_of(&o.anchor).to_string()),
-            Line::Query(n) if n.source == "cli" && n.complete > 0 => {
+            Line::Query(n) if super::trace::asked(&n.source) && n.complete > 0 => {
                 n.hits.first().map(|h| path_of(h).to_string())
             }
             Line::Query(_) => None,

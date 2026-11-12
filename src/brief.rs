@@ -407,6 +407,30 @@ pub struct Archive {
     pub start: Option<(String, Option<u64>)>,
     /// The generated index files.
     pub indexes: Vec<String>,
+    /// The project's `.mcp.json` runs `lab mcp` (see `lab_mcp_configured`).
+    pub mcp: bool,
+}
+
+/// Whether the project's `.mcp.json` has a server whose command is `lab`
+/// (by file name) with the arguments `["mcp"]`. A missing or unreadable file
+/// means no: the brief then says how to add the server.
+pub fn lab_mcp_configured(root: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(root.join(".mcp.json")) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(servers) = json.get("mcpServers").and_then(|s| s.as_object()) else {
+        return false;
+    };
+    servers.values().any(|s| {
+        let lab = s
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| Path::new(c).file_name().is_some_and(|n| n == "lab"));
+        lab && s.get("args") == Some(&serde_json::json!(["mcp"]))
+    })
 }
 
 /// The brief's closing section for a project with an archive.
@@ -428,11 +452,27 @@ pub fn archive(a: &Archive) -> String {
         }
         None => {}
     }
-    let _ = write!(out, "- Look things up: `lab search <words>`");
+    // The default delivery is the MCP tool: in experiment E4 it was the one
+    // that made agents search (docs/experiments/e4-delivery/README.md).
+    if a.mcp {
+        out.push_str(
+            "- Look things up with the `archive_search` tool before a grep; \
+             `archive_open` reads a hit, `archive_related` lists its neighbours",
+        );
+    } else {
+        out.push_str("- Look things up: `lab search <words>`");
+    }
     if a.indexes.is_empty() {
         out.push_str(".\n");
     } else {
         let _ = writeln!(out, ", or the indexes {}.", a.indexes.join(", "));
+    }
+    if !a.mcp {
+        out.push_str(
+            "- Agents search more through MCP: add \
+             `{\"mcpServers\":{\"lab\":{\"type\":\"stdio\",\"command\":\"lab\",\"args\":[\"mcp\"]}}}` \
+             to `.mcp.json`.\n",
+        );
     }
     out.push_str("- Before finishing: `lab archive update`, then `lab check --new-only`.\n");
     out
@@ -843,6 +883,7 @@ mod tests {
         let a = Archive {
             start: None,
             indexes: Vec::new(),
+            mcp: false,
         };
         let text = archive_model_2(&a, &["decisions".into()]);
         assert!(text.contains("`lab archive index --print <name>`; the names are decisions."));
@@ -855,18 +896,55 @@ mod tests {
         let a = Archive {
             start: Some(("docs/START.md".into(), Some(6246))),
             indexes: vec!["docs/history/INDEX.md".into()],
+            mcp: false,
         };
         assert_eq!(
             archive(&a),
             "\n## Archive\n\n- Read docs/START.md first (6.1 KB).\n\
              - Look things up: `lab search <words>`, or the indexes docs/history/INDEX.md.\n\
+             - Agents search more through MCP: add \
+             `{\"mcpServers\":{\"lab\":{\"type\":\"stdio\",\"command\":\"lab\",\"args\":[\"mcp\"]}}}` \
+             to `.mcp.json`.\n\
              - Before finishing: `lab archive update`, then `lab check --new-only`.\n"
         );
         let missing = archive(&Archive {
             start: Some(("docs/START.md".into(), None)),
             indexes: vec![],
+            mcp: false,
         });
         assert!(missing.contains("The start page docs/START.md does not exist yet"));
         assert!(missing.contains("`lab search <words>`.\n"));
+    }
+
+    #[test]
+    fn archive_section_points_to_the_mcp_tool_when_lab_mcp_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!lab_mcp_configured(tmp.path()));
+        let mcp = tmp.path().join(".mcp.json");
+        std::fs::write(
+            &mcp,
+            r#"{"mcpServers":{"x":{"command":"lab","args":["search"]}}}"#,
+        )
+        .unwrap();
+        assert!(!lab_mcp_configured(tmp.path()));
+        std::fs::write(&mcp, "not json").unwrap();
+        assert!(!lab_mcp_configured(tmp.path()));
+        std::fs::write(
+            &mcp,
+            r#"{"mcpServers":{"archive":{"type":"stdio","command":"/opt/bin/lab","args":["mcp"]}}}"#,
+        )
+        .unwrap();
+        assert!(lab_mcp_configured(tmp.path()));
+
+        let text = archive(&Archive {
+            start: None,
+            indexes: vec![],
+            mcp: true,
+        });
+        assert!(
+            text.contains("the `archive_search` tool before a grep"),
+            "{text}"
+        );
+        assert!(!text.contains(".mcp.json"));
     }
 }

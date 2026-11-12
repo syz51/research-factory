@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::index::{BODY_COLUMN, Fault, WEIGHTS};
 use super::thesaurus::Entry;
-use super::{Class, Context};
+use super::{Class, Context, graph};
 
 /// Candidates taken from each retrieval of one phrasing.
 const CANDIDATES: usize = 100;
@@ -235,6 +235,22 @@ pub struct Hit {
     pub missing: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explain: Option<Explain>,
+    /// How many other notes link the hit's file.
+    pub linked_by: i64,
+    /// Units of other notes that hold the same fact and link this record:
+    /// a log entry or a topic page. `--all` shows them as hits of their own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub also_in: Vec<AlsoIn>,
+}
+
+/// A unit folded under the hit of the record it links.
+#[derive(Debug, Serialize)]
+pub struct AlsoIn {
+    pub anchor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 /// A query word that no unit holds.
@@ -279,6 +295,12 @@ pub struct Options<'a> {
     pub records: bool,
     /// Keep only records with one of these statuses; empty keeps all.
     pub statuses: &'a [String],
+    /// A `SELECT` of the ids of the units the graph and date filters keep.
+    pub filter: Option<&'a str>,
+    /// Rank by the records in force on this date.
+    pub as_of: Option<&'a str>,
+    /// Fold a unit that links a record under that record's hit.
+    pub fold: bool,
 }
 
 /// A unit that one phrasing retrieved.
@@ -317,8 +339,10 @@ fn retrieve(
     ctx: &Context,
     index: usize,
     phrasing: &Phrasing,
-    statuses: &[String],
+    opts: &Options,
+    allowed: Option<&HashSet<i64>>,
 ) -> Result<(Vec<Candidate>, Vec<usize>), Fault> {
+    let statuses = opts.statuses;
     // Unit id to its BM25 score, trigram score and matched terms.
     let mut found: HashMap<i64, (f64, f64, u64)> = HashMap::new();
     let mut known = Vec::new();
@@ -340,8 +364,12 @@ fn retrieve(
     // The status filter is part of each retrieval, so that it applies before
     // the cut to the best candidates.
     let with_status = |column: &str| {
+        let filter = opts
+            .filter
+            .map(|sql| format!(" AND {column} IN ({sql})"))
+            .unwrap_or_default();
         if statuses.is_empty() {
-            return String::new();
+            return filter;
         }
         let list: Vec<String> = statuses
             .iter()
@@ -349,7 +377,7 @@ fn retrieve(
             .collect();
         format!(
             " AND {column} IN (SELECT u.id FROM units u JOIN files f ON f.id = u.file_id \
-             WHERE f.status IN ({}))",
+             WHERE f.status IN ({})){filter}",
             list.join(", ")
         )
     };
@@ -449,51 +477,17 @@ fn retrieve(
             }
         }
     }
-    let mut load = conn.prepare_cached(
-        "SELECT u.file_id, u.start_line, u.end_line, u.heading, u.hash, f.path, f.class, \
-         f.record_id, f.title, f.date, f.status, f.kind, f.task, f.superseded_by \
-         FROM units u JOIN files f ON f.id = u.file_id WHERE u.id = ?1",
-    )?;
     let mut candidates = Vec::new();
     for (unit, (bm25, trigram, matched)) in found {
-        let c = load.query_row([unit], |r| {
-            let class: String = r.get(6)?;
-            let status: Option<String> = r.get(10)?;
-            let superseded_by: String = r.get(13)?;
-            let inactive = status
-                .as_ref()
-                .is_some_and(|s| ctx.inactive_statuses.contains(s));
-            let prior = Class::parse(&class).map_or(1.0, Class::prior)
-                * if inactive { INACTIVE_PRIOR } else { 1.0 };
-            let file = r.get(0)?;
-            Ok(Candidate {
-                unit,
-                file,
-                phrasing: index,
-                exact_id: exact_files.contains(&file),
-                bm25,
-                trigram,
-                matched,
-                prior,
-                fused: 0.0,
-                start: r.get(1)?,
-                end: r.get(2)?,
-                heading: r.get(3)?,
-                hash: r.get(4)?,
-                path: r.get(5)?,
-                record: RecordInfo {
-                    id: r.get(7)?,
-                    title: r.get(8)?,
-                    date: r.get(9)?,
-                    status,
-                    class,
-                    kind: r.get(11)?,
-                    task: r.get(12)?,
-                    inactive,
-                    superseded_by: superseded_by.lines().map(String::from).collect(),
-                },
-            })
-        })?;
+        if allowed.is_some_and(|a| !a.contains(&unit)) {
+            continue;
+        }
+        let mut c = load(conn, ctx, unit, opts.as_of)?;
+        c.phrasing = index;
+        c.exact_id = exact_files.contains(&c.file);
+        c.bm25 = bm25;
+        c.trigram = trigram;
+        c.matched = matched;
         let wanted = statuses.is_empty()
             || c.record
                 .status
@@ -514,6 +508,205 @@ fn retrieve(
     Ok((candidates, unknown))
 }
 
+/// Reads one unit and its record. With `as_of`, a record that is no longer
+/// in force ranks as in force when it was on that date.
+fn load(
+    conn: &Connection,
+    ctx: &Context,
+    unit: i64,
+    as_of: Option<&str>,
+) -> Result<Candidate, Fault> {
+    let mut c = conn
+        .prepare_cached(
+            "SELECT u.file_id, u.start_line, u.end_line, u.heading, u.hash, f.path, f.class, \
+             f.record_id, f.title, f.date, f.status, f.kind, f.task, f.superseded_by \
+             FROM units u JOIN files f ON f.id = u.file_id WHERE u.id = ?1",
+        )?
+        .query_row([unit], |r| {
+            let class: String = r.get(6)?;
+            let status: Option<String> = r.get(10)?;
+            let superseded_by: String = r.get(13)?;
+            let inactive = status
+                .as_ref()
+                .is_some_and(|s| ctx.inactive_statuses.contains(s));
+            Ok(Candidate {
+                unit,
+                file: r.get(0)?,
+                phrasing: 0,
+                exact_id: false,
+                bm25: 0.0,
+                trigram: 0.0,
+                matched: 0,
+                prior: 1.0,
+                fused: 0.0,
+                start: r.get(1)?,
+                end: r.get(2)?,
+                heading: r.get(3)?,
+                hash: r.get(4)?,
+                path: r.get(5)?,
+                record: RecordInfo {
+                    id: r.get(7)?,
+                    title: r.get(8)?,
+                    date: r.get(9)?,
+                    status,
+                    class,
+                    kind: r.get(11)?,
+                    task: r.get(12)?,
+                    inactive,
+                    superseded_by: superseded_by.lines().map(String::from).collect(),
+                },
+            })
+        })?;
+    if c.record.inactive
+        && let Some(id) = &c.record.id
+    {
+        // A successor may name the record in its `supersedes` only.
+        for later in graph::superseded_by(conn, id)? {
+            if !c
+                .record
+                .superseded_by
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&later))
+            {
+                c.record.superseded_by.push(later);
+            }
+        }
+    }
+    if let Some(date) = as_of
+        && c.record.inactive
+        && graph::in_force_on(conn, c.file, date)?
+    {
+        c.record.inactive = false;
+    }
+    if let Some(date) = as_of {
+        // A successor dated after the date did not exist then.
+        let mut kept = Vec::new();
+        for id in std::mem::take(&mut c.record.superseded_by) {
+            let files = graph::files_by_record(conn, &id)?;
+            let later = !files.is_empty()
+                && files
+                    .iter()
+                    .all(|f| f.date.as_deref().is_some_and(|d| d > date));
+            if !later {
+                kept.push(id);
+            }
+        }
+        c.record.superseded_by = kept;
+    }
+    c.prior = Class::parse(&c.record.class).map_or(1.0, Class::prior)
+        * if c.record.inactive {
+            INACTIVE_PRIOR
+        } else {
+            1.0
+        };
+    Ok(c)
+}
+
+/// The units the filter keeps, newest record first, for a query without words.
+fn listed(
+    conn: &Connection,
+    ctx: &Context,
+    opts: &Options,
+    filter: &str,
+) -> Result<Vec<Candidate>, Fault> {
+    let units: Vec<i64> = conn
+        .prepare(&format!(
+            "SELECT u.id FROM units u JOIN files f ON f.id = u.file_id WHERE u.id IN ({filter}) \
+             ORDER BY f.date IS NULL, f.date DESC, f.path, u.start_line"
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    let mut out = Vec::new();
+    for unit in units {
+        let c = load(conn, ctx, unit, opts.as_of)?;
+        if opts.statuses.is_empty()
+            || c.record
+                .status
+                .as_ref()
+                .is_some_and(|s| opts.statuses.contains(s))
+        {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// The letters an id starts with: `DR` of `DR041`, `H` of `H158`.
+fn id_prefix(id: Option<&str>) -> Option<String> {
+    id.map(|id| {
+        id.chars()
+            .take_while(|c| c.is_alphabetic())
+            .collect::<String>()
+            .to_lowercase()
+    })
+}
+
+/// A group of a record's units, and the groups folded under it.
+type Folded = (Vec<Candidate>, Vec<Candidate>);
+
+/// Folds each group whose best unit links the record of another group under
+/// that record, which takes the better place of the two. Two records of one
+/// series (`DR040` and `DR041`) and a pair in a supersession or amendment stay
+/// apart; a record that holds folds is not folded itself.
+fn fold(conn: &Connection, groups: Vec<Vec<Candidate>>) -> Result<Vec<Folded>, Fault> {
+    let mut at: HashMap<&str, usize> = HashMap::new();
+    for (i, g) in groups.iter().enumerate() {
+        at.entry(g[0].path.as_str()).or_insert(i);
+        if let Some(dir) = g[0].path.strip_suffix("/README.md") {
+            at.entry(dir).or_insert(i);
+        }
+    }
+    let mut into: Vec<Option<usize>> = vec![None; groups.len()];
+    for (i, g) in groups.iter().enumerate() {
+        let h = &g[0];
+        for target in graph::links_in(conn, h.file, h.start, h.end)? {
+            let Some(&j) = at.get(target.as_str()) else {
+                continue;
+            };
+            let r = &groups[j][0];
+            if j == i || r.file == h.file || r.record.id.is_none() {
+                continue;
+            }
+            let (hid, rid) = (h.record.id.as_deref(), r.record.id.as_deref());
+            if hid.is_some() && id_prefix(hid) == id_prefix(rid) {
+                continue;
+            }
+            if graph::succession(conn, (h.file, hid), (r.file, rid))? {
+                continue;
+            }
+            into[i] = Some(j);
+            break;
+        }
+    }
+    // A group that receives a fold keeps its place.
+    let receivers: HashSet<usize> = into.iter().flatten().copied().collect();
+    for (i, slot) in into.iter_mut().enumerate() {
+        if receivers.contains(&i) {
+            *slot = None;
+        }
+    }
+    let mut folded: Vec<Vec<Candidate>> = (0..groups.len()).map(|_| Vec::new()).collect();
+    let mut slots: Vec<Option<Vec<Candidate>>> = groups.into_iter().map(Some).collect();
+    for (i, target) in into.iter().enumerate() {
+        if let Some(j) = *target
+            && let Some(mut g) = slots[i].take()
+        {
+            folded[j].push(g.swap_remove(0));
+        }
+    }
+    let mut order = Vec::new();
+    let mut done = HashSet::new();
+    for (i, target) in into.iter().enumerate() {
+        let owner = target.unwrap_or(i);
+        if done.insert(owner)
+            && let Some(g) = slots[owner].take()
+        {
+            order.push((g, std::mem::take(&mut folded[owner])));
+        }
+    }
+    Ok(order)
+}
+
 /// Runs the phrasings and returns the hits to show.
 pub fn search(
     conn: &Connection,
@@ -521,11 +714,19 @@ pub fn search(
     phrasings: &[Phrasing],
     opts: &Options,
 ) -> Result<Outcome, Fault> {
+    let allowed: Option<HashSet<i64>> = match opts.filter {
+        Some(sql) => Some(
+            conn.prepare(sql)?
+                .query_map([], |r| r.get(0))?
+                .collect::<Result<_, _>>()?,
+        ),
+        None => None,
+    };
     // Unit id to the rank and the candidate of the phrasing that ranks it best.
     let mut best: HashMap<i64, (usize, Candidate)> = HashMap::new();
     let mut unknown: Vec<Unknown> = Vec::new();
     for (i, phrasing) in phrasings.iter().enumerate() {
-        let (candidates, absent) = retrieve(conn, ctx, i, phrasing, opts.statuses)?;
+        let (candidates, absent) = retrieve(conn, ctx, i, phrasing, opts, allowed.as_ref())?;
         for (rank, mut c) in candidates.into_iter().enumerate() {
             let share = 1.0 / (RRF_K + rank as f64 + 1.0);
             // The phrasing that ranks a unit best describes it; every phrasing adds its share.
@@ -559,13 +760,19 @@ pub fn search(
             }
         }
     }
-    let mut ranked: Vec<Candidate> = best.into_values().map(|(_, c)| c).collect();
-    ranked.sort_by(|a, b| {
-        b.exact_id
-            .cmp(&a.exact_id)
-            .then(b.fused.total_cmp(&a.fused))
-            .then_with(|| (&a.path, a.start).cmp(&(&b.path, b.start)))
-    });
+    let ranked: Vec<Candidate> = match opts.filter {
+        Some(filter) if phrasings.is_empty() => listed(conn, ctx, opts, filter)?,
+        _ => {
+            let mut ranked: Vec<Candidate> = best.into_values().map(|(_, c)| c).collect();
+            ranked.sort_by(|a, b| {
+                b.exact_id
+                    .cmp(&a.exact_id)
+                    .then(b.fused.total_cmp(&a.fused))
+                    .then_with(|| (&a.path, a.start).cmp(&(&b.path, b.start)))
+            });
+            ranked
+        }
+    };
     let candidates = ranked
         .iter()
         .take(TRACED)
@@ -585,14 +792,30 @@ pub fn search(
         }
     }
     below_successors(&mut groups);
-    let total: usize = groups.iter().map(Vec::len).sum();
+    let groups = if opts.fold {
+        fold(conn, groups)?
+    } else {
+        groups.into_iter().map(|g| (g, Vec::new())).collect()
+    };
+    let total: usize = groups.iter().map(|(g, _)| g.len()).sum();
+    let no_words = Phrasing {
+        terms: Vec::new(),
+        raw: Vec::new(),
+        seq: Vec::new(),
+    };
     let mut hits = Vec::new();
-    for c in groups.into_iter().flatten().take(opts.limit) {
-        let phrasing = &phrasings[c.phrasing];
+    let units = groups.into_iter().flat_map(|(g, also)| {
+        let mut also = Some(also);
+        g.into_iter()
+            .map(move |c| (c, also.take().unwrap_or_default()))
+    });
+    for (c, also) in units.take(opts.limit) {
+        let phrasing = phrasings.get(c.phrasing).unwrap_or(&no_words);
         let held = |i: &usize| c.matched & (1 << i) != 0;
         let (matched, missing): (Vec<usize>, Vec<usize>) =
             (0..phrasing.terms.len()).partition(held);
         let texts = |ids: Vec<usize>| ids.into_iter().map(|i| phrasing.terms[i].text()).collect();
+        let linked_by = graph::linked_by(conn, c.file, &c.path)?;
         hits.push(Hit {
             rank: hits.len() + 1,
             anchor: format!("{}#L{}-L{}", c.path, c.start, c.end),
@@ -617,6 +840,15 @@ pub fn search(
             end: c.end,
             heading: c.heading,
             hash: c.hash,
+            linked_by,
+            also_in: also
+                .into_iter()
+                .map(|a| AlsoIn {
+                    anchor: format!("{}#L{}-L{}", a.path, a.start, a.end),
+                    id: a.record.id,
+                    title: a.record.title,
+                })
+                .collect(),
             record: c.record,
         });
     }
@@ -668,6 +900,13 @@ fn clip(text: &str, chars: usize) -> String {
 
 /// One passage of the unit's body around the query's words.
 fn snippet(conn: &Connection, unit: i64, phrasing: &Phrasing) -> Result<String, Fault> {
+    if phrasing.terms.is_empty() {
+        let body: String =
+            conn.query_row("SELECT body FROM units_fts WHERE rowid = ?1", [unit], |r| {
+                r.get(0)
+            })?;
+        return Ok(clip(&flat(&body), SNIPPET_CHARS));
+    }
     let any = phrasing
         .terms
         .iter()
