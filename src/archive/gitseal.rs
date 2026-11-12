@@ -227,8 +227,8 @@ pub(super) fn taken_on_default(spec: &Spec, records: &[&Record]) -> Result<Vec<P
             &r.path,
             format!(
                 "has id {id}, which {other} also has on {branch}; take a new id from \
-                 `lab archive next <prefix>` and run `lab archive renumber {} <new id>` before \
-                 the merge",
+                 `lab archive next <prefix>` and give it to this record before the merge \
+                 (`lab archive renumber {} <new id>` does it when the record is not sealed)",
                 r.path
             ),
         );

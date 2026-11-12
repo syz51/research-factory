@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::process::ExitCode;
 
-use super::rules::{Seals, Target, resolve};
+use super::rules::{Seals, Target, line_ends_by, resolve};
 use super::seal::Manifest;
 use super::{Record, Spec, Texts, front, gitseal, index, markdown, reserve};
 use crate::config::{Project, SealMode};
@@ -77,6 +77,33 @@ fn pick<'r>(records: &'r [Record], old: &str) -> Result<&'r Record, String> {
     }
 }
 
+/// The rest of a file name after the id at its start: `-mine.md` for
+/// `D003-mine.md`, but nothing for `D0031.md`, whose name holds another id.
+fn after_id<'a>(name: &'a str, id: &str) -> Option<&'a str> {
+    name.strip_prefix(id)
+        .filter(|rest| !rest.starts_with(|c: char| c.is_alphanumeric()))
+}
+
+/// Whether line `line` (from 1) of `file` lies in sealed text. The end of
+/// the sealed text is looked up once per file, since a git seal reads git.
+fn sealed_line(
+    seals: &Seals,
+    ends: &mut BTreeMap<String, Option<usize>>,
+    file: &str,
+    bytes: &[u8],
+    line: usize,
+) -> Result<bool, String> {
+    let end = match ends.get(file) {
+        Some(end) => *end,
+        None => {
+            let end = seals.sealed_end(file, bytes)?;
+            ends.insert(file.to_string(), end);
+            end
+        }
+    };
+    Ok(end.is_some_and(|end| line_ends_by(bytes, line, end)))
+}
+
 /// A destination written as `raw` that resolves to the renamed record, with
 /// its file name and, when the title heading changed, its fragment changed.
 /// `None` when the file name is written in a way this cannot change.
@@ -98,7 +125,7 @@ fn new_dest(
     let segment = &path[start..];
     let segment = if names.0 == names.1 || path.is_empty() {
         segment.to_string()
-    } else if let Some(rest) = segment.strip_prefix(ids.0) {
+    } else if let Some(rest) = after_id(segment, ids.0) {
         format!("{}{rest}", ids.1)
     } else if markdown::percent_decode(segment) == names.0 {
         names.1.to_string()
@@ -275,7 +302,7 @@ pub fn renumber(
         .and_then(|y| front::parse(y, &spec.cfg.statuses).ok())
         .is_some_and(|m| m.id.is_some());
     let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
-    let new_name = match name.strip_prefix(old_id.as_str()) {
+    let new_name = match after_id(name, &old_id) {
         Some(rest) => format!("{new}{rest}"),
         None if explicit => name.to_string(),
         None => {
@@ -362,6 +389,7 @@ pub fn renumber(
             manifest: m,
         },
     };
+    let mut ends = BTreeMap::new();
     let outputs: BTreeSet<&str> = spec.cfg.index.iter().map(|i| i.output.as_str()).collect();
     let files: BTreeSet<&str> = links
         .iter()
@@ -387,7 +415,7 @@ pub fn renumber(
             }
             let at = format!("{file}:{}", link.line);
             let bytes = texts.bytes(&root.join(file))?;
-            if seals.covers(file, &bytes, link.line)? {
+            if sealed_line(&seals, &mut ends, file, &bytes, link.line)? {
                 plan.by_hand.push(format!(
                     "{at}: sealed text links to `{}`; keep it with a [[lab.archive.kept_link]] \
                      entry",
@@ -451,6 +479,19 @@ pub fn renumber(
                         .push(format!("{path}:{}: id {old_id} -> {new}", i + 1));
                 }
             }
+        }
+    }
+    if explicit {
+        let text = own.join("\n");
+        let id = front::split(text.as_bytes())
+            .yaml
+            .and_then(|y| front::parse(y, &spec.cfg.statuses).ok())
+            .and_then(|m| m.id);
+        if id.as_deref() != Some(new) {
+            return Err(format!(
+                "{path}: its front matter gives the id in a form this cannot change; change \
+                 it to `id: {new}` by hand, then rename the file"
+            ));
         }
     }
     if let Some((i, _)) = &heading {
@@ -564,10 +605,27 @@ pub fn renumber(
         // Sealed text keeps its words: nobody changes it.
         let bytes = texts.bytes(&root.join(file))?;
         for line in found {
-            if !seals.covers(file, &bytes, line)? {
+            if !sealed_line(&seals, &mut ends, file, &bytes, line)? {
                 plan.by_hand
                     .push(format!("{shown}:{line}: mentions {old_id}"));
             }
+        }
+    }
+
+    // Config entries that name the record by its path stop matching.
+    if new_path != path {
+        for a in spec.cfg.allow.iter().filter(|a| a.subject == path) {
+            plan.by_hand.push(format!(
+                "the config: [[lab.archive.allow]] entry for `{}` has the subject {path}; \
+                 change it to {new_path}",
+                a.rule
+            ));
+        }
+        if spec.cfg.kept_link.iter().any(|k| k.file == path) {
+            plan.by_hand.push(format!(
+                "the config: [[lab.archive.kept_link]] entries have the file {path}; change it \
+                 to {new_path}"
+            ));
         }
     }
 
@@ -589,12 +647,13 @@ pub fn renumber(
         println!("Dry run: nothing written.");
         return Ok(ExitCode::SUCCESS);
     }
+    // The rename first: when it fails, nothing links to the new path yet.
+    if new_path != path {
+        rename(root, path, &new_path)?;
+    }
     for file in &plan.changed {
         let text = plan.lines[file.as_str()].join("\n");
         if file == path {
-            if new_path != path {
-                rename(root, path, &new_path)?;
-            }
             super::write_atomically(&root.join(&new_path), text.as_bytes())?;
         } else {
             super::write_atomically(&root.join(file), text.as_bytes())?;

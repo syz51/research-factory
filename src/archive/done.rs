@@ -38,11 +38,11 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
         "missing-field" => (Links, "add the field to the record's front matter"),
         "duplicate-id" => (
             Links,
-            "give one of the records a new id: `lab archive renumber <path> <id from lab archive next>`",
+            "give one of the records a new id from `lab archive next <prefix>`; `lab archive renumber <path> <id>` renames one that is not sealed",
         ),
         "id-taken-on-default-branch" => (
             Links,
-            "take a new id from `lab archive next <prefix>` and run `lab archive renumber` before the merge",
+            "take a new id from `lab archive next <prefix>` and rename the record before the merge (`lab archive renumber` when it is not sealed)",
         ),
         "unknown-id" => (
             Links,

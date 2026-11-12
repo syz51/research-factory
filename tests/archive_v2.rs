@@ -1556,3 +1556,64 @@ fn renumber_refuses_sealed_records_and_shared_ids_and_leaves_sealed_links() {
         "{index}"
     );
 }
+
+#[test]
+fn renumber_keeps_a_name_with_a_longer_id_and_names_config_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let config = format!(
+        "{CONFIG}\n[[lab.archive.allow]]\nrule = \"missing-summary\"\nsubject = \"docs/decisions/D006-allowed.md\"\nreason = \"a test\"\n"
+    );
+    archive(d, &config);
+    let proposed = |extra: &str, title: &str| {
+        record(
+            "proposed",
+            "2026-11-12",
+            &format!("kind: decision\n{extra}"),
+            title,
+        )
+    };
+    // The name starts with D0031, another id than D003: it is kept.
+    write(
+        d,
+        "docs/decisions/D0031-tail.md",
+        &proposed("id: D003\ntask: T-3\n", "Tail"),
+    );
+    write(
+        d,
+        "docs/decisions/D005-quoted.md",
+        &proposed("\"id\": D005\ntask: T-5\n", "Quoted"),
+    );
+    write(
+        d,
+        "docs/decisions/D006-allowed.md",
+        &proposed("task: T-6\n", "Allowed"),
+    );
+    commit(d, "three records");
+
+    let out = lab(d, &["archive", "renumber", "D003", "D009"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("renamed"), "{}", stdout(&out));
+    assert!(read(d, "docs/decisions/D0031-tail.md").contains("id: D009\n"));
+
+    // An id line in another form is refused before anything is written.
+    let out = lab(d, &["archive", "renumber", "D005", "D010"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("docs/decisions/D005-quoted.md: its front matter gives the id in a form this cannot change"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(d.join("docs/decisions/D005-quoted.md").exists());
+    assert!(!d.join("docs/decisions/D010-quoted.md").exists());
+
+    let out = lab(d, &["archive", "renumber", "D006", "D011", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains(
+            "by hand the config: [[lab.archive.allow]] entry for `missing-summary` has the subject docs/decisions/D006-allowed.md; change it to docs/decisions/D011-allowed.md"
+        ),
+        "{}",
+        stdout(&out)
+    );
+}
