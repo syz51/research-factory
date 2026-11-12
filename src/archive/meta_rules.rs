@@ -15,13 +15,14 @@ use crate::config::{ArchiveConfig, CONFIG_FILE, Field, SealMode};
 use crate::finding::Severity;
 
 /// The rules an `[[lab.archive.allow]]` entry may name.
-pub(super) const ALLOWED: [&str; 6] = [
+pub(super) const ALLOWED: [&str; 7] = [
     "duplicate-id",
     "missing-summary",
     "unindexed-file",
     "no-current-page",
     "historical-link",
     "task-without-record",
+    "open-item",
 ];
 
 /// How long the board export may run.
