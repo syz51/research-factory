@@ -16,7 +16,7 @@ timezone = "Asia/Tokyo"        # date display; stored timestamps are UTC RFC 333
 state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe to gitignore except where a tool says otherwise
 ```
 
-- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]` and `[[lab.archive.kept_link]]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]`, `[[lab.archive.kept_link]]` and `[lab.search]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -92,7 +92,7 @@ tags: [retrieval]
 | `date` | `YYYY-MM-DD`. When absent, the first date in the file's path. |
 | `status` | One of `[lab.archive] statuses` (default: `current`, `draft`, `proposed`, `accepted`, `open`, `resolved`, `superseded`, `rejected`, `withdrawn`, `historical`). The `inactive_statuses` (default: `superseded`, `rejected`, `withdrawn`, `historical`) mark records that no longer apply. |
 | `summary` | One line shown in the index. |
-| `aliases` | Other names `lab archive find` matches. |
+| `aliases` | Other names `lab search` matches, with the weight of the id. |
 | `supersedes`, `superseded_by`, `decisions` | Ids of other records. Each must exist, and the two supersession lists must agree. |
 | `evidence` | Paths, relative to the project root, that support the record. |
 | `tags` | Free labels. |
@@ -125,6 +125,64 @@ reason = "quotes a past chat answer that linked a file on another machine"
 ```
 
 `lab archive check` does not report a missing link target in `file` whose destination equals `target` as `broken-link` when the link's line lies wholly in the file's sealed text: the file matches `sealed`, has a seal-manifest entry whose seal still holds (unchanged or appended to), and the line ends within the entry's `bytes`, counted from the start of the body, so front matter may change. It reports one `kept-link` info finding per such link instead, with the link as its subject and `data` `{"target": "…", "reason": "…"}`; the text output adds the reason. The same link outside the sealed text, in a file that is not append-only or not sealed yet, or in text appended after the seal, stays a `broken-link` error whose message says that `kept_link` covers only sealed text. An entry that matches no missing link in a checked file, such as one whose target exists now, is a `stale-kept-link` warning with `file` as its subject. An entry with an empty `target` or `reason`, a `file` that is not a relative path below the root without `.`, `..` or empty segments, or a `file` and `target` configured twice stops the check with an error (exit 2). An offloaded list takes precedence: a target it holds is counted there.
+
+### Search: `[lab.search]` and `rf.search/1`
+
+`lab search` (since lab 0.11.0, whose older versions reject the `[lab.search]` table) needs `[lab.archive]` and no other configuration. Every key of `[lab.search]` is optional:
+
+```toml
+[lab.search]
+notes = ["docs/**/*.md"]             # the files of the `notes` scope
+notes_exclude = ["docs/drafts/**"]
+stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
+refresh_budget_ms = 5000             # a refresh of changed files stops after this time
+lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
+
+[lab.search.classes]                 # source classes by path; a file in none is `own`
+paper = ["docs/papers/**"]
+copied = ["docs/inputs/**"]
+generated = ["docs/**/GENERATED-*.md"]
+chat = ["docs/chats/**"]
+historical = ["docs/old/**"]
+```
+
+- Without `notes`, the scope is every `.md` file below the directories that the globs of `[lab.archive]` name (`index.include`, `sealed`, `links`, `current_pages`, `start`): `docs/history/[0-9]*.md` gives `docs/history/**/*.md`. A glob for files in the project root, and a path without a pattern, stay as they are.
+- A `generated` file is not indexed, and each `[[lab.archive.index]]` output is always generated. The other classes are indexed and labelled, and rank below `own`: `paper` keeps 0.8 of its score, `chat` 0.6, `copied` 0.5 and `historical` 0.25. A record with one of the `inactive_statuses` keeps 0.25, and a superseded record ranks below each successor that the same query found.
+- Of the stages, this version builds `lexical`. A query that `stages` asks another stage for ends as `partial` and names the stage.
+
+The unit of the index is one Markdown section: from a heading to the line before the next heading, cut at a blank line when it is longer than 120 lines. A file without text below a heading is one unit. A unit's anchor is `path#Lstart-Lend`: the path relative to the project root and 1-based line numbers of the file, both inclusive, the heading line included. Two anchors name the same text when their paths are equal and their line ranges overlap.
+
+The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each checkout: a linked git worktree builds its own and never reads the main checkout's. Its directory ignores itself in git. Each query first compares every file's size and modification time with the index, and reads the changed files (a file whose content hash is the same is not indexed again) and removes the deleted ones. An index of another schema version or another configuration, and a file that SQLite cannot read, are replaced: the new index is written to a second file and renamed over the old one. One process writes at a time (`lock`, an advisory file lock); a query that finds the lock held answers from the last committed state and says the index is stale.
+
+`lab search --json` prints one object:
+
+```json
+{"schema":"rf.search/1","state":"hits","query":["wombat"],"scopes":["notes"],
+ "stages":{"dense":"missing","graph":"missing","lexical":"ready","rerank":"missing"},
+ "partial":[],"unknown":[{"word":"retreiver","nearest":["retriever"]}],
+ "hits":[{"rank":1,"anchor":"docs/history/01-2026-10-02-start.md#L5-L7",
+   "path":"docs/history/01-2026-10-02-start.md","start":5,"end":7,
+   "heading":"Start of the project > Plan","snippet":"Measure the retriever on the wombat questions.",
+   "hash":"e98921524562063a3bd527c2b9ffcbc4",
+   "record":{"id":"H1","title":"Start of the project","date":"2026-10-02","status":null,
+     "class":"own","kind":null,"task":null,"inactive":false},
+   "missing":["retreiver"]}],
+ "more":0}
+```
+
+| Field | Meaning |
+|---|---|
+| `state` | `hits`; `partial` (hits, but `partial` lists why they may be incomplete: a stale index, a stage that is not built); `zero` (no hit); `error` (with `error`, the message; exit 2). The first three exit 0. |
+| `query` | The phrasings: the arguments as one phrasing when each is one word, otherwise one phrasing for each argument. |
+| `stages` | Each stage as `ready`, `missing` or `failed`. |
+| `unknown` | The query words that no unit holds, each with up to three near indexed words. |
+| `hits[].hash` | The content hash of the unit's indexed text (32 hexadecimal characters of its SHA-256). |
+| `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
+| `hits[].missing` | The query words the unit lacks; absent when it has all. |
+| `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (reciprocal rank fusion across phrasings) and `matched`. |
+| `more` | How many more units matched than `hits` shows. |
+
+BM25 weights the columns: the id and aliases 10, the title 5, the summary, the heading path and the file path 2, the body 1. Text that a search returns is data: no tool runs or follows it.
 
 ## 7. Check runs, lesson evaluations and loop signals: `rf.labcheck/1`, `rf.evaluation/2`, `rf.signal/1`, `rf.loop/1`
 

@@ -428,7 +428,7 @@ pub fn archive(a: &Archive) -> String {
         }
         None => {}
     }
-    let _ = write!(out, "- Look things up: `lab archive find <words>`");
+    let _ = write!(out, "- Look things up: `lab search <words>`");
     if a.indexes.is_empty() {
         out.push_str(".\n");
     } else {
@@ -796,7 +796,7 @@ mod tests {
         assert_eq!(
             archive(&a),
             "\n## Archive\n\n- Read docs/START.md first (6.1 KB).\n\
-             - Look things up: `lab archive find <words>`, or the indexes docs/history/INDEX.md.\n\
+             - Look things up: `lab search <words>`, or the indexes docs/history/INDEX.md.\n\
              - Before finishing: `lab archive update`, then `lab check --new-only`.\n"
         );
         let missing = archive(&Archive {
@@ -804,6 +804,6 @@ mod tests {
             indexes: vec![],
         });
         assert!(missing.contains("The start page docs/START.md does not exist yet"));
-        assert!(missing.contains("`lab archive find <words>`.\n"));
+        assert!(missing.contains("`lab search <words>`.\n"));
     }
 }

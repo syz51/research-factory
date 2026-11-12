@@ -58,6 +58,9 @@ pub struct LabConfig {
     /// The research archive that `lab archive` indexes and checks.
     #[serde(default)]
     pub archive: Option<ArchiveConfig>,
+    /// What `lab search` indexes and how it ranks.
+    #[serde(default)]
+    pub search: crate::search::SearchConfig,
     /// How `lab evaluate` decides whether a lesson helped.
     #[serde(default)]
     pub evaluate: EvaluateConfig,
@@ -75,6 +78,7 @@ impl Default for LabConfig {
             agent_sessions: None,
             recurrence: default_recurrence(),
             archive: None,
+            search: crate::search::SearchConfig::default(),
             evaluate: EvaluateConfig::default(),
             lesson_loop: None,
         }

@@ -208,7 +208,9 @@ fn update_generates_indexes_and_seals_then_check_passes() {
         "{brief}"
     );
     assert!(
-        brief.contains("`lab archive find <words>`, or the indexes docs/decisions/INDEX.md, docs/history/INDEX.md."),
+        brief.contains(
+            "`lab search <words>`, or the indexes docs/decisions/INDEX.md, docs/history/INDEX.md."
+        ),
         "{brief}"
     );
 }
@@ -413,34 +415,12 @@ fn find_and_next() {
         "---\ntitle: Mentions D002\nstatus: draft\n---\n",
     );
 
+    // `lab archive find` is `lab search --in notes --records` (tests/search.rs).
     let find = lab(d, &["archive", "find", "d002"]);
     assert!(find.status.success(), "{}", stderr(&find));
-    assert_eq!(
-        stdout(&find),
-        "D002\t-\taccepted\tdocs/decisions/D002-use-bm25.md\tUse BM25\n\
-         D010\t-\tdraft\tdocs/decisions/D010-d.md\tMentions D002\n"
-    );
-    let alias = stdout(&lab(d, &["archive", "find", "lexical", "BASELINE"]));
-    assert!(alias.starts_with("D002\t"), "{alias}");
-    let h = stdout(&lab(d, &["archive", "find", "pilot"]));
-    assert_eq!(
-        h,
-        "H2\t2026-10-03\t-\tdocs/history/02-2026-10-03-pilot.md\tPilot run\n"
-    );
-    let limited = lab(d, &["archive", "find", "docs", "--limit", "1"]);
-    assert_eq!(stdout(&limited).lines().count(), 1);
-    assert!(
-        stderr(&limited).contains("more match(es)"),
-        "{}",
-        stderr(&limited)
-    );
-    let none = lab(d, &["archive", "find", "zebra"]);
-    assert_eq!(none.status.code(), Some(1));
-    assert!(
-        stderr(&none).contains("decisions (docs/decisions/INDEX.md)"),
-        "{}",
-        stderr(&none)
-    );
+    let search = lab(d, &["search", "--in", "notes", "--records", "d002"]);
+    assert_eq!(stdout(&find), stdout(&search));
+    assert!(stdout(&find).starts_with("1. D002 "), "{}", stdout(&find));
 
     assert_eq!(stdout(&lab(d, &["archive", "next", "H"])), "H3\n");
     assert_eq!(stdout(&lab(d, &["archive", "next", "D"])), "D011\n");

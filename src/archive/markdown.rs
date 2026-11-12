@@ -73,7 +73,7 @@ fn unescape(s: &str) -> String {
 }
 
 /// A fence opening: its character and length, when `line` opens one.
-fn fence_open(line: &str) -> Option<(u8, usize)> {
+pub fn fence_open(line: &str) -> Option<(u8, usize)> {
     let t = line.trim_start().as_bytes();
     let c = *t.first()?;
     if c != b'`' && c != b'~' {
@@ -83,7 +83,7 @@ fn fence_open(line: &str) -> Option<(u8, usize)> {
     (n >= 3 && (c == b'~' || !t[n..].contains(&b'`'))).then_some((c, n))
 }
 
-fn fence_closes(line: &str, (c, n): (u8, usize)) -> bool {
+pub fn fence_closes(line: &str, (c, n): (u8, usize)) -> bool {
     let t = line.trim().as_bytes();
     t.len() >= n && t.iter().all(|&b| b == c)
 }
@@ -308,7 +308,7 @@ fn strip_comments(line: &str, mut in_comment: bool) -> String {
 }
 
 /// An ATX heading's level and text.
-fn atx(line: &str) -> Option<(usize, &str)> {
+pub fn atx(line: &str) -> Option<(usize, &str)> {
     let indent = line.bytes().take_while(|&c| c == b' ').count();
     if indent > 3 {
         return None;
@@ -376,7 +376,7 @@ static SHORTCODE: LazyLock<Regex> =
 /// The text GitHub renders for a heading: link text without destinations, no
 /// HTML tags, `{#id}` or emoji shortcodes, and no emphasis underscores
 /// (intraword ones stay).
-fn heading_text(raw: &str) -> String {
+pub fn heading_text(raw: &str) -> String {
     let t = ATTR_ID.replace_all(raw, "");
     let t = LINK_TEXT.replace_all(t.trim(), "$1");
     let t = HTML_TAG.replace_all(&t, "");
