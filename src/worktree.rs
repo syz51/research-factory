@@ -137,6 +137,13 @@ impl Fallback {
         Ok(self.resolve([rel])?.pop_first().map(|p| self.main.join(p)))
     }
 
+    /// `rel` in the main checkout when git ignores it in the worktree: for
+    /// state that every checkout of the project shares, such as the search
+    /// trace. It may not exist yet.
+    pub fn shared(&self, rel: &str) -> Result<Option<PathBuf>, String> {
+        Ok(self.ignored([rel])?.pop_first().map(|p| self.main.join(p)))
+    }
+
     /// The ignored ones of `paths`, from one `git check-ignore --stdin`.
     fn ignored<'a>(
         &self,

@@ -611,7 +611,8 @@ pub fn update(project: &Project) -> Result<ExitCode, String> {
 /// `lab archive check`: every rule, read-only.
 pub fn check(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     let spec = Spec::new(project)?;
-    let problems = rules::problems(&spec)?;
+    let mut problems = rules::problems(&spec)?;
+    problems.extend(similar_problems(&spec));
     let errors = problems
         .iter()
         .filter(|p| p.severity == Severity::Error)
@@ -641,6 +642,52 @@ pub fn check(project: &Project, jsonl: bool) -> Result<ExitCode, String> {
     }
     Ok(exit(errors == 0))
 }
+/// The duplicate check of each new record file (untracked or added in git):
+/// a warning when other records share most of its title's words, a note
+/// when the search failed. Never an error.
+fn similar_problems(spec: &Spec) -> Vec<Problem> {
+    use crate::search::similar;
+    let project = spec.project;
+    let new = similar::new_files(&project.root);
+    let records: Vec<String> = new
+        .into_iter()
+        .filter(|p| p.ends_with(".md") && spec.indexes.iter().any(|ix| ix.files.matches(p)))
+        .collect();
+    let mut problems = Vec::new();
+    // A new record is compared with the records that already exist.
+    for path in &records {
+        let outcome = match similar::subject_of(project, path) {
+            Ok(subject) => similar::similar(project, &subject, &records),
+            Err(e) => similar::Outcome::Skipped(e),
+        };
+        match outcome {
+            similar::Outcome::Found(found) if found.is_empty() => {}
+            similar::Outcome::Found(found) => {
+                let names: Vec<String> = found
+                    .iter()
+                    .map(|s| s.id.clone().unwrap_or_else(|| s.path.clone()))
+                    .collect();
+                problems.push(Problem::new(
+                    "similar-record",
+                    Severity::Warn,
+                    path,
+                    format!(
+                        "a new record on the same topic as {}: extend or link one of them, or keep both on purpose",
+                        names.join(", ")
+                    ),
+                ));
+            }
+            similar::Outcome::Skipped(why) => problems.push(Problem::new(
+                "similar-skipped",
+                Severity::Info,
+                path,
+                format!("duplicate check skipped: {why}"),
+            )),
+        }
+    }
+    problems
+}
+
 /// The first record of each path (a file can belong to several indexes).
 fn unique_refs<'r>(records: &[&'r Record]) -> Vec<&'r Record> {
     let mut seen = BTreeSet::new();
