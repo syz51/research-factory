@@ -779,3 +779,52 @@ fn a_status_filter_reaches_past_the_best_candidates_and_an_id_may_carry_punctuat
     let explained = json(d, &["--explain", "D002, pilot?"]);
     assert_eq!(explained["hits"][0]["explain"]["exact_id"], true);
 }
+
+#[test]
+fn a_query_during_a_rebuild_exits_0_and_leaves_no_stray_file() {
+    let dir = fixture();
+    let d = dir.path();
+    assert_eq!(json(d, &["wombat"])["state"], "hits");
+    let index = d.join(".research/lab/search");
+    for round in 0..8 {
+        // A changed source makes the query's refresh write, so it can meet the rename.
+        write(
+            d,
+            "docs/history/04-2026-10-05-new.md",
+            &format!("# New\n\nA quokka, round {round}.\n"),
+        );
+        let spawn = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_lab"))
+                .args(args)
+                .current_dir(d)
+                .output()
+        };
+        let (rebuild, query) = std::thread::scope(|s| {
+            let rebuild = s.spawn(|| spawn(&["search", "--rebuild"]));
+            let query = s.spawn(|| spawn(&["search", "--json", "quokka"]));
+            (
+                rebuild.join().unwrap().unwrap(),
+                query.join().unwrap().unwrap(),
+            )
+        });
+        assert_eq!(rebuild.status.code(), Some(0), "{}", stderr(&rebuild));
+        assert_eq!(query.status.code(), Some(0), "{}", stderr(&query));
+        // The query sees the changed source, or says that the build holds it back.
+        let report: Value = serde_json::from_str(&stdout(&query)).unwrap();
+        let waited = report["partial"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("another process is updating"));
+        assert!(
+            waited || paths(&report) == ["docs/history/04-2026-10-05-new.md"],
+            "round {round}: {report}"
+        );
+    }
+    let mut left: Vec<String> = std::fs::read_dir(&index)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, [".gitignore", "index.db", "lock"]);
+}

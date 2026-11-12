@@ -21,7 +21,7 @@ use super::sources::{self, Doc, Loader, Resolver};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
@@ -477,6 +477,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
         index_doc(ctx, &tx, &mut loader, c.doc, c.existing)?;
         left -= 1;
     }
+    graph::drop_orphan_anchors(&tx)?;
     set_built(&tx, &have.iter().chain(&ctx.scopes).copied().collect())?;
     sync_words(&tx)?;
     tx.commit()?;
@@ -665,6 +666,92 @@ fn index_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Project;
+
+    fn write(root: &Path, rel: &str, text: &str) {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn a_path_removed_and_indexed_again_in_one_refresh_keeps_its_anchors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n",
+        );
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts.\n");
+        write(root, "docs/b.md", "# Hare\n\nThe hare runs.\n");
+        let project = Project::discover(root, None).unwrap();
+        let ctx = Context::new(&project, vec![Scope::Notes]).unwrap();
+        let mut conn = open(&ctx, false).unwrap().conn;
+        let id = |conn: &Connection, path: &str| -> i64 {
+            conn.query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
+                .unwrap()
+        };
+        let anchors = |conn: &Connection, path: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM old_anchors WHERE path = ?1",
+                [path],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // As a refresh does when a path leaves one scope and enters another:
+        // the source of one scope is gone, the other's is new.
+        let tx = conn.transaction().unwrap();
+        let (a, b) = (id(&tx, "docs/a.md"), id(&tx, "docs/b.md"));
+        remove_file(&tx, a).unwrap();
+        remove_file(&tx, b).unwrap();
+        let listed = sources::list(&ctx, Scope::Notes, &mut Resolver::new(root).unwrap()).unwrap();
+        let doc = listed.docs.iter().find(|d| d.key == "docs/a.md").unwrap();
+        index_doc(&ctx, &tx, &mut Loader::new(&ctx), doc, None).unwrap();
+        graph::drop_orphan_anchors(&tx).unwrap();
+        tx.commit().unwrap();
+        assert!(anchors(&conn, "docs/a.md") > 0);
+        // A path that no source holds loses them.
+        assert_eq!(anchors(&conn, "docs/b.md"), 0);
+    }
+
+    #[test]
+    fn a_refresh_on_a_connection_whose_file_a_build_replaced_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(
+            root,
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n",
+        );
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts.\n");
+        let project = Project::discover(root, None).unwrap();
+        let ctx = Context::new(&project, vec![Scope::Notes]).unwrap();
+        drop(open(&ctx, false).unwrap());
+        // This process opens the index; another one then renames a new build over it.
+        let mut held = open_current(&ctx).unwrap().unwrap();
+        let old_build = build_of(&held).unwrap();
+        assert!(build(&ctx, true).unwrap().is_some());
+        // A changed source makes the refresh write.
+        write(root, "docs/a.md", "# Lynx\n\nThe lynx hunts the hare.\n");
+        assert!(matches!(refresh(&ctx, &mut held), Err(Fault::Replaced)));
+        // The write did not go to the unlinked file the connection holds.
+        assert_eq!(build_of(&held).unwrap(), old_build);
+        let stamp: String = held
+            .query_row(
+                "SELECT stamp FROM files WHERE path = 'docs/a.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(Some(stamp), sources::file_stamp(&root.join("docs/a.md")));
+        // `open` answers the fault by opening the new file and refreshing it.
+        let opened = open(&ctx, false).unwrap();
+        assert!(opened.stale.is_none());
+        assert_ne!(build_of(&opened.conn).unwrap(), old_build);
+        assert!(!ctx.dir.join("index.db-journal").exists());
+    }
 
     #[test]
     fn the_weights_rank_title_and_heading_first_then_body_then_ids_and_meta_then_summary() {

@@ -259,45 +259,59 @@ fn file_by_id(conn: &Connection, id: i64) -> Result<FileNode, String> {
 }
 
 /// Finds the text that the anchor `a`-`b` held before its file changed: the
-/// unit with the content hash that the anchor's unit had then.
+/// unit with the content hash that the anchor's unit had then. A range that
+/// held several texts in past versions finds the latest one still in the file.
 fn relocate(
     conn: &Connection,
     file: &FileNode,
     a: usize,
     b: usize,
 ) -> Result<(Option<Unit>, Option<String>), String> {
-    let old: Option<String> = conn
-        .query_row(
-            "SELECT hash FROM old_anchors WHERE path = ?1 AND start_line = ?2 AND end_line = ?3",
-            params![file.path, a as i64, b as i64],
-            |r| r.get(0),
+    let old: Vec<String> = conn
+        .prepare_cached(
+            "SELECT hash FROM old_anchors WHERE path = ?1 AND start_line = ?2 AND end_line = ?3 \
+             ORDER BY version DESC",
         )
-        .optional()
+        .and_then(|mut stmt| {
+            stmt.query_map(params![file.path, a as i64, b as i64], |r| r.get(0))?
+                .collect()
+        })
         .map_err(db)?;
     let fallback = Unit {
         start: a,
         end: b,
         heading: String::new(),
     };
-    let Some(hash) = old else {
+    if old.is_empty() {
         // A range that was never a unit: print it as asked.
         return Ok((Some(fallback), None));
-    };
-    match unit_where(conn, "file_id = ?1 AND hash = ?2", params![file.id, hash]).map_err(db)? {
-        Some((_, u)) => {
-            let why = format!(
-                "the file changed; the text of L{a}-L{b} moved to L{}-L{} (same content hash)",
-                u.start, u.end
-            );
-            Ok((Some(u), Some(why)))
-        }
-        None => Ok((
-            Some(fallback),
-            Some(format!(
-                "the file changed and the text of L{a}-L{b} is gone; these are its lines now"
-            )),
-        )),
     }
+    for (i, hash) in old.iter().enumerate() {
+        if let Some((_, u)) =
+            unit_where(conn, "file_id = ?1 AND hash = ?2", params![file.id, hash]).map_err(db)?
+        {
+            // The range's later texts are gone, and the anchor may have been
+            // made for one of them: say that this is an earlier one.
+            let why = if i == 0 {
+                format!(
+                    "the file changed; the text of L{a}-L{b} moved to L{}-L{} (same content hash)",
+                    u.start, u.end
+                )
+            } else {
+                format!(
+                    "the file changed; the latest text of L{a}-L{b} is gone, and the text it held {i} version(s) earlier moved to L{}-L{} (same content hash)",
+                    u.start, u.end
+                )
+            };
+            return Ok((Some(u), Some(why)));
+        }
+    }
+    Ok((
+        Some(fallback),
+        Some(format!(
+            "the file changed and the text of L{a}-L{b} is gone; these are its lines now"
+        )),
+    ))
 }
 
 /// `lab open`.

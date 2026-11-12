@@ -168,3 +168,74 @@ fn an_old_anchor_finds_its_text_after_a_front_matter_edit_moved_it() {
     assert_eq!(unit["anchor"], format!("{DR001}#L12-L43"), "{unit}");
     assert_eq!(unit["lines"][0], "## Table");
 }
+
+const DR003: &str = "docs/decisions/DR003-anchors.md";
+
+fn dr003(body: &str) -> String {
+    format!("---\ntitle: Anchors\nstatus: accepted\n---\n# DR003\n\n{body}")
+}
+
+const ALPHA: &str = "## Alpha\n\nThe alpha text.\n\n";
+const GAMMA: &str = "## Gamma\n\nThe gamma text.\n\n";
+const BETA: &str = "## Beta\n\nThe beta text.\n";
+
+/// The rows `old_anchors` holds for a path, their distinct versions, and the
+/// units the path has now.
+fn old_anchors(dir: &Path, path: &str) -> (i64, i64, i64) {
+    let db = rusqlite::Connection::open(dir.join(".research/lab/search/index.db")).unwrap();
+    db.query_row(
+        "SELECT count(*), count(DISTINCT version), \
+         (SELECT count(*) FROM units u JOIN files f ON f.id = u.file_id WHERE f.path = ?1) \
+         FROM old_anchors WHERE path = ?1",
+        [path],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_anchor_finds_its_text_across_two_edits_and_old_versions_are_bounded() {
+    let dir = fixture();
+    let d = dir.path();
+    write(d, DR003, &dr003(&format!("{ALPHA}{BETA}")));
+    let alpha = json(d, &["open", &format!("{DR003}:9")]);
+    assert_eq!(alpha["lines"][0], "## Alpha", "{alpha}");
+    let anchor = alpha["anchor"].as_str().unwrap().to_string();
+    // Edit 1: Gamma takes the lines Alpha had; the anchor opens Gamma.
+    write(d, DR003, &dr003(&format!("{GAMMA}{ALPHA}{BETA}")));
+    let unit = json(d, &["open", &anchor]);
+    assert_eq!(unit["lines"][0], "## Gamma", "{unit}");
+    // Edit 2: Gamma is gone and Alpha moved down. The range's latest text is
+    // gone, so the anchor finds the text it held one version earlier.
+    write(
+        d,
+        DR003,
+        &dr003(&format!("An intro.\n\nMore intro.\n\n{ALPHA}{BETA}")),
+    );
+    let unit = json(d, &["open", &anchor]);
+    assert_eq!(unit["lines"][0], "## Alpha", "{unit}");
+    assert!(
+        unit["notice"].as_str().unwrap().contains(
+            "the latest text of L7-L9 is gone, and the text it held 1 version(s) earlier moved to"
+        ),
+        "{unit}"
+    );
+    assert_ne!(unit["anchor"], anchor);
+    // Twelve more edits keep the anchors of the last ten versions only.
+    for i in 0..12 {
+        let intro = "Intro.\n\n".repeat(i + 3);
+        write(d, DR003, &dr003(&format!("{intro}{ALPHA}{BETA}")));
+        ok(d, &["open", &anchor]);
+    }
+    // Each version had as many units as the file has now.
+    let (rows, versions, units) = old_anchors(d, DR003);
+    assert_eq!(versions, 10);
+    assert!(
+        rows > units && rows <= 10 * units,
+        "{rows} rows, {units} units"
+    );
+    // A file whose source is gone keeps no anchor.
+    std::fs::remove_file(d.join(DR003)).unwrap();
+    ok(d, &["search", "wombat"]);
+    assert_eq!(old_anchors(d, DR003), (0, 0, 0));
+}
