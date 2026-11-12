@@ -32,7 +32,7 @@ STOP = set(
     who what when where which why with this that these those from into onto than then them
     they their there here been being does did doing done also only such each more most
     other some very just over under about after before between both same own whether
-    while would could should will shall may might must per via its it's
+    while would could should will shall may might must per via
     """.split()
 )
 

@@ -120,9 +120,9 @@ Paired correct answers, 30 pairs: both 3, `cli` only 3, `mcp` only 6, neither 18
 | T19 | 1/2 | 1/2 |
 
 - **Below ceiling.** Fresh `cli` sessions answered 6 of 30 correctly (20%), so these topics are not at ceiling. Screening did not just catch chance failures.
-- **Correct answers.** `mcp` answered 9 of 30, 3 more than `cli`. The difference is not significant: 6 discordant pairs favour `mcp` and 3 favour `cli`, exact McNemar p=0.51. With 9 discordant pairs, only a split of 9-0 would reach p<0.05 (p=0.004); 8-1 gives p=0.04. By topic, `mcp` did better on 5 topics and worse on 3.
+- **Correct answers.** `mcp` answered 9 of 30, 3 more than `cli`. The difference is not significant: 6 discordant pairs favour `mcp` and 3 favour `cli`, exact McNemar p=0.51. With 9 discordant pairs, only a split of 8-1 (p=0.039) or 9-0 (p=0.004) would reach p<0.05. By topic, `mcp` did better on 5 topics and worse on 3.
 - **Not search against grep.** `cli` also searched, with `lab search` in 24 of 30 sessions. So round 2 compares the MCP tools with the same search run from the shell, more than it compares search with grep.
-- **Neither correct in 18 pairs.** Seven topics failed in all four sessions. A phrasing can be broader than its `need`: the key grades the record that states the present status, and a phrasing such as a short query may also match older records. Part of these failures may be prompts that the key does not fit, not misses of either delivery.
+- **Neither correct in 18 pairs.** Six topics failed in all four sessions: K03, K08, K17, K28, T09 and T18. A phrasing can be broader than its `need`: the key grades the record that states the present status, and a phrasing such as a short query may also match older records. Part of these failures may be prompts that the key does not fit, not misses of either delivery.
 - **Cost.** `mcp` took 2.1 more tool calls and 23% more tokens over all calls. Its notional cost was 29% higher, but that figure is confounded: the `cli` comparison sessions started right after the 132 `cli` screening sessions, with the same prompt-cache prefix, so they wrote fewer cache tokens (12,272 against 17,214 per session).
 
 ## Conclusion
@@ -150,7 +150,7 @@ The board's weekly usage reading went from 88% before the pilot to 90% after the
 
 - Round 2 has 15 topics, not 20, and 30 pairs. Its power is low; see the conclusion.
 - The pairs within a topic are not independent: both replicates share the topic and the prompt. The McNemar tests treat the 48 and 30 pairs as independent. The topic-level sign test does not, and it agrees (p=1 in both rounds).
-- One model, one archive, one answer key. `correct` is graded by file, from the paths the answer names, as in E4. In K12, all four round-1 sessions cited a record that the key does not judge.
+- One model, one archive, one answer key. `correct` is graded by file, from the paths the answer names, as in E4. In K12, all four round-1 sessions cited a record that the key does not judge. Over all E4b sessions, some wrong answers cite only unjudged files: 4 of 8 in round 1, 3 of 17 in screening, 8 of 45 in the round-2 comparison. If any of those files is relevant, the correct counts are too low. research-factory-342 proposes to judge them.
 - Round 2's prompts are the test set's phrasings, whose grades were made for the `need`. See "Neither correct in 18 pairs".
 - Round 2's cost is confounded by the screening run before it (see "Cost" above). Round 1's is not: each condition started first in 12 sessions.
 - The start position comes from `order.log`. Sessions of one topic start within the same second, so the position is the order in which `xargs` started them.
