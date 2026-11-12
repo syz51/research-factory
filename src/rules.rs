@@ -46,6 +46,7 @@ pub const RULES: &[Rule] = &[
     rule("missing-summary", Warn),
     rule("missing-task", Error),
     rule("no-current-page", Warn),
+    rule("open-item", Error),
     rule("seal-unverified", Error),
     rule("sealed-edited", Error),
     rule("sealed-missing", Error),

@@ -101,6 +101,10 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
         ),
         "missing-kind" => (Task, "add `kind:` to the record's front matter"),
         "unknown-task" => (Task, "correct the `task` id; the board does not list it"),
+        "open-item" => (
+            Task,
+            "add the id of the board task that holds the item, or `no action: <reason>`",
+        ),
         "task-without-record" => (
             Task,
             "write the record of the task, or add `task: <id>` to the record that holds its result",
