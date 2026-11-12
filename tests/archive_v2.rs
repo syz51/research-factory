@@ -836,6 +836,27 @@ fn done_is_the_completion_gate_and_writes_no_index_file() {
 }
 
 #[test]
+fn done_brings_the_search_index_up_to_date_past_the_refresh_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    archive(
+        d,
+        &(CONFIG.to_string() + "\n[lab.search]\nrefresh_budget_ms = 0\n"),
+    );
+    let out = lab(d, &["archive", "done"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    // A changed file: a query's refresh would stop at the budget of 0 ms.
+    append(d, D002, "\nA wombat appears.\n");
+    let out = lab(d, &["archive", "done"]);
+    let text = stdout(&out) + &stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}");
+    assert!(text.contains("search index: up to date"), "{text}");
+    let out = lab(d, &["search", "wombat", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["state"], "hits", "{report}");
+}
+
+#[test]
 fn done_fails_only_on_findings_outside_the_baseline() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();
