@@ -4,7 +4,7 @@
 //! touches fail the gate; the others are counted apart.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use crate::check::{Delta, Item, Run};
 use crate::config::Project;
@@ -254,7 +254,8 @@ fn looks_like_path(s: &str) -> bool {
 }
 
 /// `p`, as a checker run in `cwd` (relative to the project root) printed it,
-/// relative to the project root; `None` for an absolute path outside it.
+/// relative to the project root, without `.` and `..` parts, as git names
+/// files; `None` for a path outside the project root.
 fn relative(root: &Path, cwd: Option<&str>, p: &str) -> Option<String> {
     let path = Path::new(p);
     let rel = if path.is_absolute() {
@@ -265,8 +266,24 @@ fn relative(root: &Path, cwd: Option<&str>, p: &str) -> Option<String> {
             None => path.to_path_buf(),
         }
     };
-    let rel = rel.to_string_lossy();
-    Some(rel.strip_prefix("./").unwrap_or(&rel).to_string())
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for c in rel.components() {
+        match c {
+            Component::Normal(s) => parts.push(s),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!parts.is_empty()).then(|| {
+        parts
+            .iter()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned()
+    })
 }
 
 /// The first line number after a path's `:`, as in `docs/a.md:42` or
@@ -284,4 +301,28 @@ fn line_of(subject: &str) -> Option<usize> {
 /// Sorts places by file, then by line number.
 fn sort_key(place: &str) -> (&str, usize, &str) {
     (without_line(place), line_of(place).unwrap_or(0), place)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_paths_are_normalized_as_git_names_files() {
+        let root = Path::new("/p");
+        assert_eq!(relative(root, None, "./a.md").as_deref(), Some("a.md"));
+        assert_eq!(relative(root, Some("."), "a.md").as_deref(), Some("a.md"));
+        assert_eq!(
+            relative(root, Some("docs"), "./a.md").as_deref(),
+            Some("docs/a.md")
+        );
+        assert_eq!(
+            relative(root, Some("docs"), "../README.md").as_deref(),
+            Some("README.md")
+        );
+        assert_eq!(relative(root, None, "../shared/9.txt"), None);
+        assert_eq!(relative(root, None, "/p/b/c.md").as_deref(), Some("b/c.md"));
+        assert_eq!(relative(root, None, "/q/c.md"), None);
+        assert_eq!(relative(root, None, "."), None);
+    }
 }

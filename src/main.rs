@@ -974,8 +974,9 @@ fn print_change(outcome: &change::Outcome, verbose: bool) -> bool {
             println!("{}", line(n));
         }
         println!(
-            "Fix them. Accept one you cannot fix with `lab baseline set --note \"<why>\"` after \
-             this run."
+            "Fix them. Only a person may accept the ones that cannot be fixed, with `lab baseline \
+             set --note \"<why>\"` after this run, which accepts every finding of each check's \
+             latest run."
         );
     }
     let apart = [

@@ -208,3 +208,45 @@ fn new_only_outside_git_keeps_the_baseline_gate() {
         stdout(&out)
     );
 }
+
+#[test]
+fn new_only_in_a_linked_worktree_reads_the_main_checkouts_ignored_input_at_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let tmp = &ceiling.join("tmp");
+    let main = &ceiling.join("main");
+    std::fs::create_dir_all(tmp).unwrap();
+    std::fs::create_dir_all(main).unwrap();
+    git(main, ceiling, &["init", "-q", "-b", "main"]);
+    assert!(
+        lab(main, ceiling, tmp, &["init", "--name", "demo"])
+            .status
+            .success()
+    );
+    let mut cfg = std::fs::read_to_string(main.join("research.toml")).unwrap();
+    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"cat\", \"data/f.jsonl\"]\nversion = []\n";
+    write(main, "research.toml", &cfg);
+    write(main, ".gitignore", ".research/\ndata/\n");
+    write(main, "a.md", "one\ntwo\n");
+    git(main, ceiling, &["add", "-A"]);
+    git(main, ceiling, &["commit", "-qm", "base"]);
+    // Only the main checkout has the ignored input the check names.
+    std::fs::create_dir_all(main.join("data")).unwrap();
+    write(main, "data/f.jsonl", &finding("warn", "a.md:1", "old", ""));
+    let wt = &ceiling.join("wt");
+    git(
+        main,
+        ceiling,
+        &["worktree", "add", "-q", "-b", "feat", wt.to_str().unwrap()],
+    );
+    write(wt, "a.md", "one\ntwo\nthree\n");
+
+    let out = lab(wt, ceiling, tmp, &["check", "--new-only"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
+    assert!(
+        text.contains("The change adds no error or warning to the files it touches."),
+        "{text}"
+    );
+    assert!(!text.contains("did not run to completion"), "{text}");
+}
