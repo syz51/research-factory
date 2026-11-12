@@ -40,14 +40,16 @@ CREATE TABLE edges(
 CREATE INDEX edges_file ON edges(file_id);
 CREATE INDEX edges_target ON edges(kind, target COLLATE NOCASE);
 CREATE INDEX edges_source ON edges(source_ref) WHERE source_ref IS NOT NULL;
--- The units of a file as they were before its last change, so that an
--- anchor made then still finds its text.
+-- The units of a file as they were before each of its last changes, so
+-- that an anchor made then still finds its text. `version` counts the
+-- changes of the file; a range can have held several texts.
 CREATE TABLE old_anchors(
     path TEXT NOT NULL,
     start_line INTEGER NOT NULL,
     end_line INTEGER NOT NULL,
     hash TEXT NOT NULL,
-    PRIMARY KEY (path, start_line, end_line)
+    version INTEGER NOT NULL,
+    PRIMARY KEY (path, start_line, end_line, hash)
 ) WITHOUT ROWID;
 ";
 
@@ -195,15 +197,36 @@ pub fn index_edges(
     Ok(())
 }
 
-/// Removes the edges of a file and keeps its units' anchors, so that an
-/// anchor into the text it had still resolves by content hash.
-pub fn forget_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
+/// The versions of a file whose units' anchors the index keeps.
+pub const OLD_VERSIONS: i64 = 10;
+
+/// Removes the edges of a file. A changed file (`changed`) keeps its units'
+/// anchors as its next version, so that an anchor into the text it had still
+/// resolves by content hash, and loses those of versions older than
+/// [`OLD_VERSIONS`]. A file whose source is gone loses all of them.
+pub fn forget_file(tx: &Transaction, file: i64, changed: bool) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM edges WHERE file_id = ?1", [file])?;
+    let path: String =
+        tx.query_row("SELECT path FROM files WHERE id = ?1", [file], |r| r.get(0))?;
+    if !changed {
+        tx.execute("DELETE FROM old_anchors WHERE path = ?1", [&path])?;
+        return Ok(());
+    }
+    let version: i64 = tx.query_row(
+        "SELECT coalesce(max(version), 0) + 1 FROM old_anchors WHERE path = ?1",
+        [&path],
+        |r| r.get(0),
+    )?;
+    // A range and text that an earlier version also had moves to this one.
     tx.execute(
-        "INSERT OR REPLACE INTO old_anchors (path, start_line, end_line, hash) \
-         SELECT f.path, u.start_line, u.end_line, u.hash \
-         FROM units u JOIN files f ON f.id = u.file_id WHERE f.id = ?1",
-        [file],
+        "INSERT INTO old_anchors (path, start_line, end_line, hash, version) \
+         SELECT ?2, start_line, end_line, hash, ?3 FROM units WHERE file_id = ?1 \
+         ON CONFLICT DO UPDATE SET version = excluded.version",
+        params![file, path, version],
+    )?;
+    tx.execute(
+        "DELETE FROM old_anchors WHERE path = ?1 AND version <= ?2",
+        params![path, version - OLD_VERSIONS],
     )?;
     Ok(())
 }

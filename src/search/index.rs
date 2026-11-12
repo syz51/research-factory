@@ -21,7 +21,7 @@ use super::sources::{self, Doc, Loader, Resolver};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
@@ -464,7 +464,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
         graph::write_papers(&tx, papers)?;
     }
     for id in gone {
-        remove_file(&tx, id)?;
+        remove_file(&tx, id, false)?;
         left -= 1;
     }
     let mut loader = Loader::new(ctx);
@@ -542,8 +542,9 @@ fn remove_units(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
 }
 
 /// A unit never outlives its source, nor do the edges that start at it.
-fn remove_file(tx: &Transaction, file: i64) -> rusqlite::Result<()> {
-    graph::forget_file(tx, file)?;
+/// `changed`: the file is about to be indexed again, so its anchors stay.
+fn remove_file(tx: &Transaction, file: i64, changed: bool) -> rusqlite::Result<()> {
+    graph::forget_file(tx, file, changed)?;
     remove_units(tx, file)?;
     tx.execute("DELETE FROM aliases WHERE file_id = ?1", [file])?;
     tx.execute("DELETE FROM stale WHERE file_id = ?1", [file])?;
@@ -562,7 +563,7 @@ fn index_doc(
     let Some(loaded) = loader.load(tx, doc)? else {
         // Gone since it was listed.
         if let Some(id) = existing {
-            remove_file(tx, id)?;
+            remove_file(tx, id, false)?;
         }
         return Ok(());
     };
@@ -580,7 +581,7 @@ fn index_doc(
             )?;
             return Ok(());
         }
-        remove_file(tx, id)?;
+        remove_file(tx, id, true)?;
     }
     let row = &loaded.row;
     tx.execute(
