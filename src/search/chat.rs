@@ -5,7 +5,7 @@
 //! Both are class `chat`. A board that cannot be read makes the answer
 //! partial, never an error (docs/state-machines.md 7.2).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -138,7 +138,40 @@ fn user_text(v: &Value) -> Option<String> {
     })
 }
 
-/// One unit per message the student typed, at its transcript line.
+/// Openings of user-role messages that an agent or a tool wrote, by rule.
+const LEFT_OUT: &[(&str, &[&str])] = &[
+    (
+        "compaction",
+        &["This session is being continued from a previous conversation"],
+    ),
+    (
+        "brief",
+        &[
+            "Act as the ",
+            "Goal: do board task",
+            "You own board task",
+            "Work board task",
+        ],
+    ),
+    (
+        "wake-up",
+        &["the user answered ask", "Continue where you left off"],
+    ),
+];
+/// A message of fewer words is too short to find.
+const MIN_WORDS: usize = 3;
+
+/// The rule that leaves a message out of the scope, if one does.
+fn left_out(text: &str) -> Option<&'static str> {
+    LEFT_OUT
+        .iter()
+        .find(|(_, openings)| openings.iter().any(|o| text.starts_with(o)))
+        .map(|(rule, _)| *rule)
+        .or_else(|| (text.split_whitespace().count() < MIN_WORDS).then_some("short"))
+}
+
+/// One unit per message the student typed, at its transcript line. The
+/// messages left out are counted by rule in the row's `info.left_out`.
 pub fn load_session(s: &SessionDoc) -> Result<Option<Loaded>, String> {
     let bytes = match std::fs::read(&s.file) {
         Ok(b) => b,
@@ -155,11 +188,16 @@ pub fn load_session(s: &SessionDoc) -> Result<Option<Loaded>, String> {
         .flatten()
         .collect::<Vec<_>>()
         .join(" · ");
+    let mut dropped: BTreeMap<&str, usize> = BTreeMap::new();
     let units: Vec<Unit> = text
         .lines()
         .enumerate()
         .filter_map(|(i, line)| {
             let body = user_text(&serde_json::from_str(line).ok()?)?;
+            if let Some(rule) = left_out(&body) {
+                *dropped.entry(rule).or_default() += 1;
+                return None;
+            }
             Some(Unit {
                 start: i + 1,
                 end: i + 1,
@@ -183,6 +221,7 @@ pub fn load_session(s: &SessionDoc) -> Result<Option<Loaded>, String> {
             date,
             kind: Some("session".into()),
             anchor: Some(s.listed.clone()),
+            info: (!dropped.is_empty()).then(|| json!({ "left_out": dropped })),
             ..Row::default()
         },
         units,
@@ -366,6 +405,21 @@ mod tests {
             text(r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex q"}]}}"#).as_deref(),
             Some("codex q")
         );
+    }
+
+    #[test]
+    fn injected_and_short_messages_are_left_out_by_rule() {
+        assert_eq!(
+            left_out("This session is being continued from a previous conversation that ran out"),
+            Some("compaction")
+        );
+        assert_eq!(
+            left_out("Act as the research sub-agent for task 12."),
+            Some("brief")
+        );
+        assert_eq!(left_out("the user answered ask 4: use B"), Some("wake-up"));
+        assert_eq!(left_out("yes please"), Some("short"));
+        assert_eq!(left_out("Why does HiREC win?"), None);
     }
 
     #[test]

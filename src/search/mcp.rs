@@ -103,7 +103,7 @@ fn tools() -> Value {
                             {"type": "array", "items": {"type": "string"}}
                         ]
                     },
-                    "limit": {"type": "integer", "minimum": 1, "description": "At most this many hits (default 8)."},
+                    "limit": {"type": "integer", "minimum": 1, "description": "At most this many hits. Without it: 8 hits, packed to about 2 KB."},
                     "records": {"type": "boolean", "description": "Only decision records and other indexed records."},
                     "status": {"type": "array", "items": {"type": "string"}, "description": "Only records with these statuses."},
                     "cites": {"type": "string", "description": "Only passages that cite this reference key."},
@@ -210,7 +210,8 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
                 all: input.flag("all")?,
             };
             let phrasings = phrasings(&query);
-            let limit = input.count("limit")?.unwrap_or(DEFAULT_LIMIT);
+            let given = input.count("limit")?;
+            let limit = given.unwrap_or(DEFAULT_LIMIT);
             let request = Request {
                 phrasings: &phrasings,
                 scopes: &[],
@@ -231,7 +232,7 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
                 &found.unknown,
                 &found.expansions,
                 false,
-                limit,
+                super::budget(given),
                 &found.searched,
             );
             Ok(format!("{}\n{mode_line}\n{text}", found.state_line()))

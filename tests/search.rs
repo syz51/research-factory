@@ -348,6 +348,28 @@ fn archive_find_is_search_in_notes_by_record() {
 }
 
 #[test]
+fn a_given_limit_prints_that_many_long_hits() {
+    let dir = fixture();
+    let d = dir.path();
+    let long = "a long heading about the burrows ".repeat(12);
+    for i in 0..10 {
+        write(
+            d,
+            &format!("docs/notes/w{i}.md"),
+            &format!("# Wombat {i}: {long}\n\nThe wombat count is {i}.\n"),
+        );
+    }
+    let shown = |text: &str| text.lines().filter(|l| l.contains("#L")).count();
+    let text = search(d, &["--limit", "3", "wombat"]);
+    assert_eq!(shown(&text), 3, "{text}");
+    assert!(text.contains("more hit(s)"), "{text}");
+    // Without a limit, the hits are packed to about 2 KB.
+    let text = search(d, &["wombat"]);
+    assert!((1..8).contains(&shown(&text)), "{text}");
+    assert!(text.len() <= 2048 + 1024, "{} bytes", text.len());
+}
+
+#[test]
 fn a_broad_query_shows_at_most_8_hits_and_limit_raises_it() {
     let dir = fixture();
     let d = dir.path();

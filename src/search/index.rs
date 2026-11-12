@@ -9,7 +9,7 @@
 //! One lock file admits one writer; a reader that finds it held answers from
 //! the last committed state and says so.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -21,7 +21,7 @@ use super::sources::{self, Doc, Loader, Resolver};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "4";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
@@ -134,6 +134,22 @@ pub struct Opened {
     pub notices: Vec<String>,
 }
 
+/// The session messages left out of the `sessions` scope, by rule.
+pub fn left_out(conn: &Connection) -> Result<BTreeMap<String, u64>, Fault> {
+    let mut stmt =
+        conn.prepare("SELECT info FROM files WHERE scope = 'sessions' AND info IS NOT NULL")?;
+    let mut total = BTreeMap::new();
+    for info in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let info: serde_json::Value = serde_json::from_str(&info?).unwrap_or_default();
+        if let Some(rules) = info.get("left_out").and_then(|v| v.as_object()) {
+            for (rule, n) in rules {
+                *total.entry(rule.clone()).or_default() += n.as_u64().unwrap_or(0);
+            }
+        }
+    }
+    Ok(total)
+}
+
 /// How many files and units the index holds.
 pub fn counts(conn: &Connection) -> Result<(i64, i64), Fault> {
     let count =
@@ -173,7 +189,17 @@ pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
                 Err(Fault::Other(e)) => return Err(e),
             }
         }
-        build(ctx, force)?;
+        // A build lists every scope; refreshing at once would list them again.
+        if let Some(mut notices) = build(ctx, force)?
+            && let Some(conn) = open_current(ctx)?
+        {
+            notices.extend(stale_notices(ctx, &conn).map_err(String::from)?);
+            return Ok(Opened {
+                conn,
+                stale: None,
+                notices,
+            });
+        }
         force = false;
     }
     Err(format!(
@@ -232,10 +258,10 @@ fn try_lock(ctx: &Context) -> Result<Option<File>, String> {
     }
 }
 
-/// Builds the index in a new file and renames it over the old one. Without
-/// `force`, an index that another process built while this one waited for the
-/// lock is kept.
-fn build(ctx: &Context, force: bool) -> Result<(), String> {
+/// Builds the index in a new file and renames it over the old one, and
+/// returns the notices of its listings. Without `force`, an index that another
+/// process built while this one waited for the lock is kept: `None`.
+fn build(ctx: &Context, force: bool) -> Result<Option<Vec<String>>, String> {
     let waited = Instant::now();
     let _lock = loop {
         if let Some(lock) = try_lock(ctx)? {
@@ -251,15 +277,16 @@ fn build(ctx: &Context, force: bool) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(50));
     };
     if !force && open_current(ctx)?.is_some() {
-        return Ok(());
+        return Ok(None);
     }
     let path = db_path(ctx);
     let tmp = ctx.dir.join(format!("index.db.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let built = write_new(ctx, &tmp).and_then(|()| {
+    let built = write_new(ctx, &tmp).and_then(|notices| {
         // A journal that a crashed writer left belongs to the file being replaced.
         let _ = std::fs::remove_file(ctx.dir.join("index.db-journal"));
-        std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+        std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(notices))
     });
     if built.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -302,9 +329,10 @@ fn set_built(tx: &Transaction, scopes: &BTreeSet<Scope>) -> rusqlite::Result<()>
     Ok(())
 }
 
-/// A new index of the scopes the query searches.
-fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
-    let run = || -> Result<(), Fault> {
+/// A new index of the scopes the query searches, and the notices of their
+/// listings.
+fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
+    let run = || -> Result<Vec<String>, Fault> {
         let mut conn = Connection::open(tmp)?;
         // The file is thrown away on failure, so it needs no journal.
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
@@ -317,11 +345,13 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
         )?;
         let mut resolver = Resolver::new(&ctx.project.root)?;
         let mut loader = Loader::new(ctx);
+        let mut notices = Vec::new();
         for &scope in &ctx.scopes {
             let listing = sources::list(ctx, scope, &mut resolver)?;
             for doc in &listing.docs {
                 index_doc(ctx, &tx, &mut loader, doc, None)?;
             }
+            notices.extend(listing.notices);
         }
         if let Some(papers) = graph::papers_changed(ctx, &tx)? {
             graph::write_papers(&tx, &papers)?;
@@ -329,7 +359,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<(), String> {
         set_built(&tx, &ctx.scopes.iter().copied().collect())?;
         sync_words(&tx)?;
         tx.commit()?;
-        Ok(())
+        Ok(notices)
     };
     run().map_err(String::from)
 }
