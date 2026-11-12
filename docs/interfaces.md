@@ -236,8 +236,8 @@ reason_statuses = ["superseded", "rejected", "withdrawn"]   # default: `inactive
 write_indexes = false         # default true
 kinds = ["result", "decision", "survey", "review"]   # the default
 task_from = "2026-11-12"
-board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status"]
-research_tag = "research"
+board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status,parent,updated_at"]
+research_parents = ["research-factory-185"]   # or research_tag = "research", for an export with tags
 summary_min_chars = 40        # the default
 unindexed_exclude = ["docs/research/decisions/README.md"]
 
@@ -275,8 +275,9 @@ reason = "the first report has no single result"
 | `write_indexes` | `false`: `lab archive index`, `update` and `done` write no index file, an index needs no `output`, and an index file that is still there is an `index-leftover` warning. The start page stays a file with its budget. |
 | `kinds` | The allowed values of a record's `kind`. An index may set `kinds = [...]` to list only records of those kinds; a record that its include matches and that it does not list is still a record that every rule checks. |
 | `task_from` | A day as `YYYY-MM-DD`. A record dated on or after it must name a `task` and a `kind`. |
-| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status` and `tags` (or `labels`). lab runs it in the project root with a limit of 30 seconds. |
-| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Needs `board_export`. |
+| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status`, `tags` (or `labels`), `parent` and `updated_at`. lab runs it in the project root with a limit of 30 seconds. |
+| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Use it for an export that has tags; agent-board tasks have none. Needs `board_export`. |
+| `research_parents` | Task ids. A task of the board export with status `done` needs a record that names it when it is one of these tasks or below one, following `parent`. Group research work under these umbrella tasks. Needs `board_export` with the fields `parent` and `updated_at`. Since lab 0.13.3. |
 | `summary_min_chars` | The shortest accepted `summary`, in characters. |
 | `unindexed_exclude` | Globs of Markdown files that `unindexed-file` leaves alone. |
 | `[[lab.archive.page_group]]` | `name`, `include`, optional `exclude` and `current`. At least one page of the group must have a status in `current`. |
@@ -310,7 +311,7 @@ Model 2 adds these rules to `lab archive check`. Each finding has the tool `lab`
 | `missing-task`, `missing-kind` | error | A record dated on or after `task_from` has no `task`, or no `kind`. |
 | `unknown-task` | error | `task` names an id that the board export does not list. |
 | `task-link-skipped` | info | The state `skipped`: no `board_export` is configured while records name tasks, or the command failed, timed out or printed no task list. No `task` value was compared with the board. `detail` gives the reason. |
-| `task-without-record` | warn | A done task with `research_tag` that no record names. The subject is the task id. |
+| `task-without-record` | warn | A done task with `research_tag`, or at or below a task of `research_parents`, that no record names. With `task_from` set, a task whose `updated_at` is before that day is left out. The subject is the task id. |
 | `missing-summary` | warn | An indexed record has no `summary`, or one shorter than `summary_min_chars`. |
 | `unindexed-file` | warn | A Markdown file next to an index's records (`<directory of an include glob>/*.md`) that no index includes or excludes, and that is not an index output, the start page or in `unindexed_exclude`. |
 | `no-current-page` | warn | A page group has no page with a status in `current`. The subject is the group's name. |
@@ -366,7 +367,7 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `superseded-link` | warn | `current_pages` | 0.2.0 |
 | `supersession-mismatch` | warn | `[[lab.archive.index]]` | 0.2.0 |
 | `task-link-skipped` | info | model 2, records with `task` | 0.12.0 |
-| `task-without-record` | warn | model 2, `board_export` and `research_tag` | 0.12.0 |
+| `task-without-record` | warn | model 2, `board_export`, and `research_tag` or `research_parents` | 0.12.0 |
 | `unindexed-file` | warn | model 2, `[[lab.archive.index]]` | 0.12.0 |
 | `unknown-id` | error | `[[lab.archive.index]]` | 0.2.0 |
 | `unknown-task` | error | model 2, `board_export` | 0.12.0 |
