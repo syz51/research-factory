@@ -132,7 +132,7 @@ enum Command {
         /// default_scopes, which is notes and refs).
         #[arg(long = "in", value_name = "SCOPE", value_delimiter = ',')]
         scopes: Vec<String>,
-        /// At most this many hits (default 8).
+        /// At most this many hits. Without it: 8 hits, packed to about 2 KB.
         #[arg(long)]
         limit: Option<usize>,
         /// Only records with one of these statuses (repeatable).

@@ -346,7 +346,9 @@ pub struct RefDoc {
 
 pub fn list_refs(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, String> {
     let Some(reg) = Registry::read(ctx, resolver)? else {
-        return Ok(Listing::complete(cards(ctx, None, resolver)?.0).with_notices(Vec::new()));
+        // Cards are listed under their own key, and their notices kept.
+        let (cards, notices) = cards(ctx, None, resolver)?;
+        return Ok(Listing::complete(cards).with_notices(notices));
     };
     let all: Vec<&Entry> = reg.entries.iter().collect();
     let lines = catalogue(&all, resolver)?;

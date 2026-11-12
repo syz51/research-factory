@@ -103,8 +103,14 @@ fn requested(named: &[String], default: &[Scope]) -> Result<Vec<Scope>, String> 
     Ok(scopes)
 }
 const DEFAULT_LIMIT: usize = 8;
-/// The text output holds about this many bytes per hit of the limit: 2 KB at 8 hits.
-const BYTES_PER_HIT: usize = 256;
+/// Without a given limit, the text output holds about this many bytes: 8 hits
+/// and about 2 KB. A given limit prints that many hits.
+const DEFAULT_BUDGET: usize = 2048;
+
+/// The byte budget of the text output: only when the caller gave no limit.
+fn budget(limit: Option<usize>) -> Option<usize> {
+    limit.is_none().then_some(DEFAULT_BUDGET)
+}
 
 /// `[lab.search]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -608,6 +614,21 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
             "Search index rebuilt: {units} unit(s) of {files} source(s) in {}.",
             names.join(", ")
         );
+        if ctx.scopes.contains(&Scope::Sessions) {
+            let left: Vec<String> = index::left_out(&opened.conn)
+                .map_err(String::from)?
+                .iter()
+                .map(|(rule, n)| format!("{rule} {n}"))
+                .collect();
+            println!(
+                "Session messages left out by rule: {}.",
+                if left.is_empty() {
+                    "none".into()
+                } else {
+                    left.join(", ")
+                }
+            );
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
@@ -683,7 +704,7 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
                 &answer.unknown,
                 &answer.expansions,
                 args.explain,
-                limit,
+                budget(args.limit),
                 &answer.searched
             )
         );
@@ -891,14 +912,16 @@ fn unknown_line(unknown: &[Unknown]) -> String {
     format!("Not in the index: {}\n", words.join("; "))
 }
 
-/// The text output: at most `limit` hits and about `limit * BYTES_PER_HIT` bytes.
+/// The text output of the hits, which are at most the limit. With a byte
+/// `budget`, it stops before the hit that would pass it, but prints at least
+/// one.
 fn render(
     hits: &[Hit],
     more: usize,
     unknown: &[Unknown],
     expansions: &[Expansion],
     explain: bool,
-    limit: usize,
+    budget: Option<usize>,
     searched: &[Scope],
 ) -> String {
     let mut out = String::new();
@@ -938,7 +961,6 @@ fn render(
         }
         return out;
     }
-    let budget = limit * BYTES_PER_HIT;
     let mut shown = 0;
     let mut record = None;
     for hit in hits {
@@ -999,7 +1021,7 @@ fn render(
                 e.matched.join(",")
             );
         }
-        if shown > 0 && out.len() + text.len() > budget {
+        if shown > 0 && budget.is_some_and(|b| out.len() + text.len() > b) {
             break;
         }
         out.push_str(&text);

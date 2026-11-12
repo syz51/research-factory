@@ -396,6 +396,10 @@ fn sessions_index_what_the_person_typed() {
             r#"{"type":"user","message":{"role":"user","content":"please compare the echidna baselines"}}"#,
             r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"numbat"}]}}"#,
             r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"meta quoll"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation. Summary: platypus"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"Act as the reader for platypus cards."}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"Act as the writer for platypus notes."}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"yes platypus"}}"#,
         ]
         .join("\n"),
     );
@@ -427,13 +431,20 @@ fn sessions_index_what_the_person_typed() {
         hit["anchor"].as_str().unwrap().ends_with("one.jsonl#L1"),
         "{hit}"
     );
-    for word in ["numbat", "quoll"] {
+    for word in ["numbat", "quoll", "platypus"] {
         assert_eq!(
             json(d, &["--in", "sessions", word])["state"],
             "zero",
             "{word}"
         );
     }
+    let out = stdout(&lab(d, &["search", "--in", "sessions", "--rebuild"]));
+    assert!(
+        out.contains("Session messages left out by rule: brief 2, compaction 1, short 1."),
+        "{out}"
+    );
+    let out = stdout(&lab(d, &["search", "--in", "refs", "--rebuild"]));
+    assert!(!out.contains("left out"), "{out}");
 }
 
 #[test]
@@ -478,6 +489,77 @@ fn the_board_is_searched_through_its_export_and_an_unreachable_one_is_partial() 
         report["partial"].to_string().contains("scope `board`"),
         "{report}"
     );
+}
+
+#[test]
+fn cards_without_a_registry_are_searched_and_their_faults_reported() {
+    let dir = fixture();
+    let d = dir.path();
+    std::fs::remove_file(d.join("references.jsonl")).unwrap();
+    let text15 = std::fs::read_to_string(d.join("sources/texts/15.md")).unwrap();
+    write(
+        d,
+        "sources/cards/15.json",
+        &serde_json::json!({
+            "schema": "rf.paper-card/1", "key": "15", "model": "m",
+            "text": {"path": "sources/texts/15.md", "sha256": sha(&text15)},
+            "items": [{"field": "dataset", "value": "platypus corpus",
+                       "quote": "structured extraction words", "lines": [3, 3]}],
+        })
+        .to_string(),
+    );
+    write(d, "sources/cards/bad.json", "not json");
+    let report = json(d, &["--in", "refs", "platypus"]);
+    assert_eq!(hits(&report)[0]["key"], "15", "{report}");
+    let notice = report["partial"].to_string();
+    assert!(notice.contains("sources/cards/bad.json"), "{report}");
+
+    // A card whose text changed is ignored and reported.
+    write(d, "sources/texts/15.md", &format!("{text15}more\n"));
+    let report = json(d, &["--in", "refs", "platypus"]);
+    assert!(
+        hits(&report)
+            .iter()
+            .all(|h| h["path"] != "sources/cards/15.json"),
+        "{report}"
+    );
+    assert!(
+        report["partial"].to_string().contains("stale derivative"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_first_query_runs_the_board_export_once() {
+    let dir = fixture();
+    let d = dir.path();
+    write(
+        d,
+        "board.json",
+        &serde_json::json!({"tasks": [{"id": "rf-9", "title": "Measure the bandicoot set"}]})
+            .to_string(),
+    );
+    write(
+        d,
+        "research.toml",
+        &CONFIG.replace(
+            "[lab.archive]\n",
+            "[lab.archive]\nmodel = 2\nboard_export = [\"sh\", \"-c\", \"echo run >> runs.log; cat board.json\"]\n",
+        ),
+    );
+    let runs = || {
+        std::fs::read_to_string(d.join("runs.log"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    let report = json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
+    assert_eq!(runs(), 1, "the build lists the board once");
+    json(d, &["--in", "board", "--rebuild", "bandicoot"]);
+    assert_eq!(runs(), 2, "a rebuild lists it once more");
+    json(d, &["--in", "board", "bandicoot"]);
+    assert_eq!(runs(), 3, "a later query refreshes it once");
 }
 
 #[test]
