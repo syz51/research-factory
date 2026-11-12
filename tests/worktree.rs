@@ -233,3 +233,48 @@ fn a_replay_does_not_look_in_the_main_checkout() {
     }
     assert!(runs.contains("cannot read data/manifest.json"), "{runs}");
 }
+
+#[test]
+fn a_link_to_a_file_git_does_not_track_is_a_warning_until_it_is_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, _) = setup(ceiling);
+    let lab = |d: &Path, args: &[&str]| run(LAB, d, ceiling, args);
+    let untracked = |out: &Output| -> Vec<String> {
+        stdout(out)
+            .lines()
+            .filter(|l| l.contains("untracked-link"))
+            .map(str::to_string)
+            .collect()
+    };
+    write(
+        &m,
+        "docs/b.md",
+        "# B\n\n[run](../runs/r1.jsonl)\n[data](../data/big.csv)\n[tracked](tracked.md)\n",
+    );
+    write(&m, "runs/r1.jsonl", "{}\n");
+
+    // The untracked run is flagged; the ignored data file and the tracked
+    // note are not. The untracked note that links them is checked as well.
+    let out = lab(&m, &["archive", "check"]);
+    let lines = untracked(&out);
+    assert_eq!(lines.len(), 1, "{}", stdout(&out));
+    assert!(
+        lines[0].starts_with("warn untracked-link docs/b.md:3"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains("`../runs/r1.jsonl`"), "{}", lines[0]);
+    // A warning: the gate still passes and names the fix.
+    let done = lab(&m, &["archive", "done"]);
+    assert!(
+        stdout(&done).contains("commit the target in the same commit"),
+        "{}",
+        stdout(&done)
+    );
+
+    let top = m.parent().unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "run"]);
+    assert!(untracked(&lab(&m, &["archive", "check"])).is_empty());
+}

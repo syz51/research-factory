@@ -649,6 +649,11 @@ fn link_problems(
         })
         .collect();
     let in_main = in_main_checkout(root, checked.union(&current), texts, &mut listings)?;
+    let untracked = if checked.is_empty() {
+        BTreeSet::new()
+    } else {
+        crate::worktree::untracked(root)?
+    };
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -718,6 +723,19 @@ fn link_problems(
                             ));
                         }
                         continue;
+                    }
+                    // A file that only this checkout holds: the link breaks in
+                    // every other checkout unless the file is committed too.
+                    if check && rel.as_deref().is_some_and(|r| untracked.contains(r)) {
+                        let mut p = problem(
+                            "untracked-link",
+                            format!(
+                                "links to `{}`, which git does not track; commit it with this change",
+                                link.dest
+                            ),
+                        );
+                        p.severity = Severity::Warn;
+                        out.push(p);
                     }
                     // Anchors are checked only in Markdown files inside the project.
                     if check

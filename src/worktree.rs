@@ -48,6 +48,22 @@ fn git(dir: &Path, args: &[&str]) -> Result<Option<String>, String> {
     }
 }
 
+/// The files below `dir` that git neither tracks nor ignores, relative to
+/// `dir`: they exist only in this checkout until someone commits them. Empty
+/// outside a git repository or without git.
+pub fn untracked(dir: &Path) -> Result<BTreeSet<String>, String> {
+    Ok(
+        git(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?
+            .map(|out| {
+                out.split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    )
+}
+
 /// Where `dir` is: the main checkout is the first entry of `git worktree list`.
 pub fn locate(dir: &Path) -> Result<Location, String> {
     let Some(dirs) = git(
