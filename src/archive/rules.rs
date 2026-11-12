@@ -726,16 +726,31 @@ fn link_problems(
                     }
                     // A file that only this checkout holds: the link breaks in
                     // every other checkout unless the file is committed too.
-                    if check && rel.as_deref().is_some_and(|r| untracked.contains(r)) {
-                        let mut p = problem(
-                            "untracked-link",
-                            format!(
-                                "links to `{}`, which git does not track; commit it with this change",
-                                link.dest
-                            ),
-                        );
-                        p.severity = Severity::Warn;
-                        out.push(p);
+                    // A directory counts when it holds untracked files and git
+                    // tracks nothing in it.
+                    if check && let Some(r) = rel.as_deref() {
+                        let what = if untracked.contains(r) {
+                            Some("which git does not track")
+                        } else {
+                            let under = format!("{r}/");
+                            let holds = untracked
+                                .range(under.clone()..)
+                                .next()
+                                .is_some_and(|f| f.starts_with(&under));
+                            (holds && !crate::worktree::tracks(root, r)?)
+                                .then_some("a directory that git tracks nothing in")
+                        };
+                        if let Some(what) = what {
+                            let mut p = problem(
+                                "untracked-link",
+                                format!(
+                                    "links to `{}`, {what}; commit it with this change",
+                                    link.dest
+                                ),
+                            );
+                            p.severity = Severity::Warn;
+                            out.push(p);
+                        }
                     }
                     // Anchors are checked only in Markdown files inside the project.
                     if check

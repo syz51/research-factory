@@ -64,6 +64,13 @@ pub fn untracked(dir: &Path) -> Result<BTreeSet<String>, String> {
     )
 }
 
+/// Whether git tracks a file at or below `rel`, relative to `dir`. False
+/// outside a git repository or without git.
+pub fn tracks(dir: &Path, rel: &str) -> Result<bool, String> {
+    let spec = format!(":(literal){rel}");
+    Ok(git(dir, &["ls-files", "-z", "--", &spec])?.is_some_and(|out| !out.is_empty()))
+}
+
 /// Where `dir` is: the main checkout is the first entry of `git worktree list`.
 pub fn locate(dir: &Path) -> Result<Location, String> {
     let Some(dirs) = git(

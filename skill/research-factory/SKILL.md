@@ -65,7 +65,7 @@ Two other deliveries are in this skill, off by default; E4 found no gain from ei
 
 ## Guarding stored check runs
 
-`scripts/guard-check-runs.sh` is a `PreToolUse` hook (matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`, `"command": "sh <skill dir>/scripts/guard-check-runs.sh"`, needs `jq`). It refuses a tool call that would delete or edit a run in `.research/lab/checks/`: `rm`, `mv`, `sed -i`, `find -delete`, a redirect, `git rm`, `git checkout` or `git restore` on a run, `rm -r` of a directory that holds runs, `git clean` while a run is untracked, and file edits. Its message names this rule. It reads commands as text, so it guards against mistakes, not against intent.
+`scripts/guard-check-runs.sh` is a `PreToolUse` hook (matcher `Bash|Edit|Write|MultiEdit|NotebookEdit`, `"command": "sh <skill dir>/scripts/guard-check-runs.sh"`, needs `jq`). It refuses a tool call that would delete or edit a run in `.research/lab/checks/`: `rm`, `mv`, `sed -i`, `find -delete`, `cp`, `tee` or a redirect onto a run, `git rm`, `git checkout` or `git restore` on a run, `rm -r` or `find -delete` from a directory that holds runs (also through a glob), `git clean` while a run is untracked, and file edits. Its message names this rule. It reads commands as text, so it guards against mistakes, not against intent.
 
 ## Reporting
 

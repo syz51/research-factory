@@ -15,6 +15,7 @@ const HOOK: &str = concat!(
 
 fn isolated<'c>(c: &'c mut Command, ceiling: &Path) -> &'c mut Command {
     c.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", ceiling)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .env_remove("GIT_DIR")
@@ -117,12 +118,40 @@ fn deleting_or_editing_a_stored_run_is_refused_with_the_rule() {
         "rm -rf .research".to_string(),
         format!("rm -rf {}", p.display()),
         "git -C . rm -r .research/lab".to_string(),
+        // Globs that expand to a directory with runs.
+        "rm -rf .research/lab/*".to_string(),
+        "rm -rf .research/*".to_string(),
+        // find from a directory with runs, unfiltered or with a matching filter.
+        "find . -name '*.jsonl' -delete".to_string(),
+        "find .research -type f -delete".to_string(),
+        "find . -path '*/checks/*' -exec rm {} +".to_string(),
+        // cd with `;` and `~`.
+        "cd .research/lab; rm checks/20261112T000000.000Z.jsonl".to_string(),
+        // Copies, links and writes onto a run.
+        format!("cp /tmp/x.jsonl {run}"),
+        "cp -f /tmp/x.jsonl .research/lab/checks/".to_string(),
+        format!("install -m 644 /tmp/x {run}"),
+        format!("ln -sf /tmp/x {run}"),
+        format!("echo x | tee -a {run}"),
+        format!("dd if=/dev/null of={run}"),
     ] {
         assert!(
             refusal(c, &bash(&p, &command)).is_some(),
             "not refused: {command}"
         );
     }
+    // A leading cd moves where relative paths start, also from `~`.
+    for command in [
+        format!("cd {} && rm -rf .research/lab/*", p.display()),
+        "cd ~/proj && rm -rf .research/lab/*".to_string(),
+        "cd ~/proj; rm -rf .research".to_string(),
+    ] {
+        assert!(
+            refusal(c, &bash(c, &command)).is_some(),
+            "not refused: {command}"
+        );
+    }
+    assert_eq!(refusal(c, &bash(c, "rm -rf .research/lab/*")), None);
     for tool in ["Edit", "Write", "MultiEdit"] {
         let event = json!({"tool_name": tool, "cwd": p,
                            "tool_input": {"file_path": p.join(run)}});
@@ -146,6 +175,18 @@ fn reading_committing_and_other_files_are_allowed() {
         "rm -rf notes".to_string(),
         "git clean -fd".to_string(),
         "echo 'rm .research/lab/checks/x.jsonl'".to_string(),
+        // Quoted separators and redirects are text, not commands.
+        "git commit -m \"fix; rm .research/lab/checks/x.jsonl\"".to_string(),
+        "git commit -m 'keep runs > .research/lab/checks'".to_string(),
+        // Filters that cannot match a run, and directories only.
+        "find . -name '*.tmp' -delete".to_string(),
+        "find . -type d -empty -delete".to_string(),
+        "find notes -delete".to_string(),
+        "rm -rf notes/*".to_string(),
+        // Copying a run out, or linking to it, leaves it as it is.
+        format!("cp {run} /tmp/x.jsonl"),
+        format!("ln -s {run} latest.jsonl"),
+        format!("tee /tmp/x < {run}"),
     ] {
         assert_eq!(refusal(c, &bash(&p, &command)), None, "refused: {command}");
     }
