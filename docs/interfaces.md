@@ -66,6 +66,29 @@ One line per catalogue entry, ordered by `key`. The key is the archive's stable 
 
 `agentprof` owns these. Their schema is in the `agentprof` README. `lab retro` reads `agentprof`'s `rf.finding/1` findings (the `findings.jsonl` that `agentprof scan --out <dir>` writes, named by `[lab] agent_findings` or `--agent-findings`), so agent-session problems join the same pool as checker findings. `lab retro`, `lab brief` and `lab loop` count a rule's agent findings once per session tree: a session without a `parent_id` together with every session below it, within one `source`. A finding whose `subject` is not a session in the file counts on its own. They read the sessions file only when there are agent findings, and `lab retro --agent-findings FILE` reads the `sessions.jsonl` next to FILE. Without a readable sessions file each distinct finding counts, and they say why. `lab evaluate` also reads `source`, `id`, `role`, `start` and `parent_id` from the `sessions.jsonl` next to it (or `[lab] agent_sessions`), to measure a lesson about an agent-session rule per session within strata of the same `source` and `role` (a missing `role` is `unknown`). Within a stratum, the sessions below one root session (following `parent_id` up, within one `source`) form one session group, on the root's side of the adoption date; a session without a `parent_id` is a group of its own. It matches a finding to its session by the finding's `subject`, `source:id`. A lesson metric whose rule starts with `session.` names a numeric field of the record by its dotted path, such as `session.max_prompt_tokens` or `session.total.tokens.output`; a missing, `null` or non-numeric value leaves that session out. Since lab 0.9.10, in a linked git worktree that lacks the configured findings or sessions file, which git ignores there, these commands read the main checkout's file instead (`git worktree list` names the main checkout first), and say so on stderr.
 
+**Archive lookups.** Since `agentprof` 0.3.0, each session record has an `archive` object that counts how the session looked up the archive. `agentprof` takes the archive root from the first of these that is set:
+
+1. `--archive-root DIR` on the command line.
+2. `[agentprof] archive_roots = [..]` in `research.toml`.
+3. The directory of `[lab.archive] start`. This is the only `[lab]` key `agentprof` reads.
+
+The object has eight fields. A lesson names each as a metric path:
+
+| Metric path | Counts |
+| --- | --- |
+| `agentprof:session.archive.searches` | archive searches |
+| `agentprof:session.archive.opens` | archive records opened by id |
+| `agentprof:session.archive.related` | graph lookups |
+| `agentprof:session.archive.no_hit_searches` | searches that found nothing |
+| `agentprof:session.archive.greps` | grep runs under the archive root |
+| `agentprof:session.archive.reads` | file reads under the archive root |
+| `agentprof:session.archive.search_share` | share of lookups that are searches |
+| `agentprof:session.archive.grep_share` | share of lookups that are greps |
+
+`greps`, `reads`, `search_share` and `grep_share` are `null` when no archive root is set. `agentprof` counts a search that exits 1 as a no-hit search, not as a tool error. It counts by name: `lab search`, `lab open`, `lab related` and `lab archive find` on the command line, and the MCP tools `archive_search`, `archive_open` and `archive_related`. A new lookup command or tool must keep these names, or `agentprof` must learn the new name first.
+
+Lab reads a metric through a lesson: `lab lesson add --metric agentprof:session.archive.<field>` names it, and `lab evaluate` measures it. `lab evaluate` treats a lower value as better, so a lesson about archive search measures `grep_share` or `greps`, not `search_share`.
+
 ## 6. Archive records and seals: front matter and `rf.archive-seal/1`
 
 `lab` owns these. A record is a Markdown file that a `[[lab.archive.index]]` includes. It may start with YAML front matter: a first line `---`, YAML, and a line `---`. Everything after it is the record's body. Every field is optional, unknown fields are ignored, and a single string is accepted where a list is expected.
@@ -273,8 +296,8 @@ reason_statuses = ["superseded", "rejected", "withdrawn"]   # default: `inactive
 write_indexes = false         # default true
 kinds = ["result", "decision", "survey", "review"]   # the default
 task_from = "2026-11-12"
-board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status"]
-research_tag = "research"
+board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status,parent,updated_at"]
+research_parents = ["research-factory-185"]   # or research_tag = "research", for an export with tags
 summary_min_chars = 40        # the default
 unindexed_exclude = ["docs/research/decisions/README.md"]
 
@@ -312,8 +335,9 @@ reason = "the first report has no single result"
 | `write_indexes` | `false`: `lab archive index`, `update` and `done` write no index file, an index needs no `output`, and an index file that is still there is an `index-leftover` warning. The start page stays a file with its budget. |
 | `kinds` | The allowed values of a record's `kind`. An index may set `kinds = [...]` to list only records of those kinds; a record that its include matches and that it does not list is still a record that every rule checks. |
 | `task_from` | A day as `YYYY-MM-DD`. A record dated on or after it must name a `task` and a `kind`. |
-| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status` and `tags` (or `labels`). lab runs it in the project root with a limit of 30 seconds. |
-| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Needs `board_export`. |
+| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status`, `tags` (or `labels`), `parent` and `updated_at`. lab runs it in the project root with a limit of 30 seconds. |
+| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Use it for an export that has tags; agent-board tasks have none. Needs `board_export`. |
+| `research_parents` | Task ids. A task of the board export with status `done` needs a record that names it when it is one of these tasks or below one, following `parent`. Group research work under these umbrella tasks. Needs `board_export` with the fields `parent` and `updated_at`. Since lab 0.13.3. |
 | `summary_min_chars` | The shortest accepted `summary`, in characters. |
 | `unindexed_exclude` | Globs of Markdown files that `unindexed-file` leaves alone. |
 | `[[lab.archive.page_group]]` | `name`, `include`, optional `exclude` and `current`. At least one page of the group must have a status in `current`. |
@@ -347,7 +371,7 @@ Model 2 adds these rules to `lab archive check`. Each finding has the tool `lab`
 | `missing-task`, `missing-kind` | error | A record dated on or after `task_from` has no `task`, or no `kind`. |
 | `unknown-task` | error | `task` names an id that the board export does not list. |
 | `task-link-skipped` | info | The state `skipped`: no `board_export` is configured while records name tasks, or the command failed, timed out or printed no task list. No `task` value was compared with the board. `detail` gives the reason. |
-| `task-without-record` | warn | A done task with `research_tag` that no record names. The subject is the task id. |
+| `task-without-record` | warn | A done task with `research_tag`, or at or below a task of `research_parents`, that no record names. With `task_from` set, a task whose `updated_at` is before that day is left out. The subject is the task id. |
 | `missing-summary` | warn | An indexed record has no `summary`, or one shorter than `summary_min_chars`. |
 | `unindexed-file` | warn | A Markdown file next to an index's records (`<directory of an include glob>/*.md`) that no index includes or excludes, and that is not an index output, the start page or in `unindexed_exclude`. |
 | `no-current-page` | warn | A page group has no page with a status in `current`. The subject is the group's name. |
@@ -405,7 +429,7 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `superseded-link` | warn | `current_pages` | 0.2.0 |
 | `supersession-mismatch` | warn | `[[lab.archive.index]]` | 0.2.0 |
 | `task-link-skipped` | info | model 2, records with `task` | 0.12.0 |
-| `task-without-record` | warn | model 2, `board_export` and `research_tag` | 0.12.0 |
+| `task-without-record` | warn | model 2, `board_export`, and `research_tag` or `research_parents` | 0.12.0 |
 | `unindexed-file` | warn | model 2, `[[lab.archive.index]]` | 0.12.0 |
 | `unknown-id` | error | `[[lab.archive.index]]` | 0.2.0 |
 | `unknown-task` | error | model 2, `board_export` | 0.12.0 |
