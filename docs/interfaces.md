@@ -73,6 +73,44 @@ Each kept item meets these conditions:
 
 A card that keeps under 80% of its items is not stored. A card is stale when `text.path` no longer has `text.sha256`. `papers registry check` reports a stale card as `derivative-stale`, and `lab archive check` reports it as `stale-derivative`. A card is routing text, never a citable source. papers' default `card_dir` is `sources/cards` under the project root. The `refs` scope of `lab search` reads `[lab.search] cards`, by default `sources/cards/*.json` beside the registry. The two defaults agree when the registry is at the project root. The full definition is in [papers `docs/interfaces.md`](https://github.com/syz51/papers/blob/main/docs/interfaces.md#paper-cards-rfpaper-card1), section "Paper cards: `rf.paper-card/1`".
 
+**Registered papers first** (papers 0.3.0). `papers fetch`, `papers read` and `papers search` say that the registry already holds a paper before they do anything else for it. A paper is registered when an entry has its arXiv id (any version), its DOI or its URL.
+
+- For each matching entry, `fetch` and `read` print this block on stdout before any other line for that paper:
+
+  ```text
+  registered: key <key> · depth <depth> · <title>
+  text: <path>
+  ```
+
+  `<depth>` is `unknown` when the entry has none; `<title>` is `(no title)` when it has none. A duplicate entry's first line is `registered: key <key> · depth <depth> · duplicate of <key> · <title>`. One `text:` line follows for each of the entry's `texts`, in recorded order, relative to the project root. ` (missing)` follows a path whose file does not exist, and ` (changed)` one whose sha256 is not the recorded one. The separator is ` · ` (space, U+00B7, space); the title is last, so it may contain it.
+- `fetch` of a registered input prints the block and a blank line, makes no request, writes no search-log entry, prints `papers: <input>: registered; not fetched (--refresh to fetch)` on stderr and exits 0. With the global `--refresh` it fetches as for any other input. `fetch --title` matches an entry by normalised title. With `--json` the block is `{"input": …, "registered": {"key", "title", "depth", "duplicate_of", "texts": [{"path", "state"}]}}`, `state` being `ok`, `missing` or `changed`.
+- `read` of a registered paper prints the block first. When a recorded text has its recorded sha256, it prints `already have <path> (sha256 matches); not downloading (--force to fetch again)` and the text's manifest, makes no request and exits 0. `--force` downloads; `--extraction <mode>` extracts again when the recorded text has another mode. The last stdout line of a successful `read` stays the manifest as one JSON object.
+- A result of `search`, `refs` or `cited-by` that the archive (registry or notes) holds starts with the line `seen: key <key>` (several keys: `seen: key <key>, key <key>`, in key order). It matches by DOI, arXiv id, OpenAlex id, URL or normalised title. With `--json` each result has a `seen` array of keys.
+- When the search log holds the same search (same source and normalised query; for arXiv also `--category` and `--since`, for the others `--since`), `search` prints on stderr before it searches: `papers: searched before: last run <RFC 3339 time>, <n> results (<m> runs of this <source> query in <log path>)`. The search still runs.
+
+**Paper structure: `rf.paper-structure/1`** (papers 0.4.0). `papers structure <key|path>…` and `papers structure --all` write one sidecar for each text; `papers read` writes it too and prints `structure: <path>` before the manifest line. The sidecar lies beside the text, named the text's file name plus `.structure.json` (`sources/text/87.txt.structure.json`), for every text of an entry. `papers` never changes the text.
+
+- Lines count from 1, split at LF; a CR before the LF and a form feed belong to their line. A range's `first_line` and `last_line` are inclusive.
+- The file is one pretty-printed JSON object with these fields:
+  - `schema`: `rf.paper-structure/1`. `generator`: `papers <version>`.
+  - `text {path, sha256, lines, extraction}`: the text's path as in the registry's `texts[].path`, its sha256 as `papers` read it (another sha256 now means the sidecar is out of date), its line count, and the registry's `extraction` value for it (`unknown` when none is recorded).
+  - `pages`: `[{page, first_line}]` in order, or `unknown` when the text has no page mark. A form feed ends a page; in a Markdown text without form feeds, a line that is only an HTML comment starting with `page` (`<!-- page -->`) ends one.
+  - `sections`: `[{kind, heading, level, first_line, last_line}]` in line order, covering every line exactly once. `heading` is `null` for a span without one; `level` is 1 for a top heading, 2 for `2.1`, 0 without a heading.
+  - `references`: `{first_line, last_line, split, entries}` or `unknown` when no reference heading is found. `split` is `numbered`, `blank` or `unknown`. `entries` are `[{first_line, last_line, key, by}]`: `key` is the cited registry key or `null`, and `by` is `doi`, `arxiv`, `title` or `null`.
+  - `warnings`: sentences on what detection did not find or could not decide.
+- Section kinds: `front` (lines before the first heading), `abstract` (an `Abstract` heading to the next heading; without a next heading within 80 lines, up to its first blank line), `body` (numbered or common unnumbered headings; in a Markdown text, every other `#` heading outside code fences), `references` (a `References`, `Bibliography` or similar heading to the next heading), `appendix` (an `Appendix` or `Supplementary Material` heading, or lettered headings after the references) and `unknown`. Detection reads patterns, not meaning, and does not guess.
+- Citation edges: each `references.entries` item with a `key` is an edge from the text's entry to that key. A reference matches by DOI (case-insensitive), then arXiv id (any version and form), then a normalised title of at least 20 characters that its normalised text contains, the longest winning. A match on an entry with `duplicate_of` gives the surviving key. The entries that record the text itself never match, and an id that a line break divides does not match.
+- What a search index does with it: index the raw text and keep `first_line` and `last_line` as anchors, without a cleaned copy. For matching only, join hyphen-split words and wrapped lines and map each match back to raw lines. Cut passages at section borders. Put the paper's title and the section's heading before each passage. Index the `references` range in a separate field that a default search does not read, and `front` and `unknown` spans as body text. Use `entries[].key` as citation edges. Treat `unknown`, an absent `abstract` span and each warning as "not known", and fall back to the whole text. `lab search` does this (section 6, "Search: `[lab.search]` and `rf.search/1`"), and `lab related` reads the edges as `cites`.
+
+**The `abstract` field** (papers 0.4.0). `papers registry abstracts [--key <key>]… [--limit <n>] [--dry-run] [--registry <path>]` adds two optional fields to an entry that has no `abstract`:
+
+- `abstract`: the work's abstract as the source gives it, one string with single spaces and no line breaks. It is absent when none is recorded, never `null` or empty. It may hold LaTeX or markup; OpenAlex abstracts are rebuilt from its word index, so their punctuation spacing can differ.
+- `abstract_source`: `arxiv:<id>v<n>` or `openalex:<W id>`. It is present exactly when `abstract` is.
+
+An entry with an arXiv id gets the abstract from arXiv (its recorded `version`, else the latest); any other entry with a DOI or OpenAlex id gets it from OpenAlex; others are skipped. The command sends only the id, downloads no PDF, and changes no other field and no entry order. An entry that has an `abstract` is never changed; remove both fields by hand to replace it. `registry build` keeps both fields.
+
+The full definitions of these three parts are in [papers `docs/interfaces.md`](https://github.com/syz51/papers/blob/main/docs/interfaces.md), sections "Registered papers first", "Paper structure: `rf.paper-structure/1`" and "The `abstract` field of `rf.reference/1`". A change there is a change of contract; copy it here.
+
 ## 4. Provenance records: `rf.run/1` and `rf.manifest/1`
 
 `prov` owns these. Other tools may read them. Their schemas are in the `prov` README.
