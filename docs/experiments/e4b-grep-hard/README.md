@@ -125,12 +125,45 @@ Paired correct answers, 30 pairs: both 3, `cli` only 3, `mcp` only 6, neither 18
 - **Neither correct in 18 pairs.** Six topics failed in all four sessions: K03, K08, K17, K28, T09 and T18. A phrasing can be broader than its `need`: the key grades the record that states the present status, and a phrasing such as a short query may also match older records. Part of these failures may be prompts that the key does not fit, not misses of either delivery.
 - **Cost.** `mcp` took 2.1 more tool calls and 23% more tokens over all calls. Its notional cost was 29% higher, but that figure is confounded: the `cli` comparison sessions started right after the 132 `cli` screening sessions, with the same prompt-cache prefix, so they wrote fewer cache tokens (12,272 against 17,214 per session).
 
+## Regrade against the test set at masters 410b5e4 (research-factory-342)
+
+The sections above grade against the test set at masters 12f8ae8. There, some wrong answers named only files that the key had never graded. research-factory-342 graded those files blind in masters: 109 cited (topic, file) pairs on 43 topics, 27 at grade 2, 45 at grade 1 and 37 at grade 0. The test set's README, section "Addition, 13 November 2026", gives the method. This section regrades the same 290 transcripts with the same `measure.py` and `analyze.py` against the test set at masters 410b5e4. No session ran again. Rows and full output: [raw/regrade-342/](raw/regrade-342/).
+
+| Part | Correct at 12f8ae8 | Correct at 410b5e4 | Strict at 12f8ae8 | Strict at 410b5e4 |
+| --- | ---: | ---: | ---: | ---: |
+| Round 1, `cli` | 45/48 | 45/48 | 39/48 | 37/48 |
+| Round 1, `mcp` | 43/48 | 44/48 | 36/48 | 33/48 |
+| Screening, `cli` | 115/132 | 118/132 | 99/132 | 91/132 |
+| Round 2, `cli` | 6/30 | 8/30 | 4/30 | 5/30 |
+| Round 2, `mcp` | 9/30 | 14/30 | 6/30 | 6/30 |
+
+Correct answers only rose: 11 sessions changed from wrong to correct and none the other way. `strict` fell in 21 sessions and rose in 9: a file that the key now grades 0 makes an answer that names it not strict.
+
+Paired tests after the regrade:
+
+| Round | Pairs | Both | `cli` only | `mcp` only | Neither | Exact McNemar p | Topics better for `cli` / `mcp` (sign test, Holm) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Round 1 | 48 | 44 | 1 | 0 | 3 | 1 | 1 / 0 (p=1) |
+| Round 2 | 30 | 6 | 2 | 8 | 14 | 0.109 | 2 / 6 (p=0.87) |
+
+Round 2 by topic after the regrade (`cli` / `mcp` correct of 2): K03 0/1, K08 0/0, K11 2/2, K12 0/1, K17 0/0, K19 1/2, K20 0/1, K24 1/0, K25 0/2, K28 0/0, K35 1/0, T02 2/2, T09 0/0, T18 0/2, T19 1/1. The tool calls, tokens and cost do not depend on the key and do not change.
+
+- **Round 1.** One `mcp` session (T12) is now correct. `cli` 45 and `mcp` 44 of 48, p=1. No change in conclusion.
+- **Round 2.** Seven sessions are now correct: 2 `cli` (K11, T02) and 5 `mcp` (K03, T02 twice, T18 twice). `mcp` answered 14 of 30 against 8 of 30. The discordant pairs split 8 to 2 for `mcp`, exact McNemar p=0.109. The direction favours `mcp` more clearly, but the difference is still not significant at 0.05.
+- **Selection under the new key.** Three screening failures are now correct: K11 phrasing 1, K12 phrasing 1 and T02 phrasing 2. Under the new key, the round-2 rule would not have selected these three topics. Without them (12 topics, 24 pairs): `cli` 4 and `mcp` 9 of 24, discordant 2 to 7, p=0.18. The primary result stays the 15 topics as selected, because the rule was fixed before the sessions.
+- **K12 in round 1.** The record that all four round-1 K12 sessions cited (`brief-path4.md`) is now graded 1, not 2. Those four sessions stay wrong.
+- **Neither correct.** Four topics now fail in all four round-2 sessions: K08, K17, K28 and T09.
+
+**Files outside the corpus.** Four graded pairs are on files outside the test set's pool corpus, so the qrels leave them out: `lab-eval/README.md` of the test set (K41 grade 2, K37 grade 1) and `finrate-source-audit-inputs.md` (grade 0 for K41 and for K37). The tables above count them as the qrels do: not judged. This follows the test set's rule that the corpus defines the test set. As a check, the four grades were added to a copy of `qrels-records.txt` and the three parts regraded. No `correct` value changed: every session that cites one of them was already correct. `strict` fell in 7 sessions (round 1: K41, all 4 sessions; screening: K37 phrasing 1, K41 phrasings 1 and 2), because they also name the grade-0 file. Round 2 did not change.
+
 ## Conclusion
 
-- On topics where `cli` is at ceiling (round 1), `mcp` does not raise correct answers (43 against 45 of 48, p=0.5).
-- On topics where a `cli` session failed (round 2, 15 topics), `mcp` answered 9 of 30 against 6 of 30. The direction favours `mcp`, but the test is far from significant (p=0.51). E4b does not show that MCP delivery raises correct answers.
+The bullets use the regraded results (test set at masters 410b5e4). The results at 12f8ae8 are in the sections above.
+
+- On topics where `cli` is at ceiling (round 1), `mcp` does not raise correct answers (44 against 45 of 48, p=1). At 12f8ae8: 43 against 45, p=0.5.
+- On topics where a `cli` session failed (round 2, 15 topics), `mcp` answered 14 of 30 against 8 of 30. The direction favours `mcp`, but the test is not significant (p=0.109; at 12f8ae8, 9 against 6, p=0.51). E4b does not show that MCP delivery raises correct answers. The regrade did not change this conclusion; it made the direction clearer.
 - In both rounds, `mcp` costs about 2 more tool calls and 23–32% more tokens per session, at equal context in the last call. E4's decision (`lab mcp` as default, because it makes agents search) does not change: E4b gives no reason to reverse it, and no correctness gain to add to it.
-- To detect a gain of the size seen (3 in 30), a run needs many more below-ceiling topics than this test set has. With `need` prompts the test set has about 4; with phrasings, 15.
+- To detect a gain of the size seen, a run needs more below-ceiling topics than this test set has. With `need` prompts the test set has about 4; with phrasings, 15 (12 under the new key). With the regraded split (a third of pairs discordant, 8 of 10 for `mcp`), an exact test at alpha 0.05 needs about 20–26 discordant pairs for power 0.80–0.87, about 60–80 pairs. With the split at 12f8ae8 (6 of 9), it needs about 250 pairs. research-factory-343 plans that study.
 
 ## Cost and usage
 
@@ -149,8 +182,8 @@ The board's weekly usage reading went from 88% before the pilot to 90% after the
 ## Limits
 
 - Round 2 has 15 topics, not 20, and 30 pairs. Its power is low; see the conclusion.
-- The pairs within a topic are not independent: both replicates share the topic and the prompt. The McNemar tests treat the 48 and 30 pairs as independent. The topic-level sign test does not, and it agrees (p=1 in both rounds).
-- One model, one archive, one answer key. `correct` is graded by file, from the paths the answer names, as in E4. In K12, all four round-1 sessions cited a record that the key does not judge. Over all E4b sessions, some wrong answers cite only unjudged files: 4 of 8 in round 1, 3 of 17 in screening, 8 of 45 in the round-2 comparison. If any of those files is relevant, the correct counts are too low. research-factory-342 proposes to judge them.
+- The pairs within a topic are not independent: both replicates share the topic and the prompt. The McNemar tests treat the 48 and 30 pairs as independent. The topic-level sign test does not, and it agrees (p=1 in both rounds; after the regrade, p=1 and p=0.87).
+- One model, one archive, one answer key. `correct` is graded by file, from the paths the answer names, as in E4. At masters 12f8ae8, some wrong answers cited only unjudged files: 4 of 8 in round 1, 3 of 17 in screening, 8 of 45 in the round-2 comparison. research-factory-342 graded them; see the regrade section. The new grades come from one blind judge per unit, so they can still be wrong.
 - Round 2's prompts are the test set's phrasings, whose grades were made for the `need`. See "Neither correct in 18 pairs".
 - Round 2's cost is confounded by the screening run before it (see "Cost" above). Round 1's is not: each condition started first in 12 sessions.
 - The start position comes from `order.log`. Sessions of one topic start within the same second, so the position is the order in which `xargs` started them.
@@ -175,6 +208,18 @@ uv run --no-project python screen.py select "$E4B_TESTSET" raw/round2-screen.jso
 uv run --no-project python order.py topics-round2.txt | E4B_OUT=out2 xargs -P4 -L1 sh run_session.sh
 uv run --no-project python measure.py "$E4B_TESTSET" out2 > raw/round2-compare.jsonl
 uv run --no-project --with scipy python analyze.py raw/round2-compare.jsonl
+# Regrade (research-factory-342): the test set at masters 410b5e4, the transcripts from air
+git -C <masters> archive 410b5e4 docs/process/archive-search-testset-2026-11-12 | tar x -C ts
+storagectl get air:research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
+T=ts/docs/process/archive-search-testset-2026-11-12
+uv run --no-project python measure.py "$T" out > raw/regrade-342/round1-need.jsonl
+uv run --no-project python measure.py "$T" screen > raw/regrade-342/round2-screen.jsonl
+uv run --no-project python measure.py "$T" out2 > raw/regrade-342/round2-compare.jsonl
+uv run --no-project --with scipy python analyze.py raw/regrade-342/round1-need.jsonl
+uv run --no-project --with scipy python analyze.py raw/regrade-342/round2-compare.jsonl
+# Without K11, K12 and T02 (the selection under the new key)
+jq -c 'select(.topic != "K11" and .topic != "K12" and .topic != "T02")' raw/regrade-342/round2-compare.jsonl > r2-12.jsonl
+uv run --no-project --with scipy python analyze.py r2-12.jsonl
 ```
 
 The runs went in batches of 6 topics (44 prompts for screening), each after a check that the weekly usage was below 95%.
