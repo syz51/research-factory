@@ -250,3 +250,150 @@ fn new_only_in_a_linked_worktree_reads_the_main_checkouts_ignored_input_at_the_b
     );
     assert!(!text.contains("did not run to completion"), "{text}");
 }
+
+#[test]
+fn new_only_treats_text_sealed_by_an_earlier_status_as_sealed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let tmp = &ceiling.join("tmp");
+    let d = &ceiling.join("repo");
+    std::fs::create_dir_all(tmp).unwrap();
+    std::fs::create_dir_all(d.join("docs")).unwrap();
+    git(d, ceiling, &["init", "-q", "-b", "main"]);
+    assert!(
+        lab(d, ceiling, tmp, &["init", "--name", "demo"])
+            .status
+            .success()
+    );
+    let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    cfg += r#"
+[[lab.checks]]
+name = "claims"
+run = ["cat", "f.jsonl"]
+version = []
+
+[lab.archive]
+model = 2
+seal = "git"
+write_indexes = false
+statuses = ["proposed", "accepted"]
+sealed_statuses = ["accepted"]
+inactive_statuses = []
+
+[[lab.archive.index]]
+name = "decisions"
+title = "Decisions"
+include = ["docs/D*.md"]
+output = "docs/decisions.md"
+id_from = '^(D\d+)-'
+"#;
+    write(d, "research.toml", &cfg);
+    write(d, ".gitignore", ".research/\n");
+    let rec = |status: &str| format!("---\nstatus: {status}\n---\n# D1\n\nLine one.\nLine two.\n");
+    write(d, "docs/D1-first.md", &rec("accepted"));
+    write(d, "f.jsonl", "");
+    git(d, ceiling, &["add", "-A"]);
+    git(d, ceiling, &["commit", "-qm", "accepted"]);
+    // Moving the status back does not unseal the text `accepted` sealed.
+    write(d, "docs/D1-first.md", &rec("proposed"));
+    git(d, ceiling, &["commit", "-qam", "back to proposed"]);
+
+    git(d, ceiling, &["switch", "-qc", "feat"]);
+    write(d, "docs/D1-first.md", &(rec("proposed") + "Line three.\n"));
+    let now = [
+        finding("warn", "docs/D1-first.md:6", "in sealed text", ""),
+        finding("warn", "docs/D1-first.md:8", "in appended text", ""),
+    ];
+    write(d, "f.jsonl", &now.join("\n"));
+    git(d, ceiling, &["commit", "-qam", "change"]);
+
+    let out = lab(d, ceiling, tmp, &["check", "--new-only"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}{}", stderr(&out));
+    assert!(
+        text.contains(
+            "1 error(s) or warning(s) the change adds to the files it touches:\n\
+             docs/D1-first.md:8 warn t:r: in appended text\n"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("1 in text sealed at the merge base"),
+        "{text}"
+    );
+}
+
+#[test]
+fn new_only_reads_no_status_from_a_seal_baseline_after_the_merge_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let tmp = &ceiling.join("tmp");
+    let d = &ceiling.join("repo");
+    std::fs::create_dir_all(tmp).unwrap();
+    std::fs::create_dir_all(d.join("docs")).unwrap();
+    git(d, ceiling, &["init", "-q", "-b", "main"]);
+    assert!(
+        lab(d, ceiling, tmp, &["init", "--name", "demo"])
+            .status
+            .success()
+    );
+    let base_cfg = std::fs::read_to_string(d.join("research.toml")).unwrap()
+        + r#"
+[[lab.checks]]
+name = "claims"
+run = ["cat", "f.jsonl"]
+version = []
+
+[lab.archive]
+model = 2
+seal = "git"
+write_indexes = false
+statuses = ["proposed", "accepted"]
+inactive_statuses = []
+sealed_statuses = ["accepted"]
+
+[[lab.archive.index]]
+name = "decisions"
+title = "Decisions"
+include = ["docs/D*.md"]
+output = "docs/decisions.md"
+id_from = '^(D\d+)-'
+"#;
+    write(d, "research.toml", &base_cfg);
+    write(d, ".gitignore", ".research/\n");
+    let rec = |status: &str| format!("---\nstatus: {status}\n---\n# D1\n\nLine one.\nLine two.\n");
+    write(d, "docs/D1-first.md", &rec("proposed"));
+    write(d, "f.jsonl", "");
+    git(d, ceiling, &["add", "-A"]);
+    git(d, ceiling, &["commit", "-qm", "proposed"]);
+    git(d, ceiling, &["branch", "feat"]);
+    // Accepted on main after the branch left it, and named as the baseline.
+    write(d, "docs/D1-first.md", &rec("accepted"));
+    git(d, ceiling, &["commit", "-qam", "accepted"]);
+    let accepted = git(d, ceiling, &["rev-parse", "HEAD"]);
+
+    git(d, ceiling, &["switch", "-q", "feat"]);
+    write(
+        d,
+        "research.toml",
+        &base_cfg.replace(
+            "inactive_statuses = []",
+            &format!("inactive_statuses = []\nseal_baseline = \"{accepted}\""),
+        ),
+    );
+    write(
+        d,
+        "f.jsonl",
+        &finding("warn", "docs/D1-first.md:6", "new in unsealed text", ""),
+    );
+    write(d, "docs/D1-first.md", &(rec("proposed") + "Line three.\n"));
+    git(d, ceiling, &["commit", "-qam", "change"]);
+
+    let out = lab(d, ceiling, tmp, &["check", "--new-only"]);
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}{}", stderr(&out));
+    assert!(
+        text.contains("docs/D1-first.md:6 warn t:r: new in unsealed text"),
+        "{text}"
+    );
+}

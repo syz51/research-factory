@@ -778,7 +778,8 @@ fn without_id<'t>(title: &'t str, id: Option<&str>) -> &'t str {
 
 /// Those of `files`, relative to the project root, that are sealed at
 /// `commit`, each with the last line of its sealed text in the work tree: the
-/// file matches `sealed`, or its status there is one of `sealed_statuses`.
+/// file matches `sealed`, or its status there or in an earlier version is
+/// one of `sealed_statuses`.
 /// Text appended after that line is not sealed yet. A file whose body no
 /// longer starts with the sealed body, which the seal check reports, is
 /// sealed whole. Empty without `[lab.archive]`.
@@ -805,7 +806,8 @@ pub fn sealed_at(
         }
         let sealed = spec.sealed.matches(file)
             || front::status_of(&blob.stdout)
-                .is_some_and(|s| spec.cfg.sealed_statuses.contains(&s));
+                .is_some_and(|s| spec.cfg.sealed_statuses.contains(&s))
+            || gitseal::status_sealed_by(&spec, commit, file)?;
         if !sealed {
             continue;
         }

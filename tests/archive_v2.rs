@@ -1013,6 +1013,24 @@ fn a_kept_link_covers_text_that_git_sealed() {
 }
 
 #[test]
+fn a_kept_link_covers_text_sealed_by_an_earlier_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let config = format!(
+        "{CONFIG}\n[[lab.archive.kept_link]]\nfile = \"{D001}\"\ntarget = \"../gone.md\"\nreason = \"The page was removed on purpose.\"\n"
+    );
+    archive(d, &config);
+    append(d, D001, "\nSee [gone](../gone.md).\n");
+    commit(d, "a link to a removed page");
+    // `accepted` sealed D001 with the link; `proposed` at HEAD does not unseal it.
+    write(d, D001, &read(d, D001).replace("accepted", "proposed"));
+    commit(d, "back to proposed");
+    let (code, text) = check(d);
+    assert_eq!((code, rules(&text)), (Some(0), Vec::new()), "{text}");
+    assert!(text.contains("info kept-link"), "{text}");
+}
+
+#[test]
 fn a_record_sealed_by_status_stays_sealed_when_its_status_moves_back() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path();

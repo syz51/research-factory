@@ -509,9 +509,68 @@ pub(super) fn sealed_len(spec: &Spec, file: &str, body: &[u8]) -> Result<Option<
         return Ok(None);
     }
     let sealed = spec.sealed.matches(file)
-        || front::status_of(&out.stdout).is_some_and(|s| spec.cfg.sealed_statuses.contains(&s));
+        || front::status_of(&out.stdout).is_some_and(|s| spec.cfg.sealed_statuses.contains(&s))
+        || status_sealed_by(spec, "HEAD", file)?;
     let head = front::sealed_body(&out.stdout);
     Ok((sealed && body.starts_with(head)).then_some(head.len()))
+}
+
+/// Whether `file`, a record relative to the project root, had a status in
+/// `sealed_statuses` in a version up to `rev`, as the history check reads
+/// them: the version at `seal_baseline`, when set and an ancestor of `rev`,
+/// and each version a later commit made. A record sealed by status stays
+/// sealed when a later commit changes its status; a file in no index is
+/// never sealed by status.
+pub(super) fn status_sealed_by(spec: &Spec, rev: &str, file: &str) -> Result<bool, String> {
+    let cfg = spec.cfg;
+    let root = spec.root();
+    if cfg.sealed_statuses.is_empty() || !spec.indexes.iter().any(|i| i.files.matches(file)) {
+        return Ok(false);
+    }
+    let Some(prefix) = prefix(root) else {
+        return Ok(false);
+    };
+    let path = format!("{prefix}{file}");
+    let baseline = match &cfg.seal_baseline {
+        None => None,
+        Some(b) => Some(commit(root, b)?.ok_or_else(|| {
+            format!("[lab.archive] seal_baseline `{b}` is not a commit in this repository")
+        })?),
+    };
+    // A baseline that `rev` does not contain bounds nothing before `rev`.
+    let baseline = match baseline {
+        Some(b)
+            if run(root, &["merge-base", "--is-ancestor", &b, rev], b"")?
+                .status
+                .success() =>
+        {
+            Some(b)
+        }
+        _ => None,
+    };
+    let range = match &baseline {
+        Some(b) => format!("{b}..{rev}"),
+        None => rev.to_string(),
+    };
+    let log = output(
+        root,
+        &["log", "--full-history", "--format=%H", &range, "--", &path],
+        b"",
+    )?;
+    let mut blobs = Blobs::open(root)?;
+    for c in String::from_utf8_lossy(&log)
+        .split_whitespace()
+        .chain(baseline.as_deref())
+    {
+        if blobs
+            .get(&format!("{c}:{path}"))?
+            .and_then(|b| front::status_of(&b))
+            .is_some_and(|s| cfg.sealed_statuses.contains(&s))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `git log` of one file, oldest change last: for `lab archive log <record>`.
