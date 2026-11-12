@@ -476,5 +476,5 @@ Covered in section 4.1 (stale derivative). The joint is between `papers` (writer
 | 27 | Link target tracked, ignored or untracked | 2.5 | Fixed by 228 (warning) |
 | 28 | Stored check run | 5.5 | Fixed by 228 (skill rule, opt-in hook) |
 | 29 | Worktree data | 5.6 | Fixed by 312, 316 (masters hook) |
-| 30 | Experiment call batch | 7.3 | Fixed by 224, 322 to 333 |
+| 30 | Experiment call batch | 7.3 | Fixed by 224 and 322 with its sub-tasks 323, 324, 327, 332, 333 |
 | 31 | Test-set judgment pin | 7.3 | Fixed by 245, 340, 341 |
