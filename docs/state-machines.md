@@ -2,7 +2,7 @@
 
 This document models the research pipeline as state machines.
 It names each machine, its states, its transitions and the place that enforces each transition.
-It covers the tools as they are (lab 0.9.11, papers 0.2.0, claimcheck 0.10.0, prov, agentprof, the work board) and the machines that [archive-design.md](archive-design.md) adds.
+It covers the tools as they are (lab 0.17.0, papers 0.7.0, claimcheck 0.11.0, prov 0.1.2, agentprof 0.4.0, the work board) and the machines that [archive-design.md](archive-design.md) adds.
 
 An **explicit** machine has its states in code or in a config list.
 An **implicit** machine has states that exist only as a combination of files, fields or habits.
@@ -235,18 +235,25 @@ Guards the redesign adds:
 - **Stale derivative.** A structure sidecar or a card records the sha256 of the text it was made from. When the text's sha256 differs, the derivative is `stale`. The index ignores it and `papers registry check` reports it.
 - **Write order.** A derivative is written to a temporary file and renamed after its record.
 
-Defects outside the redesign, proposed in research-factory-219:
+Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
 
-- `verified` is never read by `papers registry check` and is null in 850 of 850 masters entries.
-- `duplicate_of` chains have no cycle check.
-- The `.txt` file is written before the sidecar and the registry entry.
-- `depth` is null in 17 masters entries; keys 481 and 482 have no catalogue line (repair in 193).
-- No tool has a `withdrawn` state for a retracted paper.
+- `verified` is written by `papers verify --record`. `papers registry check` now reads it:
+  - a status other than `match`, `mismatch` or `not-found` is `invalid-value`;
+  - a bad `at` date is `malformed-date`;
+  - a recorded `mismatch` or `not-found` is `verified-mismatch` (warn).
+- `duplicate_of` links are checked. A cycle is `duplicate-cycle` (error, once per cycle). A chain longer than one link is `duplicate-chain` (warn), which names the key it ends at.
+- `papers read` stages a plain or layout text as `<name>.txt.tmp`, records it, writes its manifest, then renames it. A failed step undoes the earlier ones. A Docling text already worked this way.
+- A catalogue entry with no depth is `depth-missing` (warn), as section 4.2 says. The 17 masters entries that had a null depth now state `unknown` with a reason.
+
+Still open: no tool has a `withdrawn` state for a retracted paper. research-factory-219 decided not to add one now. Proposal research-factory-282 holds the detection work.
 
 ### 4.2 Reading depth
 
-States are the values of `depth` in the registry, from "listed" to "read in full". The tool accepts any listed value in any order.
-Accepted: depth describes how far a person or an agent read, and a re-read at a lower depth does not happen in practice. The null case is in research-factory-219.
+States are the values of `depth` in the registry, from "listed" to "read in full", plus `unknown`. The tool accepts any listed value in any order.
+Accepted: depth describes how far a person or an agent read, and a re-read at a lower depth does not happen in practice.
+
+- `unknown` is valid only with a reason after it, as `Inspection depth: unknown` followed by the reason.
+- An entry with no depth, or `unknown` without a reason, gives `depth-missing` (warn). This is in papers 0.7.0 (research-factory-219).
 
 ### 4.3 Network machines of papers
 
@@ -267,7 +274,7 @@ Accepted: depth describes how far a person or an agent read, and a re-read at a 
 | Finding | reported; severity Error or Warn | No baseline or allow state. `lab check --new-only` supplies the baseline from outside. Accepted. |
 | Quote verdict | verified (score ≥ 0.8), weak, not found | None |
 | Number verdict | found, not found | None |
-| Source text load | loaded, hash mismatch, missing | A hash mismatch does not block the check. Proposed in research-factory-220. |
+| Source text load | loaded, hash mismatch, missing | Fixed by research-factory-220 (claimcheck 0.11.0). A quote or number matched only in a text whose sha256 differs from the registry gets `source-text-changed` (warn) on its line and does not count as supported. |
 
 ### 4.5 Provenance (prov)
 
