@@ -18,6 +18,9 @@ use crate::lessons::Lesson;
 use crate::signals::{self, MeasureFailure, Signal, State, Uncovered};
 
 pub const SCHEMA: &str = "rf.loop/1";
+/// How the note in a loop record's `errors` starts when the previous
+/// `last.json` was unreadable.
+pub const UNREADABLE_RECORD: &str = "the previous loop record was unreadable";
 const MEASURE_TIMEOUT: Duration = Duration::from_secs(600);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(60);
 const TAIL_LINES: usize = 20;
@@ -61,6 +64,10 @@ pub struct SignalStatus {
     pub id: String,
     pub kind: String,
     pub status: SendStatus,
+    /// The notify command's answer for it, such as the board task that
+    /// tracks it (since lab 0.17.0).
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
 }
 
 /// `last.json`: the latest loop's results.
@@ -72,6 +79,9 @@ pub struct Record {
     pub measure: Vec<MeasureResult>,
     pub evaluations: Vec<Evaluation>,
     pub signals: Vec<SignalStatus>,
+    /// The signals this loop no longer produced (since lab 0.17.0).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolved: Vec<signals::Resolved>,
     pub errors: Vec<String>,
 }
 
@@ -418,18 +428,29 @@ pub fn run(
         println!("another loop is running");
         return Ok(ExitCode::SUCCESS);
     };
-    // Checked under the lock, so a loop that just finished is seen.
+    // Checked under the lock, so a loop that just finished is seen. An
+    // unreadable record cannot show the last loop was recent, so the loop
+    // runs, says why, and replaces the record.
     let now = jiff::Timestamp::now();
-    if let Some(minutes) = if_older
-        && let Ok(Some(last)) = read_record(project)
-        && let Ok(finished) = last.finished.parse::<jiff::Timestamp>()
-        && now.duration_since(finished) < jiff::SignedDuration::from_mins(minutes as i64)
-    {
-        return Ok(ExitCode::SUCCESS);
+    let mut unreadable = None;
+    match read_record(project) {
+        Ok(Some(last)) => {
+            if let Some(minutes) = if_older
+                && let Ok(finished) = last.finished.parse::<jiff::Timestamp>()
+                && now.duration_since(finished) < jiff::SignedDuration::from_mins(minutes as i64)
+            {
+                return Ok(ExitCode::SUCCESS);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => unreadable = Some(format!("{UNREADABLE_RECORD} ({e}); this loop replaces it")),
     }
     let started = crate::finding::now();
     let mut log = open_log(&dir)?;
     let _ = writeln!(log, "== lab loop {started} (pid {})", std::process::id());
+    if let Some(u) = &unreadable {
+        let _ = writeln!(log, "-- {u}");
+    }
     let redirected = worktree.map(|w| {
         format!(
             "Started in the linked git worktree {}: ran the loop for the main checkout {}.",
@@ -462,7 +483,8 @@ pub fn run(
         measure: measures,
         evaluations: Vec::new(),
         signals: Vec::new(),
-        errors: Vec::new(),
+        resolved: Vec::new(),
+        errors: unreadable.into_iter().collect(),
     };
     let state_path = dir.join("signals.json");
     let sigs = match evaluate_and_send(
@@ -545,12 +567,29 @@ fn evaluate_and_send(
     );
     record.evaluations = analysis.evaluations;
     let mut state = State::load(state_path)?;
-    let send = state.plan(
+    let plan = state.plan(
         &mut sigs,
         now,
         jiff::SignedDuration::from_hours(cfg.renotify_hours as i64),
     );
-    for (s, send) in sigs.iter().zip(send) {
+    for r in &plan.resolved {
+        let _ = writeln!(
+            log,
+            "-- resolved {}{}{}",
+            r.id,
+            r.reference
+                .as_ref()
+                .map(|t| format!(", tracked in {t}"))
+                .unwrap_or_default(),
+            if r.unsent {
+                "; its notice was never sent and is dropped"
+            } else {
+                ""
+            }
+        );
+    }
+    record.resolved = plan.resolved;
+    for (s, send) in sigs.iter().zip(plan.send) {
         let status = match (send, &cfg.notify) {
             (false, _) => SendStatus::Unchanged,
             (true, None) => SendStatus::Pending,
@@ -575,6 +614,7 @@ fn evaluate_and_send(
             id: s.id.clone(),
             kind: s.kind.clone(),
             status,
+            reference: state.signals.get(&s.id).and_then(|e| e.reference.clone()),
         });
     }
     // The signals as sent carry their stored ref, including one just returned.

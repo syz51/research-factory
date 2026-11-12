@@ -730,11 +730,12 @@ fn check_at_replays_commits_in_a_temporary_worktree() {
 
     // The check prints the committed f.jsonl and the git-ignored source
     // text's measure, which only the work tree holds: the commits hold only
-    // the directory's .gitignore. Its version is the commit's v.txt.
+    // the directory's .gitignore. Its version is the commit's v.txt. It
+    // exits 1 when it printed error findings, as rf.finding/1 checkers do.
     std::fs::create_dir_all(d).unwrap();
     assert!(lab(d, &["init", "--name", "demo"]).status.success());
     let mut cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
-    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat sources/m.jsonl; exit 0\"]\nversion = [\"sh\", \"-c\", \"cat v.txt\"]\nuncommitted_inputs = [\"sources\", \"gone\"]\n";
+    cfg += "\n[[lab.checks]]\nname = \"claims\"\nrun = [\"sh\", \"-c\", \"cat f.jsonl; echo; cat sources/m.jsonl; test -s f.jsonl && exit 1; exit 0\"]\nversion = [\"sh\", \"-c\", \"cat v.txt\"]\nuncommitted_inputs = [\"sources\", \"gone\"]\n";
     std::fs::write(d.join("research.toml"), cfg).unwrap();
     std::fs::write(d.join(".gitignore"), ".research/\n").unwrap();
     std::fs::create_dir_all(d.join("sources")).unwrap();

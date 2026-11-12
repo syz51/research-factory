@@ -380,14 +380,31 @@ fn failed_measures_and_sends_are_reported_and_retried() {
         state.contains("\"measure-failed:0\"") && state.contains("\"resolved\": \"20"),
         "{state}"
     );
+    // Its notice never went out; the record and the brief say it is dropped.
+    assert_eq!(
+        last(d)["resolved"],
+        serde_json::json!([{"id": "measure-failed:0", "unsent": true}])
+    );
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("`measure-failed:0` (its notice was never sent and is dropped)"),
+        "{brief}"
+    );
 
-    // It comes back: reopened.
+    // It comes back: never sent, so new rather than reopened.
     write(d, "measure-fails", "");
     assert_eq!(lab(d, &["loop"]).status.code(), Some(1));
-    let reopened = sent(d).pop().unwrap();
-    assert_eq!(reopened["id"], "measure-failed:0");
-    assert_eq!(reopened["reopened"], true);
-    assert!(reopened["body"].as_str().unwrap().contains("scan broke"));
+    let back = sent(d).pop().unwrap();
+    assert_eq!(back["id"], "measure-failed:0");
+    assert_eq!(back["reopened"], false);
+    assert!(back["body"].as_str().unwrap().contains("scan broke"));
+
+    // Sent this time; when it resolves, the brief names its task.
+    std::fs::remove_file(d.join("measure-fails")).unwrap();
+    lab(d, &["loop"]);
+    let r = &last(d)["resolved"][0];
+    assert_eq!(r["id"], "measure-failed:0");
+    assert!(r["ref"].is_string() && r.get("unsent").is_none(), "{r}");
 }
 
 #[test]
@@ -489,6 +506,40 @@ fn an_unreadable_signal_state_is_recorded_and_backs_off() {
     let skipped = lab(d, &["loop", "--if-older", "60"]);
     assert_eq!(skipped.status.code(), Some(0));
     assert_eq!(last(d)["finished"], rec["finished"], "backed off");
+}
+
+#[test]
+fn an_unreadable_loop_record_is_reported_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    project(d);
+    write(d, ".research/lab/loop/last.json", "{ not json");
+    // The record cannot show a recent loop, so `--if-older` runs it.
+    let out = lab(d, &["loop", "--if-older", "60"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("Error: the previous loop record was unreadable"),
+        "{}",
+        stdout(&out)
+    );
+    let rec = last(d);
+    let note = rec["errors"][0].as_str().unwrap();
+    assert!(
+        note.starts_with("the previous loop record was unreadable (")
+            && note.ends_with("); this loop replaces it"),
+        "{rec}"
+    );
+    assert!(read(d, ".research/lab/loop/loop.log").contains(note));
+    let brief = stdout(&lab(d, &["brief"]));
+    assert!(
+        brief.contains("Before the last loop, the previous loop record"),
+        "{brief}"
+    );
+    assert!(!brief.contains("The loop failed"), "{brief}");
+    // Now readable: the next `--if-older` skips.
+    let skipped = lab(d, &["loop", "--if-older", "60"]);
+    assert_eq!(stdout(&skipped), "", "quiet");
+    assert_eq!(last(d)["finished"], rec["finished"]);
 }
 
 /// Runs `program` in `dir` with git confined to repositories below `ceiling`
