@@ -40,9 +40,8 @@ pub enum Outcome {
 }
 
 /// The title and aliases of the record file `path`, as search words.
-pub fn subject_of(project: &Project, path: &str) -> Result<String, String> {
+pub fn subject_of(project: &Project, spec: &Spec, path: &str) -> Result<String, String> {
     let bytes = std::fs::read(project.path(path)).map_err(|e| format!("{path}: {e}"))?;
-    let spec = Spec::new(project)?;
     let meta = spec.meta_of(path, &bytes);
     let mut parts: Vec<String> = meta.title.into_iter().collect();
     parts.extend(meta.aliases);
@@ -137,7 +136,7 @@ pub fn run(project: &Project, args: &[String]) -> Result<ExitCode, String> {
         _ => None,
     };
     let subject = match file {
-        Some(f) => subject_of(project, f)?,
+        Some(f) => subject_of(project, &Spec::new(project)?, f)?,
         None => args.join(" "),
     };
     let exclude: Vec<String> = file.map(str::to_string).into_iter().collect();

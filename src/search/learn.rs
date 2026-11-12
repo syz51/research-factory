@@ -195,8 +195,10 @@ fn unused(project: &Project, lines: &[Line]) -> Result<String, String> {
     let queries: Vec<_> = lines
         .iter()
         .filter_map(|l| match l {
-            Line::Query(q) => q.at.parse::<Timestamp>().ok().map(|t| (t, q)),
-            Line::Open(_) => None,
+            // Only searches people and agents ran; the duplicate check and
+            // topics runs would keep every entry in use.
+            Line::Query(q) if q.source == "cli" => q.at.parse::<Timestamp>().ok().map(|t| (t, q)),
+            Line::Query(_) | Line::Open(_) => None,
         })
         .collect();
     if queries.first().is_none_or(|(t, _)| *t > start) {
@@ -465,7 +467,8 @@ pub fn seed(project: &Project) -> Result<ExitCode, String> {
             continue;
         };
         for alias in ctx.spec.meta_of(&path, &bytes).aliases {
-            let alias = alias.trim().to_string();
+            // As its words: `=`, `#` or `retired:` in an alias would change the line.
+            let alias = words(&alias).join(" ");
             if alias.is_empty()
                 || words(&alias) == words(&id)
                 || thesaurus::holds(&entries, &alias, &id)

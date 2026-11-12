@@ -407,9 +407,14 @@ fn retro_prints_missed_queries_most_frequent_first() {
     assert!(fy.is_some() && alpha.is_some(), "{out}");
     assert!(fy < alpha, "most frequent first: {out}");
     assert!(!out.contains("run only"), "{out}");
+    // --since lists the queries missed since then, counted over the whole
+    // trace, under the id that accept takes.
     let since = ok(d, &["retro", "--since", "2026-11-02"]);
-    assert!(since.contains("\"fy shift\": 1 miss(es)"), "{since}");
+    assert!(since.contains("\"fy shift\": 2 miss(es)"), "{since}");
     assert!(!since.contains("alpha beta"), "{since}");
+    let id = proposal_id(&since, "fy shift");
+    ok(d, &["retro", "accept", &id]);
+    assert!(read(d, "docs/decisions/D002-use-bm25.md").contains("\"fy shift\""));
 }
 
 // 2. Accept writes the alias into an open record; the proposal is settled.
@@ -502,6 +507,27 @@ fn a_rejected_proposal_never_returns() {
     write(d, TRACE, &(text + "\n"));
     let retro = ok(d, &["retro"]);
     assert!(!retro.contains("fy shift"), "{retro}");
+    // Still hidden when later misses lead to another record.
+    let mut text = read(d, TRACE);
+    for day in ["06", "07"] {
+        text.push_str(&query_line(
+            &format!("2026-11-{day}T10:00:00Z"),
+            day,
+            "fy shift",
+            "zero",
+            &[],
+        ));
+        text.push('\n');
+        text.push_str(&open_line(
+            &format!("2026-11-{day}T10:01:00Z"),
+            day,
+            "docs/decisions/D001-use-tfidf.md",
+        ));
+        text.push('\n');
+    }
+    write(d, TRACE, &text);
+    let retro = ok(d, &["retro"]);
+    assert!(!retro.contains("fy shift"), "{retro}");
     let decisions: Value = serde_json::from_str(&read(d, ".research/lab/retro.json")).unwrap();
     assert_eq!(decisions["rejected"][0]["note"], "not a synonym");
 }
@@ -540,12 +566,22 @@ fn an_unused_entry_is_listed_and_retire_stops_it() {
 fn seed_adds_record_aliases_once() {
     let dir = fixture();
     let d = dir.path();
+    let d001 = read(d, "docs/decisions/D001-use-tfidf.md").replace(
+        "status: superseded\n",
+        "status: superseded\naliases: [\"#1 = old\"]\n",
+    );
+    write(d, "docs/decisions/D001-use-tfidf.md", &d001);
     let out = ok(d, &["retro", "seed"]);
-    assert!(out.contains("Added 1 entry(ies)"), "{out}");
+    assert!(out.contains("Added 2 entry(ies)"), "{out}");
+    let thesaurus = read(d, THESAURUS);
     assert!(
-        read(d, THESAURUS)
-            .lines()
-            .any(|l| l == "lexical baseline = D002")
+        thesaurus.lines().any(|l| l == "lexical baseline = D002"),
+        "{thesaurus}"
+    );
+    // An alias is written as its words, so `#` and `=` cannot change the line.
+    assert!(
+        thesaurus.lines().any(|l| l == "1 old = D001"),
+        "{thesaurus}"
     );
     let again = ok(d, &["retro", "seed"]);
     assert!(

@@ -129,7 +129,17 @@ pub fn shared_state(project: &Project, rel: &str) -> Result<PathBuf, String> {
 
 /// The trace file.
 pub fn path(project: &Project) -> Result<PathBuf, String> {
-    shared_state(project, FILE)
+    // Resolving it runs git; a topics run asks once per topic.
+    static CACHE: std::sync::Mutex<Option<(PathBuf, PathBuf)>> = std::sync::Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((root, file)) = cache.as_ref()
+        && *root == project.root
+    {
+        return Ok(file.clone());
+    }
+    let file = shared_state(project, FILE)?;
+    *cache = Some((project.root.clone(), file.clone()));
+    Ok(file)
 }
 
 fn append(file: &Path, line: &str) -> Result<(), String> {

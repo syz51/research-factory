@@ -656,7 +656,7 @@ fn similar_problems(spec: &Spec) -> Vec<Problem> {
     let mut problems = Vec::new();
     // A new record is compared with the records that already exist.
     for path in &records {
-        let outcome = match similar::subject_of(project, path) {
+        let outcome = match similar::subject_of(project, spec, path) {
             Ok(subject) => similar::similar(project, &subject, &records),
             Err(e) => similar::Outcome::Skipped(e),
         };

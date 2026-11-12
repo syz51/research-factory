@@ -233,7 +233,7 @@ A tool that reads a hit may append `{"schema":"rf.search-open/1","at":"…","ses
 
 **Thesaurus.** One entry per line, its terms separated by `=`: `fiscal calendar = fiscal year = FY`. Terms are compared as lowercased words. A line that starts with `retired:` stays in the file but is not applied. `#` starts a comment line. An entry with fewer than two different terms is an error that names the file and line (exit 2). At query time, each active entry with a term that occurs as consecutive words of a phrasing adds its other terms as alternatives to those words: `marsupial` also matches `wombat`. The human output names each one as `Also searched: wombat (for marsupial)`, and `--explain` adds the entry. The thesaurus is read from the checkout, with no network and no model call.
 
-**Missed queries.** `lab retro` reads the `cli` lines of the trace (from `--since DATE` on, when given). A query is missed when it found nothing (`zero`), when no hit held every term (`partial-hit`), or when the next query of the same session within 600 seconds differs and shares a word of 3 or more characters (`reformulated`). Its target is the record the session read next in that window: the first `rf.search-open/1` line, else the best hit of a later query whose hits hold every term. Queries are grouped by their lowercased words and listed most frequent first, each with an 8-digit id taken from the query and its target. When the trace reaches back `review_days`, `lab retro` also lists the active thesaurus entries that no query applied in that time.
+**Missed queries.** `lab retro` reads the `cli` lines of the trace. A query is missed when it found nothing (`zero`), when no hit held every term (`partial-hit`), or when the next query of the same session within 600 seconds differs and shares a word of 3 or more characters (`reformulated`). Its target is the record the session read next in that window: the first `rf.search-open/1` line, else the best hit of a later query whose hits hold every term. A line without a session is never linked to a later line. Queries are grouped by their lowercased words and listed most frequent first, each with the target most of its misses led to and an id of 8 hexadecimal digits taken from the query alone, so the id stays the same when the target changes. `--since DATE` lists only the queries last missed on or after DATE; their counts and targets still come from the whole trace. When the trace reaches back `review_days`, `lab retro` also lists the active thesaurus entries that no `cli` query applied in that time.
 
 **Decisions.** `<state_dir>/lab/retro.json` (`rf.retro/1`, in the main checkout's state directory like the trace) records what was decided, so that a decided item does not return:
 
@@ -245,10 +245,10 @@ A tool that reads a hit may append `{"schema":"rf.search-open/1","at":"…","ses
 ```
 
 - `lab retro accept ID [--record RID]` adds the query as an alias of the target record (`--record` names one when the trace has none). An open record gets the alias in its front matter `aliases`. A finished record, which matches `sealed` or has a status in `sealed_statuses`, `terminal_statuses` or `inactive_statuses`, is never edited: the thesaurus gets the line `query = RID` instead (`wrote` is `thesaurus`). An accepted query is not proposed again.
-- `lab retro reject ID... [--note TEXT]` records the proposals; a rejected id never returns.
+- `lab retro reject ID... [--note TEXT]` records the proposals; a rejected query is never proposed again, whatever its target.
 - `lab retro dismiss TOOL:RULE [--note TEXT]` hides a recurring-rule candidate from later `lab retro` runs.
 - `lab retro retire LINE` marks the thesaurus entry on that line `retired:`.
-- `lab retro seed` adds a `alias = RID` entry for each front-matter alias of an indexed record that the thesaurus lacks.
+- `lab retro seed` adds an `alias = RID` entry for each front-matter alias of an indexed record that the thesaurus lacks. The alias is written as its lowercased words.
 
 An ID may be given by a unique prefix.
 

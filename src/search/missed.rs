@@ -44,9 +44,10 @@ pub fn normal(q: &QueryLine) -> String {
         .unwrap_or_default()
 }
 
-/// The id of a proposal: the query and its target.
-pub fn proposal_id(query: &str, target: Option<&str>) -> String {
-    let digest = Sha256::digest(format!("{query}\n{}", target.unwrap_or("")));
+/// The id of a proposal: 8 hex digits of the query alone, so it stays the
+/// same when later misses change the target.
+pub fn proposal_id(query: &str) -> String {
+    let digest = Sha256::digest(query);
     digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -71,7 +72,8 @@ fn shares_word(a: &str, b: &str) -> bool {
 
 /// The missed queries of the trace, most frequent first. Only queries of
 /// `lab search` count; a topics run and the duplicate check do not.
-/// `since` keeps misses on or after that time.
+/// `since` keeps the queries last missed on or after that time; their
+/// counts and targets come from the whole trace.
 pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
     let mut by_query: BTreeMap<String, Missed> = BTreeMap::new();
     let mut targets: BTreeMap<String, Vec<Option<String>>> = BTreeMap::new();
@@ -81,17 +83,15 @@ pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
             continue;
         }
         let Some(at) = time(&q.at) else { continue };
-        if since.is_some_and(|s| at < s) {
-            continue;
-        }
         let query = normal(q);
         if query.is_empty() {
             continue;
         }
-        // The later lines of the same session in the window.
+        // The later lines of the same session in the window. Lines without
+        // a session cannot be told apart, so nothing follows them.
         let later: Vec<&Line> = lines[i + 1..]
             .iter()
-            .filter(|l| l.session() == q.session.as_deref())
+            .filter(|l| q.session.is_some() && l.session() == q.session.as_deref())
             .take_while(|l| {
                 time(l.at()).is_some_and(|t| t.duration_since(at).as_secs() <= WINDOW_SECS)
             })
@@ -155,9 +155,10 @@ pub fn missed(lines: &[Line], since: Option<Timestamp>) -> Vec<Missed> {
                 .into_iter()
                 .max_by_key(|(_, c)| *c)
                 .map(|(t, _)| t.to_string());
-            m.id = proposal_id(&m.query, m.target.as_deref());
+            m.id = proposal_id(&m.query);
             m
         })
+        .filter(|m: &Missed| since.is_none_or(|s| time(&m.last).is_some_and(|t| t >= s)))
         .collect();
     out.sort_by(|a, b| {
         b.count
@@ -228,7 +229,7 @@ mod tests {
         assert_eq!(missed[0].query, "fy shift");
         assert_eq!(missed[0].count, 2);
         assert_eq!(missed[0].target.as_deref(), Some("notes/a.md"));
-        assert_eq!(missed[0].id, proposal_id("fy shift", Some("notes/a.md")));
+        assert_eq!(missed[0].id, proposal_id("fy shift"));
     }
 
     #[test]
@@ -285,5 +286,71 @@ mod tests {
         assert_eq!(missed.len(), 1);
         assert_eq!(missed[0].reasons, ["partial-hit"]);
         assert_eq!(missed[0].target, None);
+    }
+
+    #[test]
+    fn queries_without_a_session_are_not_linked() {
+        let mut lines = vec![
+            q(
+                "2026-11-01T10:00:00Z",
+                "",
+                "calendar lag",
+                "hits",
+                1,
+                &["b.md#L1-L2"],
+            ),
+            q(
+                "2026-11-01T10:02:00Z",
+                "",
+                "fiscal calendar",
+                "hits",
+                1,
+                &["c.md#L3-L4"],
+            ),
+        ];
+        for line in &mut lines {
+            if let Line::Query(q) = line {
+                q.session = None;
+            }
+        }
+        assert!(missed(&lines, None).is_empty());
+    }
+
+    #[test]
+    fn since_keeps_the_target_of_the_whole_trace() {
+        let lines = vec![
+            q("2026-10-01T10:00:00Z", "s1", "fy", "zero", 0, &[]),
+            q(
+                "2026-10-01T10:01:00Z",
+                "s1",
+                "fiscal year",
+                "hits",
+                1,
+                &["a.md#L1-L2"],
+            ),
+            q("2026-10-02T10:00:00Z", "s2", "fy", "zero", 0, &[]),
+            q(
+                "2026-10-02T10:01:00Z",
+                "s2",
+                "fiscal year",
+                "hits",
+                1,
+                &["a.md#L1-L2"],
+            ),
+            q("2026-11-01T10:00:00Z", "s3", "fy", "zero", 0, &[]),
+            q(
+                "2026-11-01T10:01:00Z",
+                "s3",
+                "fiscal year",
+                "hits",
+                1,
+                &["b.md#L1-L2"],
+            ),
+        ];
+        let all = missed(&lines, None);
+        let recent = missed(&lines, "2026-10-15T00:00:00Z".parse().ok());
+        assert_eq!(recent, all);
+        assert_eq!(recent[0].target.as_deref(), Some("a.md"));
+        assert_eq!(recent[0].count, 3);
     }
 }
