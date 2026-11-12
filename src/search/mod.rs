@@ -611,37 +611,64 @@ pub fn mcp(project: &Project) -> Result<ExitCode, String> {
     mcp::run(project)
 }
 
+/// The `rf.search/1` report of a query that failed with `error`.
+fn print_error(
+    project: &Project,
+    args: &Args,
+    phrasings: &[String],
+    error: &str,
+) -> Result<(), String> {
+    let scopes = requested(&args.scopes, &project.lab.search.default_scopes).unwrap_or_default();
+    let report = Report {
+        schema: "rf.search/1",
+        state: State::Error,
+        error: Some(error),
+        query: phrasings,
+        scopes: scopes.iter().map(|s| s.as_str()).collect(),
+        stages: stages(),
+        partial: &[],
+        unknown: &[],
+        expansions: &[],
+        hits: &[],
+        more: 0,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&report).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
 /// `lab search`. Exit 0 for hits, a partial answer or no hit; `Err` (exit 2)
 /// for a bad query, an unreadable index or a lock timeout.
 pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
     if args.board_child {
         // Its output goes to board.log.
         if let Some(r) = board::refresh(project, true)? {
-            println!(
-                "Board export cached: {} task(s) in {:.1} s.",
-                r.tasks,
-                r.took.as_secs_f64()
-            );
+            println!("{r}");
         }
         return Ok(ExitCode::SUCCESS);
     }
     let phrasings = phrasings(&args.query);
     if args.refresh_board {
-        let r = board::refresh(project, false)?.expect("a foreground refresh runs the export");
-        let done = format!(
-            "Board export cached: {} task(s) in {:.1} s.",
-            r.tasks,
-            r.took.as_secs_f64()
-        );
+        let r = match board::refresh(project, false) {
+            Ok(r) => r.expect("a foreground refresh runs the export"),
+            Err(e) => {
+                if args.json {
+                    print_error(project, args, &phrasings, &e)?;
+                }
+                return Err(e);
+            }
+        };
         if phrasings.is_empty()
             && args.run.is_none()
             && !args.rebuild
             && !args.graph.filters().lists()
         {
-            println!("{done}");
+            println!("{r}");
             return Ok(ExitCode::SUCCESS);
         }
-        eprintln!("lab: {done}");
+        eprintln!("lab: {r}");
     }
     if let Some(topics) = &args.run {
         return topics::run(project, args, topics);
@@ -691,25 +718,7 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         Ok(answer) => answer,
         Err(e) => {
             if args.json {
-                let scopes =
-                    requested(&args.scopes, &project.lab.search.default_scopes).unwrap_or_default();
-                let report = Report {
-                    schema: "rf.search/1",
-                    state: State::Error,
-                    error: Some(&e),
-                    query: &phrasings,
-                    scopes: scopes.iter().map(|s| s.as_str()).collect(),
-                    stages: stages(),
-                    partial: &[],
-                    unknown: &[],
-                    expansions: &[],
-                    hits: &[],
-                    more: 0,
-                };
-                println!(
-                    "{}",
-                    serde_json::to_string(&report).map_err(|e| e.to_string())?
-                );
+                print_error(project, args, &phrasings, &e)?;
             }
             return Err(e);
         }

@@ -248,10 +248,19 @@ pub fn list_board(ctx: &Context) -> Listing {
     let refresh = match board::start(ctx.project, &ctx.dir) {
         Ok(board::Refresh::Started) => "a refresh started".to_string(),
         Ok(board::Refresh::Running) => "a refresh is running".to_string(),
+        Ok(board::Refresh::Waiting) => format!(
+            "the next refresh starts after {} from the last failure",
+            board::age_text(board::RETRY_AFTER)
+        ),
         Err(e) => format!("a refresh did not start: {e}"),
     };
     let failed = board::last_error(&ctx.dir)
-        .map(|e| format!("; the last refresh failed: {e}"))
+        .map(|(e, ago)| {
+            format!(
+                "; the last refresh failed {} ago: {e}",
+                board::age_text(ago)
+            )
+        })
         .unwrap_or_default();
     match cache {
         Some(c) => {

@@ -723,6 +723,20 @@ fn the_board_is_searched_through_its_cached_export_and_without_one_is_partial() 
         "{out}"
     );
 
+    // An empty command is a config error.
+    write(
+        d,
+        "research.toml",
+        &board_config(r#"["cat", "board.json"]"#, Some("[]")),
+    );
+    let o = lab(d, &["search", "--in", "board", "bandicoot"]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(
+        stderr(&o).contains("[lab.search] board_export needs a program"),
+        "{}",
+        stderr(&o)
+    );
+
     // No board command at all is partial as well, not an error.
     write(d, "research.toml", CONFIG);
     let report = json(d, &["--in", "board", "bandicoot"]);
@@ -754,7 +768,9 @@ fn a_stale_cache_answers_at_once_and_starts_one_refresh() {
     let report = json(d, &["--in", "notes,board", "bandicoot"]);
     let warm = start.elapsed();
     assert_eq!(report["state"], "hits", "{report}");
-    assert!(warm.as_secs_f64() < 1.0, "a warm query took {warm:?}");
+    // Measured under 1 s on a release build; the bound here only shows that
+    // the query does not wait for the 14-second export, also on a slow runner.
+    assert!(warm.as_secs_f64() < 5.0, "a warm query took {warm:?}");
     assert_eq!(runs(d), 1);
 
     // A stale cache answers from the old copy at once and starts a refresh.
@@ -763,7 +779,7 @@ fn a_stale_cache_answers_at_once_and_starts_one_refresh() {
     let start = std::time::Instant::now();
     let report = json(d, &["--in", "board", "bandicoot"]);
     let stale = start.elapsed();
-    assert!(stale.as_secs_f64() < 1.0, "a stale query took {stale:?}");
+    assert!(stale.as_secs_f64() < 5.0, "a stale query took {stale:?}");
     assert_eq!(report["state"], "partial", "{report}");
     assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
     let notice = report["partial"].to_string();
@@ -809,6 +825,17 @@ fn a_failed_refresh_keeps_the_old_cache_and_says_why() {
     );
     assert!(err.contains("the cached copy from"), "{err}");
     assert!(err.contains("boom"), "the export's own error shows: {err}");
+    // With --json the failure is an `rf.search/1` error report.
+    let o = lab(d, &["search", "--json", "--refresh-board", "bandicoot"]);
+    assert_eq!(o.status.code(), Some(2));
+    let report: Value = serde_json::from_str(&stdout(&o)).expect("one JSON object");
+    assert_eq!(report["state"], "error");
+    assert!(
+        report["error"]
+            .to_string()
+            .contains("the board export failed"),
+        "{report}"
+    );
     let report = json(d, &["--in", "board", "bandicoot"]);
     assert_eq!(report["state"], "hits", "{report}");
 
@@ -819,8 +846,11 @@ fn a_failed_refresh_keeps_the_old_cache_and_says_why() {
     let report = json(d, &["--in", "board", "bandicoot"]);
     assert_eq!(hits(&report)[0]["anchor"], "board:rf-9");
     let notice = report["partial"].to_string();
+    assert!(notice.contains("the last refresh failed "), "{report}");
+    assert!(notice.contains(" s ago: `sh` failed"), "{report}");
+    // A refresh that just failed is not retried at once.
     assert!(
-        notice.contains("the last refresh failed: `sh` failed"),
+        notice.contains("the next refresh starts after 1 min"),
         "{report}"
     );
     assert!(refresh_ended(d));

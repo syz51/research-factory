@@ -27,6 +27,8 @@ use crate::lesson_loop::{Ended, wait_for};
 
 /// How long a refresh lets the export run.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(120);
+/// After a failed refresh, a query starts the next one no sooner than this.
+pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 const SCHEMA: &str = "rf.board-cache/1";
 
 /// What the cache file holds.
@@ -49,6 +51,8 @@ pub enum Refresh {
     Started,
     /// Another refresh holds the lock.
     Running,
+    /// The last refresh failed less than `RETRY_AFTER` ago.
+    Waiting,
 }
 
 /// The board export command: `[lab.search] board_export`, else
@@ -73,14 +77,10 @@ pub fn dir(project: &Project) -> PathBuf {
     project.state_dir.join("lab").join("search")
 }
 
-fn file(dir: &Path, name: &str) -> PathBuf {
-    dir.join(name)
-}
-
 /// The cached export of `command`, or `None` when there is none, it does not
 /// read, or another command wrote it.
 pub fn read(dir: &Path, command: &[String]) -> Option<Cache> {
-    let path = file(dir, "board.json");
+    let path = dir.join("board.json");
     let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let stored: Stored = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     (stored.schema == SCHEMA && stored.command == command).then(|| Cache {
@@ -92,13 +92,18 @@ pub fn read(dir: &Path, command: &[String]) -> Option<Cache> {
     })
 }
 
-/// Why the last refresh failed, when it failed after the last good one.
-pub fn last_error(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(file(dir, "board.error")).ok()?;
-    Some(text.trim().to_string()).filter(|t| !t.is_empty())
+/// Why the last refresh failed, when it failed after the last good one, and
+/// how long ago.
+pub fn last_error(dir: &Path) -> Option<(String, Duration)> {
+    let path = dir.join("board.error");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let at = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+    let ago = SystemTime::now().duration_since(at).unwrap_or_default();
+    Some((text.trim().to_string(), ago)).filter(|(t, _)| !t.is_empty())
 }
 
-/// An age in whole minutes, or seconds below one minute.
+/// An age in seconds below one minute, in whole minutes below two hours, else
+/// in hours and minutes.
 pub fn age_text(age: Duration) -> String {
     match age.as_secs() {
         s if s < 60 => format!("{s} s"),
@@ -109,7 +114,7 @@ pub fn age_text(age: Duration) -> String {
 
 fn open_lock(dir: &Path) -> Result<File, String> {
     super::index::create_dir(dir)?;
-    let path = file(dir, "board.lock");
+    let path = dir.join("board.lock");
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -124,17 +129,22 @@ fn note_holder(lock: &mut File, pid: u32) {
     let _ = lock.set_len(0).and_then(|()| writeln!(lock, "pid {pid}"));
 }
 
-/// Starts a detached refresh unless one runs. The refresh is `lab search
-/// --refresh-board --board-child` with this project's config, in its own
-/// process group, with its output in `board.log`.
+/// Starts a detached refresh unless one runs or the last one failed less
+/// than `RETRY_AFTER` ago, so an export that keeps failing does not run back
+/// to back. The refresh is `lab search --refresh-board --board-child` with
+/// this project's config, in its own process group, with its output in
+/// `board.log`.
 pub fn start(project: &Project, dir: &Path) -> Result<Refresh, String> {
+    if last_error(dir).is_some_and(|(_, ago)| ago < RETRY_AFTER) {
+        return Ok(Refresh::Waiting);
+    }
     let mut lock = open_lock(dir)?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Ok(Refresh::Running),
         Err(TryLockError::Error(e)) => return Err(format!("board.lock: {e}")),
     }
-    let log_path = file(dir, "board.log");
+    let log_path = dir.join("board.log");
     let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
     let err = log.try_clone().map_err(|e| e.to_string())?;
     let exe =
@@ -165,6 +175,17 @@ pub fn start(project: &Project, dir: &Path) -> Result<Refresh, String> {
 pub struct Refreshed {
     pub tasks: usize,
     pub took: Duration,
+}
+
+impl std::fmt::Display for Refreshed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Board export cached: {} task(s) in {:.1} s.",
+            self.tasks,
+            self.took.as_secs_f64()
+        )
+    }
 }
 
 /// Runs the export and writes the cache atomically. A failed export keeps
@@ -202,7 +223,7 @@ pub fn refresh(project: &Project, child: bool) -> Result<Option<Refreshed>, Stri
         Some(lock)
     };
     let started = Instant::now();
-    let error_path = file(&dir, "board.error");
+    let error_path = dir.join("board.error");
     match export(project, &command, REFRESH_TIMEOUT) {
         Ok(tasks) => {
             let n = tasks.len();
@@ -212,8 +233,8 @@ pub fn refresh(project: &Project, child: bool) -> Result<Option<Refreshed>, Stri
                 tasks,
             })
             .map_err(|e| e.to_string())?;
-            let path = file(&dir, "board.json");
-            let tmp = file(&dir, &format!("board.json.{}.tmp", std::process::id()));
+            let path = dir.join("board.json");
+            let tmp = dir.join(format!("board.json.{}.tmp", std::process::id()));
             std::fs::write(&tmp, text)
                 .and_then(|()| std::fs::rename(&tmp, &path))
                 .map_err(|e| {

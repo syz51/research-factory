@@ -229,11 +229,11 @@ another command configured: the cache counts as absent
 
 | Transition | Trigger | Guard | Enforced by |
 |---|---|---|---|
-| absent → refreshing | a query of the `board` scope | the lock on `board.lock` is free; the query answers without the scope, `partial` | `list_board`, `board::start` |
+| absent → refreshing | a query of the `board` scope | the lock on `board.lock` is free and no refresh failed in the last 60 s; the query answers without the scope, `partial` | `list_board`, `board::start` |
 | fresh → stale | the cache file's mtime is `board_max_age` minutes old or older | checked at each query; a fresh cache answers in full | `board::read`, `list_board` |
-| stale → refreshing | a query of the `board` scope | the lock is free; the query answers from the stale copy, `partial`, with its age | `list_board`, `board::start` |
+| stale → refreshing | a query of the `board` scope | the lock is free and no refresh failed in the last 60 s; the query answers from the stale copy, `partial`, with its age | `list_board`, `board::start` |
 | refreshing → fresh | the export prints a task array within 120 s | the cache is written to a temporary file and renamed; `board.error` is removed | `board::refresh` |
-| refreshing → old state | the export fails, prints no task array or runs past 120 s | the old cache stays; `board.error` holds the reason, which the next stale query names | `board::refresh` |
+| refreshing → old state | the export fails, prints no task array or runs past 120 s | the old cache stays; `board.error` holds the reason, which the next stale query names; its mtime holds the next detached refresh back for 60 s | `board::refresh`, `board::start` |
 | any → refreshing (foreground) | `lab search --refresh-board` | waits for the lock, then runs the export; a failure exits 2 | `board::refresh` |
 
 One refresh at a time: the query takes the lock and hands it to the detached refresh as its standard input, so the lock stays held until the refresh exits.

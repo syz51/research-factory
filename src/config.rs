@@ -652,6 +652,15 @@ impl Project {
                 ));
             }
         }
+        if raw
+            .lab
+            .search
+            .board_export
+            .as_ref()
+            .is_some_and(Vec::is_empty)
+        {
+            return Err("[lab.search] board_export needs a program".into());
+        }
         let e = &raw.lab.evaluate;
         if e.min_sessions == 0 {
             return Err("[lab.evaluate] min_sessions must be at least 1".into());
