@@ -67,6 +67,10 @@ pub struct LabConfig {
     /// What `lab loop` runs and whom it tells.
     #[serde(default, rename = "loop")]
     pub lesson_loop: Option<LoopConfig>,
+    /// The oldest lab version this project works with, such as `0.10.0`;
+    /// `lab brief` says when the installed lab is older.
+    #[serde(default)]
+    pub min_version: Option<String>,
 }
 
 impl Default for LabConfig {
@@ -81,8 +85,15 @@ impl Default for LabConfig {
             search: crate::search::SearchConfig::default(),
             evaluate: EvaluateConfig::default(),
             lesson_loop: None,
+            min_version: None,
         }
     }
+}
+
+/// The numbers of a dotted version such as `0.10.0`.
+pub fn version_numbers(version: &str) -> Option<Vec<u64>> {
+    let parts: Option<Vec<u64>> = version.trim().split('.').map(|p| p.parse().ok()).collect();
+    parts.filter(|p| !p.is_empty() && p.len() <= 3)
 }
 
 /// `[lab.evaluate]`.
@@ -198,6 +209,164 @@ pub struct ArchiveConfig {
     /// Broken links kept on purpose in the sealed text of append-only files.
     #[serde(default)]
     pub kept_link: Vec<KeptLinkSpec>,
+    /// The archive model: 1 (default), or 2 for the rules and commands of
+    /// docs/interfaces.md "Archive model 2". Every key below needs `model = 2`.
+    #[serde(default = "default_model")]
+    pub model: u32,
+    /// What proves that sealed text did not change: the manifest file, or git history.
+    #[serde(default)]
+    pub seal: SealMode,
+    /// With `seal = "git"`: the commit after which history is checked
+    /// (default: all history).
+    #[serde(default)]
+    pub seal_baseline: Option<String>,
+    /// With `seal = "git"`: a record is sealed from the first commit in which
+    /// its status is one of these.
+    #[serde(default)]
+    pub sealed_statuses: Vec<String>,
+    /// With `seal = "git"`: statuses that no commit may change
+    /// (default: `superseded` and `withdrawn`, where `statuses` has them).
+    #[serde(default)]
+    pub terminal_statuses: Option<Vec<String>>,
+    /// Inactive statuses that need `superseded_by` or `withdrawn_reason`
+    /// (default: `inactive_statuses`).
+    #[serde(default)]
+    pub reason_statuses: Option<Vec<String>>,
+    /// With `seal = "git"`: edits of sealed text that stay, each with a reason.
+    #[serde(default)]
+    pub accepted_edit: Vec<AcceptedEditSpec>,
+    /// false: no index file is written; `lab archive index --print <name>` prints one.
+    #[serde(default = "default_true")]
+    pub write_indexes: bool,
+    /// Allowed values of a record's `kind`.
+    #[serde(default = "default_kinds")]
+    pub kinds: Vec<String>,
+    /// Records dated on or after this day (YYYY-MM-DD) must name a `task` and a `kind`.
+    #[serde(default)]
+    pub task_from: Option<String>,
+    /// Program and arguments that print the board's tasks as JSON, such as
+    /// `["board", "ls", "--json", "--limit", "1000"]`.
+    #[serde(default)]
+    pub board_export: Option<Vec<String>>,
+    /// A done task of the board export with this tag needs a record that names it.
+    #[serde(default)]
+    pub research_tag: Option<String>,
+    /// The shortest accepted `summary`, in characters.
+    #[serde(default = "default_summary_min_chars")]
+    pub summary_min_chars: usize,
+    /// Markdown files that `unindexed-file` leaves alone.
+    #[serde(default)]
+    pub unindexed_exclude: Vec<String>,
+    /// Groups of pages of which one must have a current status.
+    #[serde(default)]
+    pub page_group: Vec<PageGroupSpec>,
+    /// Links from a record of one status to a record of another that need a mark.
+    #[serde(default)]
+    pub historical_link: Option<HistoricalLinkSpec>,
+    /// Findings accepted on purpose, each with a reason.
+    #[serde(default)]
+    pub allow: Vec<AllowSpec>,
+}
+
+/// The defaults of the model 2 keys that have one.
+pub struct Model2Defaults {
+    pub kinds: Vec<String>,
+    pub summary_min_chars: usize,
+}
+
+impl ArchiveConfig {
+    pub fn model_2_defaults() -> Model2Defaults {
+        Model2Defaults {
+            kinds: default_kinds(),
+            summary_min_chars: default_summary_min_chars(),
+        }
+    }
+}
+
+/// `[lab.archive] seal`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SealMode {
+    #[default]
+    Manifest,
+    Git,
+}
+
+/// `[[lab.archive.accepted_edit]]`: the edit of sealed `path` in `commit` stays, for `reason`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedEditSpec {
+    /// The file, relative to the project root.
+    pub path: String,
+    /// The commit that made the edit: its hash, or at least its first 7 characters.
+    pub commit: String,
+    pub reason: String,
+}
+
+/// `[[lab.archive.page_group]]`: pages of which at least one must have a
+/// status in `current`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PageGroupSpec {
+    pub name: String,
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+    #[serde(default = "default_current")]
+    pub current: Vec<String>,
+}
+
+/// `[lab.archive.historical_link]`: a link from a record whose status is in
+/// `from` to a record whose status is in `to` needs one of `marks` on its line.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalLinkSpec {
+    #[serde(default = "default_current")]
+    pub from: Vec<String>,
+    #[serde(default = "default_historical")]
+    pub to: Vec<String>,
+    #[serde(default = "default_historical")]
+    pub marks: Vec<String>,
+}
+
+/// `[[lab.archive.allow]]`: the finding of `rule` about `subject` is accepted, for `reason`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowSpec {
+    pub rule: String,
+    /// The finding's subject without a line number: a path, a duplicated id,
+    /// or a page group's name.
+    pub subject: String,
+    /// For `historical-link`: the link destination exactly as written.
+    #[serde(default)]
+    pub target: Option<String>,
+    pub reason: String,
+}
+
+fn default_model() -> u32 {
+    1
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_summary_min_chars() -> usize {
+    40
+}
+
+fn default_kinds() -> Vec<String> {
+    ["result", "decision", "survey", "review"]
+        .map(String::from)
+        .to_vec()
+}
+
+fn default_current() -> Vec<String> {
+    vec!["current".into()]
+}
+
+fn default_historical() -> Vec<String> {
+    vec!["historical".into()]
 }
 
 /// `[[lab.archive.kept_link]]`: a link in the sealed text of `file` whose
@@ -253,6 +422,8 @@ fn default_inactive_statuses() -> Vec<String> {
 #[serde(deny_unknown_fields)]
 pub struct IndexSpec {
     pub name: String,
+    /// The generated file; may be left out with `write_indexes = false`.
+    #[serde(default)]
     pub output: String,
     pub title: String,
     #[serde(default)]
@@ -274,6 +445,9 @@ pub struct IndexSpec {
     pub group_by: Option<GroupBy>,
     #[serde(default)]
     pub require: Vec<Field>,
+    /// Only records whose `kind` is one of these (default: every record).
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -460,6 +634,13 @@ impl Project {
                 return Err("[lab.loop] `notify` needs a program".into());
             }
         }
+        if let Some(v) = &raw.lab.min_version
+            && version_numbers(v).is_none()
+        {
+            return Err(format!(
+                "[lab] min_version must be numbers separated by dots, such as 0.10.0, got `{v}`"
+            ));
+        }
         Ok(Self {
             root,
             name,
@@ -508,6 +689,16 @@ impl Project {
 
     pub fn default_seal_manifest(&self) -> PathBuf {
         self.state_dir.join("lab").join("archive-seal.json")
+    }
+
+    /// The last commit whose history the git seal check verified.
+    pub fn git_seal_cache(&self) -> PathBuf {
+        self.state_dir.join("lab").join("archive-git-seal.json")
+    }
+
+    /// The numbers `lab archive next --reserve` gave out, and their lock.
+    pub fn reserved_ids(&self) -> PathBuf {
+        self.state_dir.join("lab").join("archive-reserved.json")
     }
 
     /// Today's date in the project's zone.

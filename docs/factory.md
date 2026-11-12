@@ -82,6 +82,20 @@ A long research project accumulates notes faster than anyone can reread them. Wh
 
 A session reads `lab brief` and the start page, looks records up with `lab search` and reads large files by section. It appends to the month's log, updates records in place and adds new ones with ids from `lab archive next`. Before finishing it runs `lab archive update`, which regenerates the indexes and seals new and appended files, and then `lab check --new-only`, which runs `lab archive check` among the other checks when it is configured as one.
 
+### Archive model 2
+
+`[lab.archive] model = 2` (since lab 0.12.0) keeps the same records and changes what surrounds them. Git holds the sequence of work and the board holds the open work, so the archive keeps only results. [docs/interfaces.md](interfaces.md#archive-model-2) lists every key and rule.
+
+- **A record names its task and kind.** Front matter `task` is the board task the record is the result of, and `kind` is `result`, `decision`, `survey` or `review`. From the configured day `task_from`, a record without them is an error. `board_export` gives the known task ids: a `task` that the board does not list is an error, and when the board cannot be read the check says `skipped`, which is neither an error nor a pass.
+- **Git is the seal.** With `seal = "git"` no manifest is written. A file is sealed from the first commit in which it matches `sealed` or its status is in `sealed_statuses`; each later version must start with the sealed body. An edit stays only with an `[[lab.archive.accepted_edit]]` entry that names the path, the commit and the reason.
+- **A status moves forward.** An inactive status needs `superseded_by` or `withdrawn_reason`. `superseded` and `withdrawn` are terminal: no commit may change them. A partial supersession uses `amends` and `amended_by`, and the amended record stays in force.
+- **No log and no index files.** `lab archive log` prints the records in date order from front matter. With `write_indexes = false` the indexes are printed by `lab archive index --print <name>` and none is committed. The start page stays a file with its size budget.
+- **Numbers are reserved.** `lab archive next D` records the number it gives in the main checkout, so two worktrees never write a record with the same number.
+- **Metadata is checked.** `duplicate-id`, `missing-summary`, `unindexed-file`, `no-current-page` and `historical-link` keep the records findable. `[[lab.archive.allow]]` accepts one known case with a recorded reason.
+- **One completion gate.** `lab archive done` runs every step in order (written, indexed, links and metadata, task, sources, sealed), stops at the first failed step and prints the fix.
+
+A project switches by setting `[lab] min_version`, `model = 2` and the keys it wants; a project that sets none of them behaves as before.
+
 ## Where things live
 
 | Path | Contents | Commit? |

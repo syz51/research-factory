@@ -438,6 +438,45 @@ pub fn archive(a: &Archive) -> String {
     out
 }
 
+/// The archive section for archive model 2: `lab archive done` is the one
+/// completion gate, and `printed` names the indexes that have no file.
+pub fn archive_model_2(a: &Archive, printed: &[String]) -> String {
+    let mut out = archive(a);
+    let last = out.trim_end().rfind('\n').map_or(0, |i| i + 1);
+    out.truncate(last);
+    if !printed.is_empty() {
+        let _ = writeln!(
+            out,
+            "- Print an index: `lab archive index --print <name>`; the names are {}.",
+            printed.join(", ")
+        );
+    }
+    out.push_str(
+        "- Timeline of the records: `lab archive log [--since YYYY-MM-DD]`.\n\
+         - New record number: `lab archive next <prefix>` reserves it for this worktree.\n\
+         - Before finishing: `lab archive done`. It stops at the first failed step and prints \
+         the fix.\n",
+    );
+    out
+}
+
+/// What the brief says first when the installed lab is older than the
+/// project's `[lab] min_version`.
+pub fn version_note(installed: &str, min: &str) -> Option<String> {
+    let numbers = |v: &str| {
+        let mut n = crate::config::version_numbers(v)?;
+        n.resize(3, 0);
+        Some(n)
+    };
+    (numbers(installed)? < numbers(min)?).then(|| {
+        format!(
+            "> This lab is version {installed}, but research.toml needs {min} or newer \
+             (`[lab] min_version`). Install a newer lab before you work: older versions miss \
+             rules and commands this project uses.\n\n"
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,6 +824,30 @@ mod tests {
             render("demo", "2026-11-30", &lessons, &[], &[], &[], 0, None)
                 .contains("not yet verified")
         );
+    }
+
+    #[test]
+    fn version_note_appears_only_for_an_older_lab() {
+        assert!(
+            version_note("0.9.11", "0.10.0")
+                .unwrap()
+                .contains("needs 0.10.0 or newer")
+        );
+        assert!(version_note("0.10.0", "0.10").is_none());
+        assert!(version_note("0.10.1", "0.10.0").is_none());
+        assert!(version_note("1.0.0", "0.10.0").is_none());
+    }
+
+    #[test]
+    fn model_2_archive_section_names_the_completion_gate() {
+        let a = Archive {
+            start: None,
+            indexes: Vec::new(),
+        };
+        let text = archive_model_2(&a, &["decisions".into()]);
+        assert!(text.contains("`lab archive index --print <name>`; the names are decisions."));
+        assert!(text.contains("- Before finishing: `lab archive done`."));
+        assert!(!text.contains("lab archive update"));
     }
 
     #[test]

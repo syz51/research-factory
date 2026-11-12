@@ -69,6 +69,16 @@ pub struct Meta {
     pub decisions: Vec<String>,
     pub evidence: Vec<String>,
     pub tags: Vec<String>,
+    /// The board tasks the record belongs to (`task`).
+    pub tasks: Vec<String>,
+    pub kind: Option<String>,
+    /// Records this one supersedes in part; they stay in force.
+    pub amends: Vec<String>,
+    pub amended_by: Vec<String>,
+    pub withdrawn_reason: Option<String>,
+    /// What is wrong with the fields above. Only archive model 2 reports it,
+    /// so a model 1 project's front matter stays valid as it was.
+    pub model_2_errors: Vec<String>,
 }
 
 /// An invalid front matter: the file line it concerns and what is wrong.
@@ -137,7 +147,27 @@ pub fn parse(yaml: &[u8], statuses: &[String]) -> Result<Meta, Invalid> {
             })
             .collect()
     };
+    // The model 2 fields never make the front matter invalid here.
+    let mut model_2_errors = Vec::new();
+    let mut lenient = |r: Result<Vec<String>, Invalid>| {
+        r.unwrap_or_else(|e| {
+            model_2_errors.push(e.message);
+            Vec::new()
+        })
+    };
+    let tasks = lenient(list("task"));
+    let amends = lenient(list("amends"));
+    let amended_by = lenient(list("amended_by"));
+    let kind = lenient(scalar("kind").map(|v| v.into_iter().collect())).pop();
+    let withdrawn_reason =
+        lenient(scalar("withdrawn_reason").map(|v| v.into_iter().collect())).pop();
     let meta = Meta {
+        tasks,
+        kind,
+        amends,
+        amended_by,
+        withdrawn_reason,
+        model_2_errors,
         id: scalar("id")?,
         title: scalar("title")?,
         date: scalar("date")?,
@@ -164,6 +194,18 @@ pub fn parse(yaml: &[u8], statuses: &[String]) -> Result<Meta, Invalid> {
         )));
     }
     Ok(meta)
+}
+
+/// The `status` in a file's front matter, when it has one that is a string.
+pub fn status_of(bytes: &[u8]) -> Option<String> {
+    let yaml = split(bytes).yaml?;
+    match yaml_serde::from_slice::<Value>(yaml).ok()? {
+        Value::Mapping(map) => match map.get("status") {
+            Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The first `YYYY-MM-DD` in `path` that is a real date.
@@ -219,6 +261,30 @@ mod tests {
         assert_eq!(m.supersedes, ["D001"]);
         assert_eq!(m.aliases, ["bm25", "lexical"]);
         assert_eq!(parse(b"", &statuses()).unwrap(), Meta::default());
+    }
+
+    #[test]
+    fn model_2_fields_are_read_and_their_errors_kept_apart() {
+        let m = parse(
+            b"task: rf-1\nkind: decision\namends: [D001, D002]\namended_by: D009\nwithdrawn_reason: wrong data\n",
+            &statuses(),
+        )
+        .unwrap();
+        assert_eq!(m.tasks, ["rf-1"]);
+        assert_eq!(m.kind.as_deref(), Some("decision"));
+        assert_eq!(m.amends, ["D001", "D002"]);
+        assert_eq!(m.amended_by, ["D009"]);
+        assert_eq!(m.withdrawn_reason.as_deref(), Some("wrong data"));
+        assert!(m.model_2_errors.is_empty());
+        let bad = parse(b"id: D1\nkind: [a]\ntask: 7\n", &statuses()).unwrap();
+        assert_eq!(bad.id.as_deref(), Some("D1"));
+        assert_eq!((bad.kind, bad.tasks.len()), (None, 0));
+        assert_eq!(bad.model_2_errors.len(), 2, "{:?}", bad.model_2_errors);
+        assert_eq!(
+            status_of(b"---\nstatus: accepted\n---\nbody").as_deref(),
+            Some("accepted")
+        );
+        assert_eq!(status_of(b"# no front matter\n"), None);
     }
 
     #[test]

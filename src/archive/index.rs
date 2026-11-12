@@ -225,15 +225,10 @@ pub fn render(spec: &IndexSpec, statuses: &[String], records: &[&Record]) -> Str
     blocks.join("\n\n") + "\n"
 }
 
-/// The next free id with `prefix`: one more than the largest number after
-/// it, keeping the zero padding of existing ids. An id with a suffix, such as
-/// `H2a`, counts by its number so the new id never repeats it. Without an
-/// existing id, a series starts at 1 only when `width` is given.
-pub fn next_id<'a>(
-    ids: impl IntoIterator<Item = &'a str>,
-    prefix: &str,
-    width: Option<usize>,
-) -> Option<String> {
+/// The largest number after `prefix` in `ids`, and the width of the zero
+/// padding they use (0 without padding). An id with a suffix, such as `H2a`,
+/// counts by its number.
+pub fn series<'a>(ids: impl IntoIterator<Item = &'a str>, prefix: &str) -> (Option<u64>, usize) {
     let mut max: Option<u64> = None;
     let mut pad = 0;
     for id in ids {
@@ -249,6 +244,18 @@ pub fn next_id<'a>(
             pad = pad.max(n);
         }
     }
+    (max, pad)
+}
+
+/// The next free id with `prefix`: one more than the largest number after
+/// it, keeping the zero padding of existing ids, so the new id never repeats
+/// one. Without an existing id, a series starts at 1 only when `width` is given.
+pub fn next_id<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    prefix: &str,
+    width: Option<usize>,
+) -> Option<String> {
+    let (max, pad) = series(ids, prefix);
     let next = match (max, width) {
         (Some(m), _) => m + 1,
         (None, Some(_)) => 1,

@@ -330,6 +330,17 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
     answered
 }
 
+/// Builds the search index, or brings it up to date with the files, without
+/// a query. Gives the files and units it holds.
+pub fn refresh(project: &Project) -> Result<(i64, i64), String> {
+    let ctx = Context::new(project)?;
+    let opened = index::open(&ctx, false)?;
+    if let Some(why) = opened.stale {
+        return Err(format!("the search index is stale: {why}"));
+    }
+    index::counts(&opened.conn).map_err(String::from)
+}
+
 fn stages() -> BTreeMap<&'static str, &'static str> {
     Stage::ALL
         .into_iter()
