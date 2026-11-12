@@ -410,6 +410,20 @@ fn another_schema_version_and_a_corrupt_file_rebuild_the_index() {
     assert_eq!(json(d, &["wombat"])["state"], "hits");
     assert_eq!(version(d), current);
 
+    // An index that lab 0.15.0 wrote: schema version 2, no `scopes` row.
+    {
+        let conn = rusqlite::Connection::open(d.join(INDEX_DB)).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM meta WHERE key = 'scopes'", [])
+            .unwrap();
+    }
+    assert_eq!(json(d, &["wombat"])["state"], "hits");
+    assert_eq!(version(d), current);
+
     std::fs::write(d.join(INDEX_DB), b"not a database, not a database").unwrap();
     assert_eq!(json(d, &["wombat"])["state"], "hits");
     assert_eq!(version(d), current);

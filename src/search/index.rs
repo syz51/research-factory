@@ -21,7 +21,7 @@ use super::sources::{self, Doc, Loader, Resolver};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
