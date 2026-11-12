@@ -211,7 +211,7 @@ pub(super) fn taken_on_default(spec: &Spec, records: &[&Record]) -> Result<Vec<P
         let Some(id) = r.meta.id.as_deref() else {
             continue;
         };
-        let Some((_, other)) = theirs.iter().find(|(i, p)| i == id && *p != r.path) else {
+        let Some((_, other)) = theirs.iter().find(|(i, _)| i == id) else {
             continue;
         };
         let at_base = match blobs.get(&format!("{base}:{prefix}{}", r.path))? {

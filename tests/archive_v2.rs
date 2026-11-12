@@ -611,7 +611,7 @@ fn next_counts_the_default_branch_and_the_other_worktrees() {
 }
 
 #[test]
-fn next_counts_elsewhere_for_a_project_below_the_top_and_skips_a_dangling_default() {
+fn next_and_check_count_elsewhere_for_a_project_below_the_top_and_skip_a_dangling_default() {
     let dir = tempfile::tempdir().unwrap();
     let d = dir.path().join("main");
     let p = d.join("sub");
@@ -640,6 +640,25 @@ fn next_counts_elsewhere_for_a_project_below_the_top_and_skips_a_dangling_defaul
     assert_eq!(next(&w).0, "D005", "from the default branch");
     write(&p, "docs/decisions/D008-draft.md", "# Draft\n");
     assert_eq!(next(&w).0, "D009", "from the main checkout's work tree");
+    // The check reads the default branch's records below the top too. Without
+    // `id_from` the id is the file stem, so this record names it.
+    write(
+        &w,
+        "docs/decisions/D004-mine.md",
+        "---\nid: D004-merged\n---\n# Mine\n",
+    );
+    commit(&w, "mine");
+    let out = lab(&w, &["archive", "check"]);
+    assert!(
+        stdout(&out).contains("warn id-taken-on-default-branch docs/decisions/D004-mine.md"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).contains("docs/decisions/D004-merged.md also has on main"),
+        "{}",
+        stdout(&out)
+    );
     // `origin/HEAD` that names a pruned branch is skipped with a note.
     git(
         &d,
