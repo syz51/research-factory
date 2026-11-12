@@ -193,6 +193,12 @@ was the search followed by a grep; was a registered paper fetched again.
 Standing metrics: share of archive lookups that use search; rate of queries with no hit; rate of
 searches followed by a grep; hits opened per search; repeated fetches; tokens per lookup.
 
+Implemented in `agentprof` 0.3.0: per-session counts of searches, opens, related lookups, no-hit
+searches, greps and reads under the archive root, and the search and grep shares. Lessons measure
+them as `agentprof:session.archive.<field>`; `interfaces.md` §5 lists the fields, the root order
+and the command names `agentprof` counts. Lab scores a lower value as better, so a lesson about
+search use measures `grep_share` or `greps`. `agentprof` does not compute the other metrics above yet.
+
 ### 3.10 Evaluation
 
 - **Test set** in the using project: at least 50 judged topics of four types (known item, topical,
