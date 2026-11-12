@@ -170,7 +170,7 @@ It checks every Markdown file that `lab archive check` scans (an index's records
 notes = ["docs/**/*.md"]             # the files of the `notes` scope
 notes_exclude = ["docs/drafts/**"]
 stages = ["lexical"]                 # the stages a query should run: lexical, dense, rerank, graph
-cites = ['\[(?P<key>\d+)\]']         # since 0.14.0: more citation forms, each with a group `key`
+cites = ['\[(?P<key>\d+)\]']         # since 0.15.0: more citation forms, each with a group `key`
 refresh_budget_ms = 5000             # a query's refresh of changed files stops after this time; `lab archive done` indexes them all
 lock_timeout_ms = 30000              # how long a query waits for another process that builds the index
 
@@ -184,7 +184,7 @@ historical = ["docs/old/**"]
 
 - Without `notes`, the scope is every `.md` file below the directories that the globs of `[lab.archive]` name (`index.include`, `sealed`, `links`, `current_pages`, `start`): `docs/history/[0-9]*.md` gives `docs/history/**/*.md`. A glob for files in the project root, and a path without a pattern, stay as they are.
 - A `generated` file is not indexed, and each `[[lab.archive.index]]` output is always generated. The other classes are indexed and labelled, and rank below `own`: `paper` keeps 0.8 of its score, `chat` 0.6, `copied` 0.5 and `historical` 0.25. A record with one of the `inactive_statuses` keeps 0.25, and a superseded record ranks below each successor that the same query found.
-- Of the stages, this version builds `lexical` and, since 0.14.0, `graph`. A query that `stages` asks another stage for ends as `partial` and names the stage.
+- Of the stages, this version builds `lexical` and, since 0.15.0, `graph`. A query that `stages` asks another stage for ends as `partial` and names the stage.
 - `cites` adds citation patterns (Rust regular expressions) to the two that are always read: `ref:<key>`, and a link to the `#reference-<key>` anchor of a file. Each pattern needs a group named `key`; a pattern without one, or one that does not compile, stops the query with an error.
 
 The unit of the index is one Markdown section: from a heading to the line before the next heading, cut at a blank line when it is longer than 120 lines. A file without text below a heading is one unit. A unit's anchor is `path#Lstart-Lend`: the path relative to the project root and 1-based line numbers of the file, both inclusive, the heading line included. Two anchors name the same text when their paths are equal and their line ranges overlap.
@@ -216,7 +216,7 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `hits[].hash` | The content hash of the unit's indexed text (32 hexadecimal characters of its SHA-256). |
 | `hits[].record` | The file's record: `id`, `title`, `date`, `status`, `kind` and `task` are null when the file has none; `superseded_by` lists the successors' ids when there are any. |
 | `hits[].missing` | The query words the unit lacks; absent when it has all. |
-| `hits[].also_in` | Since 0.14.0: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
+| `hits[].also_in` | Since 0.15.0: the units folded under this hit because they link its record, each with `anchor` and, when its file is a record, `id` and `title`; absent when there are none. |
 | `hits[].explain` | With `--explain`: `exact_id`, `bm25`, `trigram` (matches of a part of a word), `prior` (class and status), `score`, `fused` (reciprocal rank fusion across phrasings) and `matched`. |
 | `more` | How many more units matched than `hits` shows. |
 
@@ -224,7 +224,7 @@ BM25 weights the columns: the id and aliases 10, the title 5, the summary, the h
 
 ### Search graph, `lab related`, `lab open` and `lab mcp`
 
-Since lab 0.14.0 (index schema 2; an index of schema 1 is built again on the first query), the index holds a table of edges. It is filled when a file is indexed and removed with the file. The edge types:
+Since lab 0.15.0 (index schema 2; an index of schema 1 is built again on the first query), the index holds a table of edges. It is filled when a file is indexed and removed with the file. The edge types:
 
 | Edge | From | To | Read from |
 |---|---|---|---|
@@ -268,6 +268,66 @@ Belonging is not stored: a unit belongs to its file, and a file belongs to the r
 | `archive_related` | `name` (required), `limit` | `lab related` |
 
 Each description says when to use the tool. A result is text only: its first line is the state (`state: hits; missing stages: dense, rerank`, with `partial` notices after `;`), then for `archive_search` a line `mode: lexical (model: unloaded)`, then the text output of the command. The model state is `unloaded`, `loading`, `ready` or `failed`; this version loads no model and always searches in `lexical` mode. A failed call returns `isError: true` with `state: error` and the message. An agent connects it with an MCP entry such as `{"mcpServers":{"lab":{"type":"stdio","command":"lab","args":["mcp"]}}}` in the project's `.mcp.json`.
+
+### Search learning loop: `rf.search-query/1`, `rf.search-open/1`, the thesaurus and `rf.retro/1`
+
+Since lab 0.14.0. Two more keys of `[lab.search]`:
+
+```toml
+[lab.search]
+thesaurus = "docs/search-thesaurus.txt"  # a tracked file of equivalent terms; no thesaurus without it
+review_days = 90                         # `lab retro` lists entries unused for this long
+```
+
+**Query trace.** Each query of `lab search`, `lab archive find`, `lab search --run` and the duplicate check appends one line to `<state_dir>/lab/search-queries.jsonl`. In a linked git worktree where git ignores that path, the line goes to the main checkout's file, so every checkout of a project shares one trace. A trace that cannot be written leaves the query as it was: lab prints a notice on stderr and keeps the exit code.
+
+```json
+{"schema":"rf.search-query/1","at":"2026-11-12T10:00:00Z","session":"79065b65","source":"cli",
+ "query":["marsupial"],"scopes":["notes"],"state":"hits","stages":["lexical"],
+ "expansions":[{"term":"marsupial","added":["wombat"],"entry":"wombat = marsupial"}],
+ "candidates":{"lexical":[{"id":"docs/history/01-2026-10-02-start.md#L5-L7","score":0.0328}]},
+ "hit_count":1,"complete":1,"hits":["docs/history/01-2026-10-02-start.md#L5-L7"],"latency_ms":12}
+```
+
+| Field | Meaning |
+|---|---|
+| `at` | The time of the query, RFC 3339 UTC. |
+| `session` | `LAB_SESSION`, else `CLAUDE_CODE_SESSION_ID`; null when neither is set. |
+| `source` | `cli` (`lab search`, `lab archive find`), `mcp` (the `archive_search` tool of `lab mcp`, since 0.15.0), `run` (`--run`) or `similar` (the duplicate check). Only `cli` and `mcp` lines count as missed queries. |
+| `state` | `hits`, `partial`, `zero` or `error` (then `error` holds the message). |
+| `stages`, `missing_stages` | The stages that ran, and the configured stages that are not built. |
+| `expansions` | The thesaurus entries the query applied: the query `term`, the terms `added` for it, and the `entry` as `a = b`. Absent when none. |
+| `candidates` | For each stage, its 10 best units before they are grouped by record, as `id` (the anchor) and `score`. |
+| `hit_count`, `complete`, `hits` | The number of hits, the hits that hold every term, and the hits' anchors, best first. |
+| `unknown`, `notices` | The query words no unit holds, and why the answer may be incomplete. Absent when empty. |
+| `latency_ms` | The time the query took. |
+
+`lab open` and the `archive_open` tool (since 0.15.0) append, and another tool that reads a hit may append, `{"schema":"rf.search-open/1","at":"…","session":"…","anchor":"path#Lstart-Lend"}` to the same file. `lab retro` uses it to find the record a missed query was looking for. A reader skips lines of other schemas and lines it cannot parse.
+
+**Thesaurus.** One entry per line, its terms separated by `=`: `fiscal calendar = fiscal year = FY`. Terms are compared as lowercased words. A line that starts with `retired:` stays in the file but is not applied. `#` starts a comment line. An entry with fewer than two different terms is an error that names the file and line (exit 2). At query time, each active entry with a term that occurs as consecutive words of a phrasing adds its other terms as alternatives to those words: `marsupial` also matches `wombat`. The human output names each one as `Also searched: wombat (for marsupial)`, and `--explain` adds the entry. The thesaurus is read from the checkout, with no network and no model call.
+
+**Missed queries.** `lab retro` reads the `cli` and `mcp` lines of the trace. A query is missed when it found nothing (`zero`), when no hit held every term (`partial-hit`), or when the next query of the same session within 600 seconds differs and shares a word of 3 or more characters (`reformulated`). Its target is the record the session read next in that window: the first `rf.search-open/1` line, else the best hit of a later query whose hits hold every term. A line without a session is never linked to a later line. Queries are grouped by their lowercased words and listed most frequent first, each with the target most of its misses led to and an id of 8 hexadecimal digits taken from the query alone, so the id stays the same when the target changes. `--since DATE` lists only the queries last missed on or after DATE; their counts and targets still come from the whole trace. When the trace reaches back `review_days`, `lab retro` also lists the active thesaurus entries that no `cli` or `mcp` query applied in that time.
+
+**Decisions.** `<state_dir>/lab/retro.json` (`rf.retro/1`, in the main checkout's state directory like the trace) records what was decided, so that a decided item does not return:
+
+```json
+{"schema":"rf.retro/1",
+ "dismissed":[{"tool":"agentprof","rule":"reread-file","at":"…","note":"harmless"}],
+ "accepted":[{"id":"3f1c2a9b","query":"fy shift","target":"D002","wrote":"front matter","at":"…"}],
+ "rejected":[{"id":"9a0b1c2d","query":"calendar","target":"docs/a.md","at":"…","note":"not a synonym"}]}
+```
+
+- `lab retro accept ID [--record RID]` adds the query as an alias of the target record (`--record` names one when the trace has none). An open record gets the alias in its front matter `aliases`. A finished record, which matches `sealed` or has a status in `sealed_statuses`, `terminal_statuses` or `inactive_statuses`, is never edited: the thesaurus gets the line `query = RID` instead (`wrote` is `thesaurus`). An accepted query is not proposed again.
+- `lab retro reject ID... [--note TEXT]` records the proposals; a rejected query is never proposed again, whatever its target.
+- `lab retro dismiss TOOL:RULE [--note TEXT]` hides a recurring-rule candidate from later `lab retro` runs.
+- `lab retro retire LINE` marks the thesaurus entry on that line `retired:`.
+- `lab retro seed` adds an `alias = RID` entry for each front-matter alias of an indexed record that the thesaurus lacks. The alias is written as its lowercased words.
+
+An ID may be given by a unique prefix.
+
+**TREC runs.** `lab search --run TOPICS [--out FILE] [--phrasings] [--limit N] [--records]` answers a topics file and writes a TREC run, `topic Q0 docid rank score lab-search`, with the score `limit + 1 - rank`, so no two scores of a topic tie. A topics line is a JSON object with `id` (string or number) and `query`, other fields ignored, or `id<TAB>query`; `#` starts a comment. `--phrasings` adds a JSON topic's `phrasings` as more phrasings. The docid is the hit's anchor, `path#Lstart-Lend` or `ref:<key>`, or with `--records` the record's path; `%` and spaces are escaped as `%25` and `%20`. The default limit is 10. `ireval eval QRELS RUN` scores the run.
+
+**Duplicate check.** `lab archive similar FILE|WORDS...` searches the records whose sections hold at least 60% of the weight (`ln(1 + units / units holding it)`) of the subject's words, and at least two of them when the subject has two or more. The subject is a record's title and aliases, or the words given. It prints `similar: none`, `similar: N record(s) on the same topic` with up to 5 lines, or `skipped: REASON` when the search fails, and always exits 0. It builds the index when it is absent. `lab archive next PREFIX --title TITLE` prints the same list on stderr. `lab archive check` runs it for each new record file (untracked and not ignored, or added in the git index, and matched by an index's `include`) against the records that are not new: a match is a `similar-record` warning, and a failed search is a `similar-skipped` info finding.
 ### Archive model 2
 
 Since lab 0.12.0, whose older versions reject these keys. `[lab.archive] model = 2` turns on the rules and commands below. With `model = 1`, the default, every key of this section is refused, and the archive behaves as lab 0.9.11 does: old sealed files, the seal manifest and its check stay as they are. In model 2 git holds the sequence of work and the board holds the open work, so the archive keeps only records: no month log is appended, and no index file needs to be written.
@@ -286,8 +346,8 @@ reason_statuses = ["superseded", "rejected", "withdrawn"]   # default: `inactive
 write_indexes = false         # default true
 kinds = ["result", "decision", "survey", "review"]   # the default
 task_from = "2026-11-12"
-board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status"]
-research_tag = "research"
+board_export = ["board", "ls", "--json", "--limit", "1000", "--fields", "id,status,parent,updated_at"]
+research_parents = ["research-factory-185"]   # or research_tag = "research", for an export with tags
 summary_min_chars = 40        # the default
 unindexed_exclude = ["docs/research/decisions/README.md"]
 
@@ -325,8 +385,9 @@ reason = "the first report has no single result"
 | `write_indexes` | `false`: `lab archive index`, `update` and `done` write no index file, an index needs no `output`, and an index file that is still there is an `index-leftover` warning. The start page stays a file with its budget. |
 | `kinds` | The allowed values of a record's `kind`. An index may set `kinds = [...]` to list only records of those kinds; a record that its include matches and that it does not list is still a record that every rule checks. |
 | `task_from` | A day as `YYYY-MM-DD`. A record dated on or after it must name a `task` and a `kind`. |
-| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status` and `tags` (or `labels`). lab runs it in the project root with a limit of 30 seconds. |
-| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Needs `board_export`. |
+| `board_export` | A program and its arguments that print the board's tasks as JSON: an array of objects, or an object with a `tasks` array. Each object has `id`, and may have `status`, `tags` (or `labels`), `parent` and `updated_at`. lab runs it in the project root with a limit of 30 seconds. |
+| `research_tag` | A task of the board export with status `done` and this tag needs a record that names it. Use it for an export that has tags; agent-board tasks have none. Needs `board_export`. |
+| `research_parents` | Task ids. A task of the board export with status `done` needs a record that names it when it is one of these tasks or below one, following `parent`. Group research work under these umbrella tasks. Needs `board_export` with the fields `parent` and `updated_at`. Since lab 0.13.3. |
 | `summary_min_chars` | The shortest accepted `summary`, in characters. |
 | `unindexed_exclude` | Globs of Markdown files that `unindexed-file` leaves alone. |
 | `[[lab.archive.page_group]]` | `name`, `include`, optional `exclude` and `current`. At least one page of the group must have a status in `current`. |
@@ -360,7 +421,7 @@ Model 2 adds these rules to `lab archive check`. Each finding has the tool `lab`
 | `missing-task`, `missing-kind` | error | A record dated on or after `task_from` has no `task`, or no `kind`. |
 | `unknown-task` | error | `task` names an id that the board export does not list. |
 | `task-link-skipped` | info | The state `skipped`: no `board_export` is configured while records name tasks, or the command failed, timed out or printed no task list. No `task` value was compared with the board. `detail` gives the reason. |
-| `task-without-record` | warn | A done task with `research_tag` that no record names. The subject is the task id. |
+| `task-without-record` | warn | A done task with `research_tag`, or at or below a task of `research_parents`, that no record names. With `task_from` set, a task whose `updated_at` is before that day is left out. The subject is the task id. |
 | `missing-summary` | warn | An indexed record has no `summary`, or one shorter than `summary_min_chars`. |
 | `unindexed-file` | warn | A Markdown file next to an index's records (`<directory of an include glob>/*.md`) that no index includes or excludes, and that is not an index output, the start page or in `unindexed_exclude`. |
 | `no-current-page` | warn | A page group has no page with a status in `current`. The subject is the group's name. |
@@ -408,6 +469,8 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `seal-unverified` | error | model 2, `seal = "git"` | 0.12.0 |
 | `sealed-edited` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
 | `sealed-missing` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
+| `similar-record` | warn | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
+| `similar-skipped` | info | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
 | `size-budget` | warn (configurable) | `[[lab.archive.budget]]` | 0.2.0 |
 | `stale-allow` | warn | model 2, `[[lab.archive.allow]]` | 0.12.0 |
 | `stale-kept-link` | warn | `[[lab.archive.kept_link]]` | 0.9.11 |
@@ -416,7 +479,7 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `superseded-link` | warn | `current_pages` | 0.2.0 |
 | `supersession-mismatch` | warn | `[[lab.archive.index]]` | 0.2.0 |
 | `task-link-skipped` | info | model 2, records with `task` | 0.12.0 |
-| `task-without-record` | warn | model 2, `board_export` and `research_tag` | 0.12.0 |
+| `task-without-record` | warn | model 2, `board_export`, and `research_tag` or `research_parents` | 0.12.0 |
 | `unindexed-file` | warn | model 2, `[[lab.archive.index]]` | 0.12.0 |
 | `unknown-id` | error | `[[lab.archive.index]]` | 0.2.0 |
 | `unknown-task` | error | model 2, `board_export` | 0.12.0 |

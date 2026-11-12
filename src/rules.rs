@@ -50,6 +50,8 @@ pub const RULES: &[Rule] = &[
     rule("seal-unverified", Error),
     rule("sealed-edited", Error),
     rule("sealed-missing", Error),
+    rule("similar-record", Warn),
+    rule("similar-skipped", Info),
     Rule {
         id: "size-budget",
         severity: Warn,

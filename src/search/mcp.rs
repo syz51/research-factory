@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
-use super::{Args, GraphArgs, answer, graph, index, open, phrasings};
+use super::{DEFAULT_LIMIT, GraphArgs, Request, graph, index, open, phrasings, render, traced};
 use crate::config::Project;
 
 /// The protocol versions this server speaks, newest first.
@@ -199,32 +199,41 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
     let mode_line = format!("mode: {mode} (model: {model_state})");
     match name {
         "archive_search" => {
-            let args = Args {
-                query: input.strings("query")?,
-                limit: input.count("limit")?,
-                statuses: input.strings("status")?,
-                records: input.flag("records")?,
-                json: true,
-                scopes: Vec::new(),
-                explain: false,
-                rebuild: false,
-                graph: GraphArgs {
-                    cites: input.string("cites")?,
-                    links_to: input.string("links_to")?,
-                    as_of: input.string("as_of")?,
-                    since: input.string("since")?,
-                    until: input.string("until")?,
-                    all: input.flag("all")?,
-                },
+            let query = input.strings("query")?;
+            let statuses = input.strings("status")?;
+            let graph = GraphArgs {
+                cites: input.string("cites")?,
+                links_to: input.string("links_to")?,
+                as_of: input.string("as_of")?,
+                since: input.string("since")?,
+                until: input.string("until")?,
+                all: input.flag("all")?,
             };
-            let phrasings = phrasings(&args.query);
-            let found = answer(project, &args, &phrasings)?
-                .ok_or("give the words to search for, `cites` or `links_to`")?;
-            Ok(format!(
-                "{}\n{mode_line}\n{}",
-                found.state_line(),
-                found.text()
-            ))
+            let phrasings = phrasings(&query);
+            let limit = input.count("limit")?.unwrap_or(DEFAULT_LIMIT);
+            let request = Request {
+                phrasings: &phrasings,
+                scopes: &[],
+                limit,
+                records: input.flag("records")?,
+                statuses: &statuses,
+                rebuild: false,
+                weigh: false,
+                graph: &graph,
+            };
+            let mut found = traced(project, "mcp", &request)?;
+            for hit in &mut found.hits {
+                hit.explain = None;
+            }
+            let text = render(
+                &found.hits,
+                found.more,
+                &found.unknown,
+                &found.expansions,
+                false,
+                limit,
+            );
+            Ok(format!("{}\n{mode_line}\n{text}", found.state_line()))
         }
         "archive_open" => {
             let anchor = input.string("anchor")?.ok_or("`anchor` is required")?;
@@ -232,6 +241,7 @@ fn call(project: &Project, model: &Model, name: &str, input: &Input) -> Result<S
             let ctx = super::Context::new(project)?;
             let opened = index::open(&ctx, false)?;
             let unit = open::open(&ctx, &opened.conn, &anchor, lines)?;
+            super::trace::record_open(project, &unit.anchor);
             let state = match &opened.stale {
                 Some(why) => format!("state: partial; the index is stale: {why}"),
                 None => "state: hits".into(),

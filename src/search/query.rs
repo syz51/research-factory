@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use super::index::{BODY_COLUMN, Fault, WEIGHTS};
+use super::thesaurus::Entry;
 use super::{Class, Context, graph};
 
 /// Candidates taken from each retrieval of one phrasing.
@@ -28,6 +29,9 @@ const PART_WEIGHT: f64 = 0.5;
 #[derive(Debug, PartialEq)]
 pub struct Term {
     tokens: Vec<String>,
+    /// Equivalent terms from the thesaurus: the term matches a unit that
+    /// holds the term or one of these.
+    alts: Vec<Vec<String>>,
 }
 
 impl Term {
@@ -35,9 +39,18 @@ impl Term {
         self.tokens.join(" ")
     }
 
-    /// As an FTS5 string: a word, or a phrase of adjacent words.
+    /// As an FTS5 string: a word, or a phrase of adjacent words; with
+    /// thesaurus terms, any of them.
     fn fts(&self) -> String {
-        format!("\"{}\"", self.text())
+        let quoted = |tokens: &Vec<String>| format!("\"{}\"", tokens.join(" "));
+        if self.alts.is_empty() {
+            return quoted(&self.tokens);
+        }
+        let any: Vec<String> = std::iter::once(&self.tokens)
+            .chain(&self.alts)
+            .map(quoted)
+            .collect();
+        format!("({})", any.join(" OR "))
     }
 }
 
@@ -47,9 +60,78 @@ pub struct Phrasing {
     terms: Vec<Term>,
     /// The words as typed, for the exact id lookup.
     raw: Vec<String>,
+    /// Every word in order, for the thesaurus.
+    seq: Vec<String>,
 }
 
-fn words(text: &str) -> Vec<String> {
+/// One thesaurus entry that a query used.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+pub struct Expansion {
+    /// The term of the query.
+    pub term: String,
+    /// The equivalent terms that were added.
+    pub added: Vec<String>,
+    /// The entry, as `a = b`.
+    pub entry: String,
+}
+
+impl Phrasing {
+    /// Adds the equivalent terms of each active thesaurus entry of which the
+    /// phrasing holds a term, and returns the entries used. A word of the
+    /// entry's term then matches a unit that holds any term of the entry.
+    pub fn expand(&mut self, entries: &[Entry]) -> Vec<Expansion> {
+        let mut used = Vec::new();
+        for entry in entries.iter().filter(|e| !e.retired) {
+            let held = entry.terms.iter().position(|term| {
+                self.seq
+                    .windows(term.len())
+                    .any(|window| window == term.as_slice())
+            });
+            let Some(held) = held else { continue };
+            let own = &entry.terms[held];
+            let others: Vec<&Vec<String>> = entry
+                .terms
+                .iter()
+                .enumerate()
+                .filter(|(i, other)| *i != held && !contains(&self.seq, other))
+                .map(|(_, other)| other)
+                .collect();
+            let mut applied = false;
+            for term in &mut self.terms {
+                if !term.tokens.iter().all(|w| own.contains(w)) {
+                    continue;
+                }
+                for other in &others {
+                    if !term.alts.contains(other) {
+                        term.alts.push((*other).clone());
+                    }
+                    applied = true;
+                }
+            }
+            if !applied {
+                continue;
+            }
+            // A one-word term may be a record id.
+            for other in &others {
+                if let [word] = other.as_slice() {
+                    self.raw.push(word.clone());
+                }
+            }
+            used.push(Expansion {
+                term: own.join(" "),
+                added: others.iter().map(|o| o.join(" ")).collect(),
+                entry: entry.text(),
+            });
+        }
+        used
+    }
+}
+
+fn contains(seq: &[String], term: &[String]) -> bool {
+    seq.windows(term.len()).any(|window| window == term)
+}
+
+pub fn words(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
         .map(str::to_lowercase)
@@ -60,7 +142,10 @@ fn words(text: &str) -> Vec<String> {
 pub fn parse(text: &str) -> Result<Phrasing, String> {
     let mut terms: Vec<Term> = Vec::new();
     let mut add = |tokens: Vec<String>| {
-        let term = Term { tokens };
+        let term = Term {
+            tokens,
+            alts: Vec::new(),
+        };
         if !term.tokens.is_empty() && !terms.contains(&term) {
             terms.push(term);
         }
@@ -89,7 +174,11 @@ pub fn parse(text: &str) -> Result<Phrasing, String> {
         .map(|w| w.trim_matches('"').to_string())
         .filter(|w| !w.is_empty())
         .collect();
-    Ok(Phrasing { terms, raw })
+    Ok(Phrasing {
+        terms,
+        raw,
+        seq: words(text),
+    })
 }
 
 /// The record a hit belongs to.
@@ -177,6 +266,27 @@ pub struct Outcome {
     /// Hits below the limit.
     pub more: usize,
     pub unknown: Vec<Unknown>,
+    /// The best units of the lexical stage before grouping: anchor and fused score.
+    pub candidates: Vec<(String, f64)>,
+}
+
+/// Units of the lexical stage that the trace keeps.
+const TRACED: usize = 10;
+
+/// How much each term of the phrasing tells units apart: `ln(1 + units /
+/// units that hold it)`, with the term's text. A term in no unit weighs most.
+pub fn weights(conn: &Connection, phrasing: &Phrasing) -> Result<Vec<(String, f64)>, Fault> {
+    let units: i64 = conn.query_row("SELECT count(*) FROM units", [], |r| r.get(0))?;
+    let mut count = conn.prepare("SELECT count(*) FROM units_fts WHERE units_fts MATCH ?1")?;
+    phrasing
+        .terms
+        .iter()
+        .map(|term| {
+            let holders: i64 = count.query_row([term.fts()], |r| r.get(0))?;
+            let weight = (1.0 + units as f64 / holders.max(1) as f64).ln();
+            Ok((term.text(), weight))
+        })
+        .collect()
 }
 
 pub struct Options<'a> {
@@ -663,6 +773,11 @@ pub fn search(
             ranked
         }
     };
+    let candidates = ranked
+        .iter()
+        .take(TRACED)
+        .map(|c| (format!("{}#L{}-L{}", c.path, c.start, c.end), c.fused))
+        .collect();
     // Group by record: its units follow its best one.
     let per_record = if opts.records { 1 } else { 2 };
     let mut groups: Vec<Vec<Candidate>> = Vec::new();
@@ -686,6 +801,7 @@ pub fn search(
     let no_words = Phrasing {
         terms: Vec::new(),
         raw: Vec::new(),
+        seq: Vec::new(),
     };
     let mut hits = Vec::new();
     let units = groups.into_iter().flat_map(|(g, also)| {
@@ -740,6 +856,7 @@ pub fn search(
         more: total - hits.len(),
         hits,
         unknown,
+        candidates,
     })
 }
 
@@ -918,6 +1035,7 @@ mod tests {
     fn term(words: &[&str]) -> Term {
         Term {
             tokens: words.iter().map(|w| w.to_string()).collect(),
+            alts: Vec::new(),
         }
     }
 

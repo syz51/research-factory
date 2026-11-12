@@ -79,8 +79,12 @@ enum Command {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
-    /// Find recurring finding rules that no lesson covers yet.
+    /// Find recurring finding rules that no lesson covers yet, and missed
+    /// search queries that an alias would answer.
+    #[command(args_conflicts_with_subcommands = true)]
     Retro {
+        #[command(subcommand)]
+        action: Option<RetroCommand>,
         /// Agent-session findings (rf.finding/1 JSONL from `agentprof scan`); default from [lab].
         #[arg(long, value_name = "FILE")]
         agent_findings: Option<PathBuf>,
@@ -146,6 +150,16 @@ enum Command {
         rebuild: bool,
         #[command(flatten)]
         graph: search::GraphArgs,
+        /// Answer each topic of this file (JSON lines with `id` and `query`, or
+        /// `id<TAB>query`) and write a TREC run that `ireval` scores.
+        #[arg(long, value_name = "TOPICS")]
+        run: Option<PathBuf>,
+        /// Write the run to this file instead of stdout.
+        #[arg(long, value_name = "FILE", requires = "run")]
+        out: Option<PathBuf>,
+        /// With --run: also search each topic's `phrasings`.
+        #[arg(long, requires = "run")]
+        phrasings: bool,
     },
     /// List the neighbours of a record, file, anchor, reference key (`ref:232`) or board task in the search graph.
     ///
@@ -181,6 +195,38 @@ enum Command {
     /// Tools: archive_search, archive_open and archive_related, which run the
     /// same code as `lab search`, `lab open` and `lab related`.
     Mcp,
+}
+
+#[derive(Subcommand)]
+enum RetroCommand {
+    /// Add a missed query as an alias of its target record (in the thesaurus
+    /// when the record is finished).
+    Accept {
+        /// The proposal id `lab retro` prints, or its first digits.
+        id: String,
+        /// The record, as a path or a record id, when the proposal has none
+        /// or names the wrong one.
+        #[arg(long, value_name = "PATH|ID")]
+        record: Option<String>,
+    },
+    /// Never propose these missed queries again.
+    Reject {
+        #[arg(required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Never propose this recurring rule as a lesson again.
+    Dismiss {
+        /// `tool:rule`, as `lab retro` prints it.
+        candidate: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Stop applying the thesaurus entry on this line; the line stays.
+    Retire { line: usize },
+    /// Add an entry `alias = id` to the thesaurus for each record alias.
+    Seed,
 }
 
 #[derive(Subcommand)]
@@ -221,6 +267,12 @@ enum ArchiveCommand {
         #[arg(long, value_enum, default_value_t = Format::Text)]
         format: Format,
     },
+    /// List records on the same topic as a record file or title words; prints
+    /// `skipped: <reason>` and exits 0 when the search fails.
+    Similar {
+        #[arg(required = true, value_name = "FILE|WORDS")]
+        subject: Vec<String>,
+    },
     /// The same as `lab search --in notes --records`.
     Find {
         #[arg(required = true)]
@@ -231,6 +283,9 @@ enum ArchiveCommand {
     /// Print the next free id with this prefix, such as `H159` for `H`.
     Next {
         prefix: String,
+        /// The new record's title: list records on the same topic on stderr.
+        #[arg(long)]
+        title: Option<String>,
         /// Zero-pad the number to this width; also starts a series no record has yet.
         #[arg(long)]
         width: Option<usize>,
@@ -484,21 +539,40 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     explain: false,
                     rebuild: false,
                     graph: search::GraphArgs::default(),
+                    run: None,
+                    out: None,
+                    phrasings: false,
                 },
             ),
+            ArchiveCommand::Similar { subject } => search::similar::run(&project, &subject),
             ArchiveCommand::Next {
                 prefix,
+                title,
                 width,
                 reserve,
                 peek,
-            } => archive::next(
-                &project,
-                cli.config.as_deref(),
-                &prefix,
-                width,
-                reserve,
-                peek,
-            ),
+            } => {
+                if let Some(title) = &title {
+                    // stdout stays the id alone.
+                    match search::similar::similar(&project, title, &[]) {
+                        search::similar::Outcome::Found(found) if !found.is_empty() => eprint!(
+                            "similar: {} record(s) on the same topic; extend one instead?\n{}",
+                            found.len(),
+                            search::similar::render(&found)
+                        ),
+                        search::similar::Outcome::Found(_) => eprintln!("similar: none"),
+                        search::similar::Outcome::Skipped(why) => eprintln!("skipped: {why}"),
+                    }
+                }
+                archive::next(
+                    &project,
+                    cli.config.as_deref(),
+                    &prefix,
+                    width,
+                    reserve,
+                    peek,
+                )
+            }
         },
         Command::Search {
             query,
@@ -510,6 +584,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             explain,
             rebuild,
             graph,
+            run,
+            out,
+            phrasings,
         } => search::run(
             &project,
             &search::Args {
@@ -522,6 +599,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 explain,
                 rebuild,
                 graph,
+                run,
+                out,
+                phrasings,
             },
         ),
         Command::Related { name, limit, json } => search::related(&project, &name, limit, json),
@@ -532,6 +612,23 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         } => search::open(&project, &anchor, lines, json),
         Command::Mcp => search::mcp(&project),
         Command::Retro {
+            action: Some(action),
+            ..
+        } => match action {
+            RetroCommand::Accept { id, record } => {
+                search::learn::accept(&project, &id, record.as_deref())
+            }
+            RetroCommand::Reject { ids, note } => {
+                search::learn::reject(&project, &ids, note.as_deref())
+            }
+            RetroCommand::Dismiss { candidate, note } => {
+                search::learn::dismiss(&project, &candidate, note.as_deref())
+            }
+            RetroCommand::Retire { line } => search::learn::retire(&project, line),
+            RetroCommand::Seed => search::learn::seed(&project),
+        },
+        Command::Retro {
+            action: None,
             agent_findings: path,
             since,
             write,
@@ -1054,7 +1151,10 @@ fn retro_cmd(
         println!("{note}");
     }
     let rec = retro::recurrences(&runs, &agent.findings, groups.as_ref());
-    let cands = retro::candidates(&rec, &lessons, project.lab.recurrence);
+    let mut cands = retro::candidates(&rec, &lessons, project.lab.recurrence);
+    // A dismissed candidate does not return.
+    let decisions = search::learn::Decisions::load(project)?;
+    cands.retain(|((tool, rule), _)| !decisions.is_dismissed(tool, rule));
     println!(
         "{} check run(s), {} agent finding(s), {} rule(s) seen; {} recurring rule(s) without a lesson (threshold: {} recurrences, each a distinct finding or the agent findings in one session group).",
         runs.len(),
@@ -1109,6 +1209,11 @@ fn retro_cmd(
                 Err(e) => println!("  not written: {e}"),
             }
         }
+    }
+    // The search trace is optional input: a problem with it is a note.
+    match search::learn::report(project, since) {
+        Ok(text) => print!("{text}"),
+        Err(e) => println!("Missed search queries are left out: {e}"),
     }
     Ok(ExitCode::SUCCESS)
 }

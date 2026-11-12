@@ -292,6 +292,7 @@ pub fn run(project: &Project, name: &str, lines: usize, json: bool) -> Result<Ex
         eprintln!("lab: partial: the index is stale: {why}");
     }
     let unit = open(&ctx, &opened.conn, name, lines)?;
+    super::trace::record_open(project, &unit.anchor);
     if json {
         println!(
             "{}",

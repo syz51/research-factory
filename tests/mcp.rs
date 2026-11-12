@@ -115,6 +115,29 @@ fn lists_three_tools_and_its_search_gives_the_hits_of_lab_search() {
     // No reply to the notification.
     let ids: Vec<u64> = replies.iter().map(|r| r["id"].as_u64().unwrap()).collect();
     assert_eq!(ids, [0, 1, 2, 3, 4, 5, 6]);
+    // Both searches, also the failed one, and the open go to the query trace.
+    let trace = std::fs::read_to_string(dir.path().join(".research/lab/search-queries.jsonl"))
+        .expect("a query trace");
+    let lines: Vec<Value> = trace
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let sources: Vec<&str> = lines
+        .iter()
+        .filter(|l| l["schema"] == "rf.search-query/1")
+        .map(|l| l["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["mcp", "mcp"], "{trace}");
+    let opens: Vec<&str> = lines
+        .iter()
+        .filter(|l| l["schema"] == "rf.search-open/1")
+        .map(|l| l["anchor"].as_str().unwrap())
+        .collect();
+    assert_eq!(opens.len(), 1, "{trace}");
+    assert!(
+        opens[0].starts_with("docs/decisions/DR001-bm25.md#L"),
+        "{trace}"
+    );
     assert_eq!(replies[0]["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "lab");
     let names: Vec<&str> = replies[1]["result"]["tools"]
