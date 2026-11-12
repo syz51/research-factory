@@ -17,6 +17,7 @@ The masters test set is `docs/process/archive-search-testset-2026-11-12` in mast
 ### How a topic is made
 
 - Type: `known-item` or `topical`, about the notes (the type scope of these types).
+- Kind: one of `paraphrase`, `supersession`, `cross-record` or `table` (see the list below). The writer sets it before grading, and `gate.tsv` records it.
 - `origin`: `grep-hard-343`. `as_of`: the masters commit the topic's units were judged at.
 - `id`: the next free ids of the test set's scheme (`K` for known-item, `T` for topical).
 - The writer, a Claude Opus agent, reads the archive and picks one to three seed records that answer a question. Then it writes the topic: `need` (what counts as relevant), `query`, and two `phrasings`.
@@ -39,7 +40,14 @@ The masters test set is `docs/process/archive-search-testset-2026-11-12` in mast
 
 ### The grep-hard gate
 
-A phrasing passes the gate if no grade-2 record of its topic is in the top 10 of the grep word-count baseline or of BM25 (records) for that phrasing. The pool covers both top-10 lists, so the gate uses judged records only. The masters thread writes a file `extension-343/gate.tsv` in the test set with one line per phrasing: `topic phrasing grep_rank bm25_rank pass`. The rank is that of the best grade-2 record, `-` when there is none in the top 10.
+A phrasing passes the gate if no grade-2 record of its topic is in the top 10 of the grep word-count baseline or of BM25 (records) for that phrasing. The pool covers both top-10 lists, so the gate uses judged records only. The masters thread writes a file `extension-343/gate.tsv` in the test set. It has the header line `topic phrasing grep_rank bm25_rank pass batch kind`, then one line per phrasing of each admitted topic, separated by spaces:
+
+- `grep_rank`, `bm25_rank`: the rank of the best grade-2 record in that run's top 10, `-` when there is none;
+- `pass`: `yes` if the phrasing passes the gate, else `no`;
+- `batch`: the batch number, 1 to 5;
+- `kind`: the topic's kind.
+
+Each batch appends its lines; earlier lines do not change.
 
 ### How many topics
 
@@ -52,7 +60,10 @@ A phrasing passes the gate if no grade-2 record of its topic is in the top 10 of
 
 - Model: claude-opus-5-5 through the `claude` CLI in headless mode (`claude -p`), on the subscription, with the flags of [../e4b-grep-hard/run_session.sh](../e4b-grep-hard/run_session.sh). No API credit is spent; the USD figures are notional.
 - Conditions: as in E4b. `cli`: the research-factory skill and the `lab brief` hook, no `.mcp.json`. `mcp`: the same and `lab mcp` as an MCP server.
-- Archive: two scratch copies (`git clone`) of masters at commit C, one per condition. C is the masters commit that holds the last batch of topics and their grades. The copies have no `private/` and no `docs/process/archive-search-testset-*` folder. The sessions read the prompt from the test set outside the copies, as E4b did.
+- Archive: two scratch copies (`git clone`) of masters, one per condition, without `private/` and without any `docs/process/archive-search-testset-*` folder. The sessions read the prompt from the test set outside the copies, as E4b did.
+  - Screening of batch b runs in copies at C_b, the masters commit that adds batch b's topics, grades and `gate.tsv` lines.
+  - The comparison runs in copies at C, the commit of the last batch screened. Every comparison session uses C.
+  - The report lists each C_b and C. Archive changes between C_b and C are a limit of the study: a topic is selected on the archive at C_b and compared on the archive at C. `check_qrels.py` must exit 0 at C.
 - Pins: the `lab` version, the `claude` CLI version, the model and the research-factory skill commit are recorded before the first screening session. They stay the same for every session. If a pinned part must change, the study stops, and the change is an amendment.
 - Leak check: after each batch, check that no transcript read `qrels-records.txt`, `topics.jsonl` or `extension-343/` through a tool call. E4b had 0 such reads in 290 sessions.
 - Measures: [../e4b-grep-hard/measure.py](../e4b-grep-hard/measure.py). `correct`: the answer names a grade-2 record of the topic. `strict`: correct and no grade-0 record named.
@@ -60,7 +71,7 @@ A phrasing passes the gate if no grade-2 record of its topic is in the top 10 of
 ## Screening
 
 - Pool: the admitted new topics. E4b's 15 compared topics and every topic of the test set that is not `grep-hard-343` are excluded.
-- Queue: one `cli` session per phrasing that passes the gate (`run_session.sh cli <topic> <k> <k>`, phrasing k as the rep number, as E4b's screening).
+- Queue: one `cli` session per phrasing of the batch that passes the gate (`run_session.sh cli <topic> <k> <k>`, phrasing k as the rep number, as E4b's screening). Each batch queues only its own `gate.tsv` lines, so no phrasing is screened twice.
 - Selection: a topic is selected if at least one screened phrasing was wrong (`correct` false). It is compared on that phrasing; if both were wrong, on phrasing 1.
 - Key completion for screening: before selection, the cited records without a grade for the topic are graded blind (see "Key completion"). Selection uses the completed key.
 - Order: batch by batch, in the order the topics were added. Screening stops after the batch in which the selected count reaches 50, or after the last batch.
@@ -82,19 +93,23 @@ The primary analysis uses the completed key. The report also gives the results w
 
 ## Analysis
 
-[analyze.py](analyze.py) runs the primary and the clustered tests. [../e4b-grep-hard/analyze.py](../e4b-grep-hard/analyze.py) runs the secondary tests on the same rows.
+[analyze.py](analyze.py) runs every test below on the pairs of the look. It takes the queue that the sessions ran from, so it uses all r replicates and, at the interim, only the pairs of the first half.
 
 - Primary test: exact McNemar on `correct` (two-sided binomial test on the discordant pairs, p = 0.5). Its alpha comes from "Interim look".
 - Topic-clustered analysis: the pairs within one topic are not independent. For each topic t, d_t = (mcp correct − cli correct) / pairs of t.
   - A sign-flip randomization test on the mean of d_t: exact with up to 20 topics, else 100,000 random sign vectors with seed 343.
   - A 95% percentile bootstrap interval for the mean of d_t over topics: 10,000 resamples, seed 343.
 - Claim: `mcp` gives more correct answers only if the primary test is significant at its alpha, and the clustered test gives p < 0.05 in the same direction. If the primary test is significant and the clustered test is not, the report says the gain depends on a few topics.
-- Secondary tests, Holm-adjusted together as in E4b: McNemar on `strict`, a topic-level sign test on correct counts, and Wilcoxon signed-rank tests on tool calls, main context tokens and notional cost.
-- Also reported: the per-topic table, the start-position effect, and the results by topic kind (paraphrase, supersession, cross-record, table value). These are descriptive.
+- Secondary tests, five, Holm-adjusted together: exact McNemar on `strict`; a topic-level sign test on correct counts over all replicates (ties dropped); Wilcoxon signed-rank tests (zero differences dropped) on main tool calls, main context tokens and notional cost.
+- Descriptive, without tests:
+  - the per-topic table of correct counts;
+  - correct answers by which session of a pair started first, from the `order.log` positions;
+  - correct answers by topic kind, from `gate.tsv`.
 
 ## Interim look
 
-- One interim look, when the first half of the pairs in queue order are done: the first floor(P/2) pairs, where P = n × r.
+- One interim look on the first half of the pairs in queue order: the first floor(P/2) pairs, where P = n × r.
+- The queue runs in two parts. Part 1 is the queue lines of the first floor(P/2) pairs. When part 1 is done and no session runs, the interim analysis runs. Part 2, the other lines, starts only after the interim decision. `analyze.py --look interim` also cuts the rows at floor(P/2) pairs.
 - Alpha spending: Lan-DeMets with an O'Brien-Fleming-type function, total two-sided alpha 0.05, information fraction 0.5. Nominal alpha: 0.00557 at the interim (|z| ≥ 2.772), 0.0478 at the final look (|z| ≥ 1.979). With P ≥ 250, floor(P/2)/P is at least 0.498, and the interim alpha at that fraction differs by less than 0.0001.
 - Efficacy stop: the interim primary p < 0.00557 and the clustered test agrees (as in "Claim"). The study stops and reports.
 - Futility stop: non-binding. The study stops if the `mcp`-only pairs are not more than the `cli`-only pairs at the interim. The final alpha does not use this rule, so it stays valid if the study continues anyway. The simulation gave type I error 0.020 with this rule and 0.80 power without it.
@@ -118,19 +133,34 @@ A change to this design is a dated commit to this file, made before the sessions
 ## Reproduce
 
 ```sh
-# Masters part: the test set at commit C has the new topics, their grades and extension-343/gate.tsv.
-export E4B_MASTERS=<folder with masters-cli and masters-mcp at C> \
-  E4B_TESTSET=<masters at C>/docs/process/archive-search-testset-2026-11-12 E4B_LAB=<dir of lab>
-E=../e4b-grep-hard
-# Screening queue: gated phrasings of one batch of grep-hard-343 topics
-awk '$5 == "pass" {print "cli", $1, $2, $2}' "$E4B_TESTSET/extension-343/gate.tsv" > screen-queue.txt
-E4B_OUT=screen xargs -P4 -L1 sh $E/run_session.sh < screen-queue.txt
-uv run --no-project python $E/measure.py "$E4B_TESTSET" screen > raw/screen.jsonl
+E=../e4b-grep-hard TS=docs/process/archive-search-testset-2026-11-12 E4B_LAB=<dir of lab>
+# Screening of batch b: scratch copies and the test set at C_b
+export E4B_MASTERS=<folder with masters-cli and masters-mcp at C_b> E4B_TESTSET=<masters at C_b>/$TS
+awk -v b=<b> 'NR > 1 && $5 == "yes" && $6 == b {print "cli", $1, $2, $2}' \
+  "$E4B_TESTSET/extension-343/gate.tsv" > screen-queue-<b>.txt
+E4B_OUT=screen xargs -P4 -L1 sh $E/run_session.sh < screen-queue-<b>.txt
+# After key completion for screening: K = the masters commit with those grades
+git -C <masters> archive <K> $TS | (mkdir -p key && tar x -C key)
+uv run --no-project python $E/measure.py key/$TS screen > raw/screen.jsonl
 # selected.txt: `<topic> <phrasing>` per selected topic (see "Screening")
-uv run --no-project python order.py selected.txt <r> | E4B_OUT=out xargs -P4 -L1 sh $E/run_session.sh
-uv run --no-project python $E/measure.py "$E4B_TESTSET" out > raw/compare.jsonl
-uv run --no-project --with scipy --with numpy python analyze.py raw/compare.jsonl final
-uv run --no-project --with scipy python $E/analyze.py raw/compare.jsonl
+# Comparison: scratch copies at C; part 1 is the first floor(P/2) pairs (2 lines each)
+export E4B_MASTERS=<folder with masters-cli and masters-mcp at C> E4B_TESTSET=<masters at C>/$TS
+uv run --no-project python order.py selected.txt <r> > queue.txt
+P=$(( $(wc -l < queue.txt) / 2 ))
+head -n $(( P / 2 * 2 )) queue.txt | E4B_OUT=out xargs -P4 -L1 sh $E/run_session.sh
+# Interim, after key completion for part 1 (K1 = the masters commit with those grades)
+git -C <masters> archive <K1> $TS | (rm -rf key && mkdir -p key && tar x -C key)
+uv run --no-project python $E/measure.py key/$TS out > raw/interim.jsonl
+uv run --no-project --with scipy --with numpy python analyze.py raw/interim.jsonl \
+  --queue queue.txt --look interim --gate key/$TS/extension-343/gate.tsv
+# Part 2, if the interim says continue
+tail -n +$(( P / 2 * 2 + 1 )) queue.txt | E4B_OUT=out xargs -P4 -L1 sh $E/run_session.sh
+# Final, after key completion for all sessions (K2); the key before completion is <masters at C>/$TS
+git -C <masters> archive <K2> $TS | (rm -rf key && mkdir -p key && tar x -C key)
+uv run --no-project python $E/measure.py key/$TS out > raw/compare.jsonl
+uv run --no-project python $E/measure.py "$E4B_TESTSET" out > raw/compare-before-completion.jsonl
+uv run --no-project --with scipy --with numpy python analyze.py raw/compare.jsonl \
+  --queue queue.txt --gate key/$TS/extension-343/gate.tsv
 ```
 
-The scripts were checked on E4b's regraded round 2: `analyze.py ../e4b-grep-hard/raw/regrade-342/round2-compare.jsonl` gives 8 vs 14 of 30, p=0.109, as E4b's README states, and a clustered difference of +0.200 (95% interval 0.000 to +0.433, sign-flip p=0.188).
+The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue: `analyze.py ../e4b-grep-hard/raw/regrade-342/round2-compare.jsonl --queue <queue>` gives 8 vs 14 of 30, p=0.109, as E4b's README states. The clustered difference is +0.200 (95% interval 0.000 to +0.433, sign-flip p=0.188). `strict` (5 vs 6) and the topic counts (2 vs 6) match E4b. The Holm-adjusted p-values differ from E4b's because E4c has five secondary tests, not ten.
