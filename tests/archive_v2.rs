@@ -1317,3 +1317,242 @@ fn an_allow_entry_accepts_the_open_items_of_a_sealed_file() {
         "{text}"
     );
 }
+
+#[test]
+fn renumber_renames_a_record_its_id_heading_and_links_and_check_is_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().join("main");
+    std::fs::create_dir(&d).unwrap();
+    archive(&d, CONFIG);
+    let wt = dir.path().join("wt");
+    git(
+        &d,
+        &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+    );
+    let proposed = |extra: &str, title: &str| {
+        record(
+            "proposed",
+            "2026-11-12",
+            &format!("kind: decision\n{extra}"),
+            title,
+        )
+    };
+    write(
+        &wt,
+        "docs/decisions/D003-mine.md",
+        &(proposed("task: T-3\n", "D003 — Mine") + "\nBack to [the top](#d003--mine).\n"),
+    );
+    write(
+        &wt,
+        "docs/decisions/D004-notes.md",
+        &(proposed("task: T-4\ndecisions: [D003]\n", "Notes")
+            + "\nSee [mine](D003-mine.md#d003--mine) and [ref].\nD003 came first.\n\n[ref]: ./D003-mine.md\n"),
+    );
+    commit(&wt, "side records");
+    // Text appended to a sealed log after its last commit is not sealed yet.
+    append(
+        &wt,
+        "docs/log/2026-10.md",
+        "- chose [mine](../decisions/D003-mine.md).\n",
+    );
+    write(
+        &d,
+        "docs/decisions/D003-theirs.md",
+        &proposed("task: T-5\n", "Theirs"),
+    );
+    write(
+        &d,
+        "docs/decisions/D005-later.md",
+        &proposed("task: T-6\n", "Later"),
+    );
+    commit(&d, "main records");
+    let wt2 = dir.path().join("wt2");
+    git(
+        &d,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "other",
+            wt2.to_str().unwrap(),
+        ],
+    );
+    write(
+        &wt2,
+        "docs/decisions/D006-draft.md",
+        &proposed("task: T-7\n", "Draft"),
+    );
+    let (_, text) = check(&wt);
+    assert_eq!(
+        rules(&text),
+        ["warn id-taken-on-default-branch docs/decisions/D003-mine.md"],
+        "{text}"
+    );
+    let renumber = |new: &str| lab(&wt, &["archive", "renumber", "D003", new]);
+    for (new, why) in [
+        ("D004", "D004 is taken: docs/decisions/D004-notes.md has it"),
+        (
+            "D005",
+            "D005 is taken on the default branch or in another worktree",
+        ),
+        (
+            "D006",
+            "D006 is taken on the default branch or in another worktree",
+        ),
+        ("D001", "D001 is taken"),
+    ] {
+        let out = renumber(new);
+        assert!(!out.status.success(), "{new}: {}", stdout(&out));
+        assert!(stderr(&out).contains(why), "{new}: {}", stderr(&out));
+    }
+    assert!(wt.join("docs/decisions/D003-mine.md").exists());
+    let out = lab(&wt, &["archive", "renumber", "D003", "D007", "--dry-run"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("Dry run"), "{}", stdout(&out));
+    assert!(wt.join("docs/decisions/D003-mine.md").exists());
+    let out = renumber("D007");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let printed = stdout(&out);
+    assert!(
+        printed.contains("renamed docs/decisions/D003-mine.md -> docs/decisions/D007-mine.md"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("changed docs/decisions/D007-mine.md:8: heading `# D007 — Mine`"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("by hand docs/decisions/D004-notes.md:15: mentions D003"),
+        "{printed}"
+    );
+    assert!(!wt.join("docs/decisions/D003-mine.md").exists());
+    let mine = read(&wt, "docs/decisions/D007-mine.md");
+    assert!(mine.contains("# D007 — Mine\n"), "{mine}");
+    assert!(mine.contains("[the top](#d007--mine)"), "{mine}");
+    let notes = read(&wt, "docs/decisions/D004-notes.md");
+    assert!(notes.contains("decisions: [D007]\n"), "{notes}");
+    assert!(
+        notes.contains("[mine](D007-mine.md#d007--mine)")
+            && notes.contains("[ref]: ./D007-mine.md"),
+        "{notes}"
+    );
+    assert!(notes.contains("D003 came first."), "{notes}");
+    assert!(
+        read(&wt, "docs/log/2026-10.md").contains("(../decisions/D007-mine.md)"),
+        "{}",
+        read(&wt, "docs/log/2026-10.md")
+    );
+    clean(&wt);
+    // After the merge no id is shared.
+    commit(&wt, "renumber");
+    git(&wt, &["merge", "-q", "--no-edit", "main"]);
+    clean(&wt);
+}
+
+#[test]
+fn renumber_refuses_sealed_records_and_shared_ids_and_leaves_sealed_links() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    archive(d, CONFIG);
+    let out = lab(d, &["archive", "renumber", "D001", "D009"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("docs/decisions/D001-first.md is sealed"),
+        "{}",
+        stderr(&out)
+    );
+    let proposed = |extra: &str, title: &str| {
+        record(
+            "proposed",
+            "2026-11-12",
+            &format!("kind: decision\n{extra}"),
+            title,
+        )
+    };
+    write(
+        d,
+        "docs/decisions/D003-a.md",
+        &proposed("task: T-3\n", "Apples"),
+    );
+    write(
+        d,
+        "docs/decisions/D003-b.md",
+        &proposed("task: T-4\n", "Bananas"),
+    );
+    write(
+        d,
+        "docs/decisions/D004-c.md",
+        &proposed("task: T-5\ndecisions: [D003]\n", "Cherries"),
+    );
+    append(
+        d,
+        "docs/log/2026-10.md",
+        "- chose [b](../decisions/D003-b.md).\n",
+    );
+    commit(d, "a shared id");
+    let out = lab(d, &["archive", "renumber", "D003", "D008"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains(
+            "2 records have the id D003: docs/decisions/D003-a.md, docs/decisions/D003-b.md"
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let out = lab(
+        d,
+        &["archive", "renumber", "docs/decisions/D003-b.md", "D008"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let printed = stdout(&out);
+    for line in [
+        "by hand docs/log/2026-10.md:4: sealed text links to `../decisions/D003-b.md`",
+        "by hand docs/decisions/D004-c.md: its front matter names D003, which 2 records have",
+    ] {
+        assert!(printed.contains(line), "{printed}");
+    }
+    // Sealed text keeps its words, so its mention is not listed.
+    assert!(!printed.contains("2026-10.md:4: mentions"), "{printed}");
+    assert!(read(d, "docs/decisions/D004-c.md").contains("decisions: [D003]"));
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(
+        rules(&text),
+        ["error broken-link docs/log/2026-10.md:4"],
+        "{text}"
+    );
+
+    // With a seal manifest, a sealed record is one the manifest lists.
+    let m = d.join("m");
+    write(
+        &m,
+        "research.toml",
+        &MODEL_1.replace(
+            "sealed = [\"docs/log/*.md\"]",
+            "sealed = [\"docs/log/*.md\", \"docs/decisions/D001-first.md\"]",
+        ),
+    );
+    write(&m, D001, "# First\n");
+    assert!(lab(&m, &["archive", "update"]).status.success());
+    let out = lab(&m, &["archive", "renumber", "D001-first", "D002-first"]);
+    assert!(
+        stderr(&out).contains("docs/decisions/D001-first.md is sealed"),
+        "{}",
+        stderr(&out)
+    );
+    // The index is written again when the project writes indexes.
+    write(&m, "docs/decisions/D003-third.md", "# Third\n");
+    let out = lab(&m, &["archive", "renumber", "D003-third", "D004-third"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("wrote docs/decisions/INDEX.md"),
+        "{}",
+        stdout(&out)
+    );
+    let index = read(&m, "docs/decisions/INDEX.md");
+    assert!(
+        index.contains("D004-third") && !index.contains("D003-third"),
+        "{index}"
+    );
+}

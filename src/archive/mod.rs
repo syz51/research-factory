@@ -11,6 +11,7 @@ mod index;
 pub(crate) mod markdown;
 mod meta_rules;
 mod open_items;
+mod renumber;
 mod reserve;
 mod rules;
 mod seal;
@@ -28,6 +29,7 @@ pub use done::{done, log, print_index};
 use files::FileSet;
 use front::{Invalid, Meta};
 use markdown::Doc;
+pub use renumber::renumber;
 use rules::{Problem, invalid_problem};
 use seal::{Entry, Manifest, State};
 

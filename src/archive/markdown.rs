@@ -12,6 +12,9 @@ use regex::Regex;
 pub struct Link {
     pub line: usize,
     pub dest: String,
+    /// The byte range of the destination as written in its line, without
+    /// the line's `\r` and without `<` and `>`.
+    pub span: std::ops::Range<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -236,14 +239,16 @@ fn inline_links(line: &str, m: &[u8], lineno: usize, out: &mut Vec<Link>) {
             out.push(Link {
                 line: lineno,
                 dest: unescape(&line[ds..de]),
+                span: ds..de,
             });
             skip = j + 1..end;
         }
     }
 }
 
-/// `[label]: dest`, except footnotes (`[^1]: text`).
-fn reference_definition(line: &str, m: &[u8]) -> Option<String> {
+/// `[label]: dest`, except footnotes (`[^1]: text`): the destination and its
+/// byte range.
+fn reference_definition(line: &str, m: &[u8]) -> Option<(String, std::ops::Range<usize>)> {
     let indent = m.iter().take_while(|&&c| c == b' ').count();
     if indent > 3 || m.get(indent) != Some(&b'[') || m.get(indent + 1) == Some(&b'^') {
         return None;
@@ -274,7 +279,7 @@ fn reference_definition(line: &str, m: &[u8]) -> Option<String> {
                 (title.as_bytes()[0], title.as_bytes()[title.len() - 1]),
                 (b'"', b'"') | (b'\'', b'\'') | (b'(', b')')
             ));
-    (de > ds && is_title).then(|| unescape(&line[ds..de]))
+    (de > ds && is_title).then(|| (unescape(&line[ds..de]), ds..de))
 }
 
 /// `line` without the parts inside HTML comments, given whether a comment
@@ -449,8 +454,12 @@ pub fn parse(body: &str, first_line: usize) -> Doc {
         {
             doc.anchors.insert(c[1].to_lowercase());
         }
-        if let Some(dest) = reference_definition(line, &m) {
-            doc.links.push(Link { line: lineno, dest });
+        if let Some((dest, span)) = reference_definition(line, &m) {
+            doc.links.push(Link {
+                line: lineno,
+                dest,
+                span,
+            });
         } else {
             inline_links(line, &m, lineno, &mut doc.links);
         }
@@ -537,6 +546,11 @@ mod tests {
                 "a b.md"
             ]
         );
+        // Each span holds the destination as written in its line.
+        let lines: Vec<&str> = text.split('\n').collect();
+        for l in parse(text, 1).links {
+            assert_eq!(lines[l.line - 1][l.span.clone()], l.dest, "{l:?}");
+        }
     }
 
     #[test]

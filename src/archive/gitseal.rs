@@ -227,7 +227,9 @@ pub(super) fn taken_on_default(spec: &Spec, records: &[&Record]) -> Result<Vec<P
             &r.path,
             format!(
                 "has id {id}, which {other} also has on {branch}; take a new id from \
-                 `lab archive next <prefix>` and rename this record before the merge"
+                 `lab archive next <prefix>` and run `lab archive renumber {} <new id>` before \
+                 the merge",
+                r.path
             ),
         );
         p.data = Some(serde_json::json!({"id": id, "other": other, "branch": branch}));
@@ -628,6 +630,15 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
 /// of its body at `HEAD`, when the file is sealed there and `body` still
 /// starts with that text.
 pub(super) fn sealed_len(spec: &Spec, file: &str, body: &[u8]) -> Result<Option<usize>, String> {
+    let Some(at_head) = sealed_at_head(spec, file)? else {
+        return Ok(None);
+    };
+    let head = front::sealed_body(&at_head);
+    Ok(body.starts_with(head).then_some(head.len()))
+}
+
+/// The content of `file` at `HEAD` when it is sealed there.
+pub(super) fn sealed_at_head(spec: &Spec, file: &str) -> Result<Option<Vec<u8>>, String> {
     let root = spec.root();
     let Some(prefix) = prefix(root) else {
         return Ok(None);
@@ -643,8 +654,7 @@ pub(super) fn sealed_len(spec: &Spec, file: &str, body: &[u8]) -> Result<Option<
     let sealed = spec.sealed.matches(file)
         || front::status_of(&out.stdout).is_some_and(|s| spec.cfg.sealed_statuses.contains(&s))
         || status_sealed_by(spec, "HEAD", file)?;
-    let head = front::sealed_body(&out.stdout);
-    Ok((sealed && body.starts_with(head)).then_some(head.len()))
+    Ok(sealed.then_some(out.stdout))
 }
 
 /// Whether `file`, a record relative to the project root, had a status in

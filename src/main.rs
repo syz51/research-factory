@@ -302,6 +302,18 @@ enum ArchiveCommand {
         #[arg(long)]
         peek: bool,
     },
+    /// Give a record a new id: rename its file, change its `id` and title
+    /// heading, the id lists of other records and the links to it.
+    Renumber {
+        /// The record's id, or its path when several records have the id.
+        old: String,
+        /// The new id, which no record here, on the default branch or in
+        /// another worktree has.
+        new: String,
+        /// Print the changes; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -555,6 +567,9 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 },
             ),
             ArchiveCommand::Similar { subject } => search::similar::run(&project, &subject),
+            ArchiveCommand::Renumber { old, new, dry_run } => {
+                archive::renumber(&project, cli.config.as_deref(), &old, &new, dry_run)
+            }
             ArchiveCommand::Next {
                 prefix,
                 title,

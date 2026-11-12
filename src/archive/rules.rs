@@ -526,7 +526,7 @@ impl<'a> Offloaded<'a> {
 }
 
 /// The append-only files and their seals.
-enum Seals<'a> {
+pub(super) enum Seals<'a> {
     Manifest {
         /// The files that match `[lab.archive] sealed`.
         sealed: BTreeSet<&'a str>,
@@ -559,7 +559,7 @@ impl Seals<'_> {
     /// Whether file line `line` (from 1) of `file`, whose content is `bytes`,
     /// lies wholly in the text its seal covers: the file is append-only, its
     /// seal holds, and the line ends within the sealed bytes of the body.
-    fn covers(&self, file: &str, bytes: &[u8], line: usize) -> Result<bool, String> {
+    pub(super) fn covers(&self, file: &str, bytes: &[u8], line: usize) -> Result<bool, String> {
         let body = front::sealed_body(bytes);
         let Some(sealed) = self.sealed_len(file, body)? else {
             return Ok(false);
