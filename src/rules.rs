@@ -70,6 +70,7 @@ pub const RULES: &[Rule] = &[
     rule("unknown-id", Error),
     rule("unknown-task", Error),
     rule("unsealed", Warn),
+    rule("untracked-link", Warn),
 ];
 
 pub fn get(id: &str) -> Option<&'static Rule> {

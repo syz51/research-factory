@@ -233,3 +233,69 @@ fn a_replay_does_not_look_in_the_main_checkout() {
     }
     assert!(runs.contains("cannot read data/manifest.json"), "{runs}");
 }
+
+#[test]
+fn a_link_to_a_file_git_does_not_track_is_a_warning_until_it_is_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, _) = setup(ceiling);
+    let lab = |d: &Path, args: &[&str]| run(LAB, d, ceiling, args);
+    let untracked = |out: &Output| -> Vec<String> {
+        stdout(out)
+            .lines()
+            .filter(|l| l.contains("untracked-link"))
+            .map(str::to_string)
+            .collect()
+    };
+    // Without the broken link and the absent file of `setup`, so that only
+    // the new warnings remain.
+    write(&m, "docs/a.md", "# A\n");
+    write(&m, "data/absent.json", "{}\n");
+    write(
+        &m,
+        "docs/b.md",
+        "# B\n\n[run](../runs/r1.jsonl)\n[data](../data/big.csv)\n[tracked](tracked.md)\n\
+         [runs](../more/)\n[docs](../docs)\n",
+    );
+    write(&m, "runs/r1.jsonl", "{}\n");
+    write(&m, "more/r2.jsonl", "{}\n");
+
+    // The untracked run and the directory that holds only untracked files are
+    // flagged; the ignored data file, the tracked note and the tracked
+    // directory with an untracked note in it are not. The untracked note
+    // that links them is checked as well.
+    let out = lab(&m, &["archive", "check"]);
+    let lines = untracked(&out);
+    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert!(
+        lines[0].starts_with("warn untracked-link docs/b.md:3"),
+        "{}",
+        lines[0]
+    );
+    assert!(lines[0].contains("`../runs/r1.jsonl`"), "{}", lines[0]);
+    assert!(
+        lines[1].starts_with("warn untracked-link docs/b.md:6")
+            && lines[1].contains("`../more/`, a directory that git tracks nothing in"),
+        "{}",
+        lines[1]
+    );
+    // A warning: the gate still passes and names the fix.
+    let done = lab(&m, &["archive", "done"]);
+    assert_eq!(
+        done.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&done),
+        stderr(&done)
+    );
+    assert!(
+        stdout(&done).contains("commit the target in the same commit"),
+        "{}",
+        stdout(&done)
+    );
+
+    let top = m.parent().unwrap();
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "run"]);
+    assert!(untracked(&lab(&m, &["archive", "check"])).is_empty());
+}

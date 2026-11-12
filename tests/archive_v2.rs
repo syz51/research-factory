@@ -617,6 +617,8 @@ fn a_current_page_marks_its_links_to_historical_pages() {
             "See [the old page](old.md).\nHistorical: [the old page](old.md).\nAlso [older](older.md).\n",
         ),
     );
+    // Committed, so that no link points to an untracked file.
+    commit(d, "pages");
     let (code, text) = check(d);
     assert_eq!(code, Some(0), "{text}");
     assert_eq!(

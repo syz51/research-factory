@@ -66,6 +66,10 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
             "link the record that replaced it, or say on the line that the target is historical",
         ),
         "stale-kept-link" | "stale-allow" => (Links, "remove the entry from research.toml"),
+        "untracked-link" => (
+            Links,
+            "commit the target in the same commit as the link, or have git ignore it on purpose",
+        ),
         "stale-derivative" => (
             Stage::Sources,
             "rebuild the structure file or paper card from the current text with `papers`, or delete it",
