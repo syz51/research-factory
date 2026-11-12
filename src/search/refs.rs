@@ -481,6 +481,9 @@ struct Structure {
 #[derive(Deserialize)]
 struct StructureText {
     sha256: String,
+    /// The text's line count, as `str::lines` counts them.
+    #[serde(default)]
+    lines: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -491,9 +494,16 @@ struct Section {
     last_line: usize,
 }
 
-/// The sections of a structure file made from the text with `text_sha`, or
-/// why the file is stale or unreadable.
-fn structure(file: &std::path::Path, text_sha: &str) -> Result<Vec<Section>, String> {
+/// The sections of a structure file, by whether it was made from the text
+/// that has sha256 `text_sha` now.
+enum Sections {
+    Current(Vec<Section>),
+    /// Made from an earlier text: why, and the structure as it was.
+    Stale(String, Structure),
+}
+
+/// The sections of a structure file, or why it is unreadable.
+fn structure(file: &std::path::Path, text_sha: &str) -> Result<Sections, String> {
     let bytes = std::fs::read(file).map_err(|e| format!("unreadable: {e}"))?;
     let s: Structure =
         serde_json::from_slice(&bytes).map_err(|e| format!("not a structure file: {e}"))?;
@@ -501,9 +511,81 @@ fn structure(file: &std::path::Path, text_sha: &str) -> Result<Vec<Section>, Str
         return Err(format!("schema `{}` is not rf.paper-structure/1", s.schema));
     }
     if !s.text.sha256.eq_ignore_ascii_case(text_sha) {
-        return Err(stale_why(&s.text.sha256, text_sha));
+        return Ok(Sections::Stale(stale_why(&s.text.sha256, text_sha), s));
     }
-    Ok(s.sections)
+    Ok(Sections::Current(s.sections))
+}
+
+/// The sections of a structure file made from an earlier text, found again
+/// in `text`, so that an edit moves the passages of the other sections and
+/// leaves their text as it was. A section starts at the line that equals its
+/// heading, up to spaces, nearest to where the edits so far moved it; one
+/// whose heading is gone moves with the section before it. A section that
+/// ran to the next one still does, and the last one ends with the text.
+fn relocate(old: Structure, text: &str) -> Vec<Section> {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lines: Vec<&str> = text.lines().collect();
+    // The lines of the text that equal an old heading.
+    let mut at: HashMap<String, Vec<usize>> = old
+        .sections
+        .iter()
+        .filter_map(|s| s.heading.as_deref().map(norm))
+        .filter(|h| !h.is_empty())
+        .map(|h| (h, Vec::new()))
+        .collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(found) = at.get_mut(&norm(line)) {
+            found.push(i + 1);
+        }
+    }
+    // How far the edits so far moved the text, and the first line the next
+    // section may start on.
+    let mut shift = 0isize;
+    let mut floor = 1;
+    let mut firsts = Vec::with_capacity(old.sections.len());
+    for s in &old.sections {
+        let expected = s.first_line as isize + shift;
+        let found = s
+            .heading
+            .as_deref()
+            .and_then(|h| at.get(&norm(h)))
+            .and_then(|at| {
+                at.iter()
+                    .copied()
+                    .filter(|&n| n >= floor)
+                    .min_by_key(|&n| (n as isize - expected).abs())
+            });
+        let first = match found {
+            Some(n) => n,
+            // Past the end of a shorter text, the section is empty.
+            None => expected.min(lines.len() as isize + 1).max(floor as isize) as usize,
+        };
+        shift = first as isize - s.first_line as isize;
+        firsts.push(first);
+        floor = first + 1;
+    }
+    let old_end = old
+        .text
+        .lines
+        .or_else(|| old.sections.last().map(|s| s.last_line))
+        .unwrap_or(0);
+    let mut out = Vec::with_capacity(old.sections.len());
+    let mut sections = old.sections.into_iter().zip(&firsts).peekable();
+    while let Some((s, &first)) = sections.next() {
+        let moved = (s.last_line as isize + first as isize - s.first_line as isize).max(0) as usize;
+        let last = match sections.peek() {
+            Some((next, next_first)) if s.last_line + 1 >= next.first_line => *next_first - 1,
+            Some((_, next_first)) => moved.min(*next_first - 1),
+            None if s.last_line >= old_end => lines.len(),
+            None => moved.min(lines.len()),
+        };
+        out.push(Section {
+            first_line: first,
+            last_line: last,
+            ..s
+        });
+    }
+    out
 }
 
 fn stale_why(recorded: &str, actual: &str) -> String {
@@ -621,22 +703,18 @@ pub fn load_text(t: &TextDoc) -> Result<Loaded, String> {
     let text = String::from_utf8_lossy(&bytes).replace('\0', " ");
     let mut stale = Vec::new();
     let mut used = "none";
-    let mut spans = None;
+    let mut sections = None;
     if let Some((rel, file)) = &t.sidecar {
         match structure(file, &sha) {
-            Ok(sections) => {
+            Ok(Sections::Current(current)) => {
                 used = "used";
-                spans = Some(
-                    sections
-                        .into_iter()
-                        .filter(|s| s.kind != "references")
-                        .map(|s| Span {
-                            first: s.first_line,
-                            last: s.last_line,
-                            heading: s.heading.filter(|h| !h.trim().is_empty()).unwrap_or(s.kind),
-                        })
-                        .collect::<Vec<_>>(),
-                );
+                sections = Some(current);
+            }
+            // A stale structure file is still the best guess at the sections.
+            Ok(Sections::Stale(why, old)) => {
+                used = "stale";
+                stale.push((rel.clone(), why));
+                sections = Some(relocate(old, &text));
             }
             Err(why) => {
                 used = "stale";
@@ -644,6 +722,17 @@ pub fn load_text(t: &TextDoc) -> Result<Loaded, String> {
             }
         }
     }
+    let spans = sections.map(|sections| {
+        sections
+            .into_iter()
+            .filter(|s| s.kind != "references")
+            .map(|s| Span {
+                first: s.first_line,
+                last: s.last_line,
+                heading: s.heading.filter(|h| !h.trim().is_empty()).unwrap_or(s.kind),
+            })
+            .collect::<Vec<_>>()
+    });
     let spans = spans.unwrap_or_else(|| {
         vec![Span {
             first: 1,
@@ -852,7 +941,7 @@ pub fn stale(ctx: &Context) -> Result<Vec<(String, String)>, String> {
                 continue;
             };
             let bytes = std::fs::read(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-            if let Err(why) = structure(&side, &sha256(&bytes)) {
+            if let Err(why) | Ok(Sections::Stale(why, _)) = structure(&side, &sha256(&bytes)) {
                 out.push((side_rel.clone(), why));
             }
         }
@@ -882,6 +971,94 @@ pub fn stale(ctx: &Context) -> Result<Vec<(String, String)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A structure file of `text` with `sections` of (kind, heading, first, last).
+    fn structure_of(text: &str, sections: &[(&str, Option<&str>, usize, usize)]) -> Structure {
+        serde_json::from_value(json!({
+            "schema": "rf.paper-structure/1",
+            "text": {"sha256": sha256(text.as_bytes()), "lines": text.lines().count()},
+            "sections": sections.iter().map(|(kind, heading, first, last)| json!({
+                "kind": kind, "heading": heading, "first_line": first, "last_line": last,
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
+
+    fn ranges(sections: &[Section]) -> Vec<(usize, usize)> {
+        sections
+            .iter()
+            .map(|s| (s.first_line, s.last_line))
+            .collect()
+    }
+
+    /// The passages of `text` within `sections`, as (heading, text).
+    fn passages(text: &str, sections: Vec<Section>) -> Vec<(String, String)> {
+        let spans: Vec<Span> = sections
+            .into_iter()
+            .map(|s| Span {
+                first: s.first_line,
+                last: s.last_line,
+                heading: s.heading.unwrap_or(s.kind),
+            })
+            .collect();
+        windows(text, &spans)
+            .into_iter()
+            .map(|u| (u.heading, u.body))
+            .collect()
+    }
+
+    #[test]
+    fn a_stale_structure_files_sections_are_found_again_by_their_headings() {
+        // Lines: 1 title, 2-3 contents (a heading's twin), 4-30 Method, 31-60 Results.
+        let words = |w: &str, n: usize| -> String {
+            (0..n)
+                .map(|i| format!("{w}{i} ").repeat(30) + "\n")
+                .collect()
+        };
+        let text = format!(
+            "Title\nContents\n2  Results\n# Method\n{}2 Results\n{}",
+            words("m", 26),
+            words("r", 29)
+        );
+        let sections = [
+            ("front", None, 1, 3),
+            ("body", Some("# Method"), 4, 30),
+            ("body", Some("2 Results"), 31, 60),
+        ];
+        let before = passages(&text, structure_of(&text, &sections).sections);
+        // Four lines in the front section leave every passage of the later
+        // sections as it was.
+        let edited = text.replacen("Title\n", "Title\nA\n\nB\n\n", 1);
+        let found = relocate(structure_of(&text, &sections), &edited);
+        assert_eq!(ranges(&found), [(1, 7), (8, 34), (35, 64)]);
+        let after = passages(&edited, found);
+        assert!(before.len() == after.len() && before[1..] == after[1..]);
+        // A heading that only changed its spaces is still found.
+        let spaced = edited.replacen("\n2 Results\n", "\n2   Results\n", 1);
+        let found = relocate(structure_of(&text, &sections), &spaced);
+        assert_eq!(ranges(&found), [(1, 7), (8, 34), (35, 64)]);
+        // A heading that is gone moves with the section before it, and a gap
+        // between sections stays one.
+        let gone = text.replacen("# Method\n", "", 1);
+        let gap = [
+            ("front", None, 1, 2),
+            ("body", Some("# Method"), 4, 30),
+            ("body", Some("2 Results"), 31, 60),
+        ];
+        let found = relocate(structure_of(&text, &gap), &gone);
+        assert_eq!(ranges(&found), [(1, 2), (4, 29), (30, 59)]);
+        // A text that got shorter or empty leaves the sections past its end
+        // empty, and their passages none.
+        for short in ["", "Title\n"] {
+            let found = relocate(structure_of(&text, &sections), short);
+            assert!(
+                found.iter().all(|s| s.first_line > 0),
+                "{:?}",
+                ranges(&found)
+            );
+            assert!(passages(short, found).len() <= 1);
+        }
+    }
 
     #[test]
     fn normalises_arxiv_ids_and_dois() {

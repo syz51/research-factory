@@ -332,10 +332,14 @@ fn a_stale_structure_file_and_a_stale_card_are_ignored_and_reported() {
     let notice = report["partial"].to_string();
     assert!(notice.contains("stale derivative"), "{notice}");
 
-    // Without its structure file the references section is indexed again.
+    // A stale structure file's sections are found again in the changed text:
+    // the references section stays out, and a passage keeps its heading.
     let report = json(d, &["--in", "texts", "zebrafish"]);
-    assert_eq!(report["state"], "partial");
+    assert_eq!(report["state"], "zero", "{report}");
+    let report = json(d, &["--in", "texts", "middle"]);
+    assert_eq!(report["state"], "partial", "{report}");
     assert_eq!(hits(&report)[0]["info"]["structure"], "stale");
+    assert_eq!(hits(&report)[0]["heading"], "Method", "{report}");
 
     let check = lab(d, &["archive", "check"]);
     let out = stdout(&check) + &stderr(&check);
