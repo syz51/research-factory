@@ -234,7 +234,7 @@ candidate ─► registered ─► abstract ─► fetched ─► text ─► st
 
 Guards the redesign adds:
 
-- **Stale derivative.** A structure sidecar or a card records the sha256 of the text it was made from. When the text's sha256 differs, the derivative is `stale`. The index ignores it and `papers registry check` reports it.
+- **Stale derivative.** A structure sidecar or a card records the sha256 of the text it was made from. When the text's sha256 differs, the derivative is `stale`. The index ignores a stale card. It still cuts a text's passages within a stale sidecar's sections, found again in the changed text by their heading lines (since lab 0.21.4, research-factory-334). `papers registry check` reports both.
 - **Write order.** A derivative is written to a temporary file and renamed after its record.
 
 Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
