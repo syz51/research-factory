@@ -9,6 +9,7 @@
 
 mod archive;
 mod brief;
+mod change;
 mod check;
 mod config;
 mod evaluate;
@@ -59,7 +60,9 @@ enum Command {
         /// Run only these checks (repeatable).
         #[arg(long = "only", value_name = "NAME")]
         only: Vec<String>,
-        /// Fail only on error findings that are not in the baseline (`lab baseline set`).
+        /// Fail only on error findings that are not in the baseline (`lab baseline set`),
+        /// and on errors and warnings that the change adds to the files it touches,
+        /// against today's checkers run on the merge base with the default branch.
         #[arg(long, conflicts_with = "at")]
         new_only: bool,
         /// Replay a past commit, or each commit of a range `A..B`, in a temporary
@@ -906,12 +909,109 @@ fn check(
             );
         }
     }
+    if new_only {
+        failing |= print_change(
+            &change::compare(project, only, run, &report.delta)?,
+            verbose,
+        );
+    }
     println!("stored {}", run.path.display());
     Ok(if failing {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Prints what `lab check --new-only` found against the merge base; true when
+/// the change adds an error or warning to a file it touches.
+fn print_change(outcome: &change::Outcome, verbose: bool) -> bool {
+    let line = |n: &change::New| {
+        let f = &n.item.finding;
+        format!(
+            "{} {} {}:{}: {}",
+            n.place,
+            f.severity.as_str(),
+            f.tool,
+            f.rule,
+            f.message
+        )
+    };
+    let c = match outcome {
+        change::Outcome::Skipped(why) => {
+            println!("No change check: {why}. Only the baseline gate applies.");
+            return false;
+        }
+        change::Outcome::Unchanged { branch, base } => {
+            println!(
+                "No file differs from {branch} at the merge base {}.",
+                change::short(base)
+            );
+            return false;
+        }
+        change::Outcome::Compared(c) => c,
+    };
+    println!(
+        "Against {} at the merge base {}, {} file(s) changed.",
+        c.branch,
+        change::short(&c.base),
+        c.changed
+    );
+    for name in &c.no_base {
+        println!(
+            "Check `{name}` did not run to completion at the merge base: each of its findings counts as new."
+        );
+    }
+    let new = &c.new;
+    if new.gated.is_empty() {
+        println!("The change adds no error or warning to the files it touches.");
+    } else {
+        println!(
+            "{} error(s) or warning(s) the change adds to the files it touches:",
+            new.gated.len()
+        );
+        for n in &new.gated {
+            println!("{}", line(n));
+        }
+        println!(
+            "Fix them. Only a person may accept the ones that cannot be fixed, with `lab baseline \
+             set --note \"<why>\"` after this run, which accepts every finding of each check's \
+             latest run."
+        );
+    }
+    let apart = [
+        ("accepted in the baseline", &new.accepted),
+        ("info in the files it touches", &new.info),
+        ("in text sealed at the merge base", &new.sealed),
+        ("naming a missing file that git ignores", &new.missing_input),
+        ("in files the change does not touch", &new.elsewhere),
+    ];
+    let counts: Vec<String> = apart
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(what, v)| format!("{} {what}", v.len()))
+        .collect();
+    if !counts.is_empty() {
+        println!(
+            "Also new against {}, not gated: {}{}.",
+            c.branch,
+            counts.join(", "),
+            if verbose {
+                ""
+            } else {
+                " (listed with --verbose)"
+            }
+        );
+    }
+    if verbose {
+        for (what, v) in apart.iter().filter(|(_, v)| !v.is_empty()) {
+            println!("New, {what}:");
+            for n in v.iter() {
+                println!("{}", line(n));
+            }
+        }
+    }
+    !new.gated.is_empty()
 }
 
 /// `lab check --at`: one summary line per replayed commit. Exits 1 when a

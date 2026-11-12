@@ -380,3 +380,98 @@ pub fn replay(
     }
     Ok(())
 }
+
+/// Links the project root's git-ignored files and directories, leaving out
+/// the state directory, into `root`, a checkout's project root, where it
+/// lacks them: so a check of a past commit reads the same downloads and
+/// generated data as the work tree.
+fn link_ignored(project: &Project, root: &Path) -> Result<(), String> {
+    let list = git_ok(
+        &project.root,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+    )?;
+    let state = project.state_dir.strip_prefix(&project.root).ok();
+    for rel in list.split('\0').map(|p| p.trim_end_matches('/')) {
+        if rel.is_empty() || state.is_some_and(|s| Path::new(rel).starts_with(s)) {
+            continue;
+        }
+        link_missing(&project.root.join(rel), &root.join(rel))?;
+    }
+    Ok(())
+}
+
+/// Runs `specs` on `commit`, the base of a change, in a temporary worktree,
+/// and stores nothing. The worktree gets the project root's git-ignored files
+/// and uncommitted inputs, so both sides read the same inputs. The temporary
+/// root's path in a finding becomes the project root's, and the fingerprints
+/// are taken after that, so they match the work tree's. `None` when the
+/// commit has no project root.
+pub(crate) fn run_base(
+    project: &Project,
+    specs: &[&CheckSpec],
+    commit: &str,
+) -> Result<Option<check::Ran>, String> {
+    let root = &project.root;
+    let prefix = git_ok(root, &["rev-parse", "--show-prefix"])?;
+    remove_leftovers(root)?;
+    let tree = Worktree::add(root, commit)?;
+    let base_root = tree.path.join(&prefix);
+    if !base_root.is_dir() {
+        return Ok(None);
+    }
+    link_ignored(project, &base_root)?;
+    let linked = link_inputs(project, &base_root, specs)?;
+    let versions = check::versions(project, &base_root, specs);
+    // In a linked worktree, the work tree's run swaps in the main checkout's
+    // copy of an ignored file a check names; the base run does the same.
+    let fallback = crate::worktree::Fallback::find(root)?;
+    let mut ran = check::run_checks(
+        project,
+        &base_root,
+        specs,
+        &versions,
+        &linked,
+        fallback.as_ref(),
+    );
+    // The canonical path first: the raw one is part of it on macOS, where
+    // the temporary directory is below the `/var` symlink.
+    let mut from: Vec<String> = Vec::new();
+    for p in [base_root.canonicalize().ok(), Some(base_root.clone())]
+        .into_iter()
+        .flatten()
+    {
+        let p = p.to_string_lossy().trim_end_matches('/').to_string();
+        if !from.contains(&p) {
+            from.push(p);
+        }
+    }
+    let to = root.to_string_lossy().trim_end_matches('/').to_string();
+    for item in &mut ran.items {
+        let f = &mut item.finding;
+        for p in &from {
+            f.subject = f.subject.replace(p.as_str(), &to);
+            f.message = f.message.replace(p.as_str(), &to);
+            for e in &mut f.evidence {
+                e.path = e.path.replace(p.as_str(), &to);
+            }
+        }
+    }
+    for spec in specs {
+        let mine: Vec<usize> = (0..ran.items.len())
+            .filter(|&i| ran.items[i].check == spec.name)
+            .collect();
+        let fps = crate::finding::fingerprints(mine.iter().map(|&i| &ran.items[i].finding));
+        for (i, fp) in mine.into_iter().zip(fps) {
+            ran.items[i].fingerprint = fp;
+        }
+    }
+    drop(tree);
+    Ok(Some(ran))
+}

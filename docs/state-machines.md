@@ -275,7 +275,7 @@ Accepted: depth describes how far a person or an agent read, and a re-read at a 
 
 | Machine | States | Defect |
 |---|---|---|
-| Finding | reported; severity Error or Warn | No baseline or allow state. `lab check --new-only` supplies the baseline from outside. Accepted. |
+| Finding | reported; severity Error or Warn | No baseline or allow state. `lab check --new-only` supplies the baseline from outside, and since lab 0.21.0 the merge base with the default branch, so a finding the change adds to the files it touches is gated. Accepted. |
 | Quote verdict | verified (score ≥ 0.8), weak, not found | None |
 | Number verdict | found, not found | None |
 | Source text load | loaded, hash mismatch, missing | Fixed by research-factory-220 (claimcheck 0.11.0). A quote or number matched only in a text whose sha256 differs from the registry gets `source-text-changed` (warn) on its line and does not count as supported. |
@@ -297,6 +297,7 @@ No defect was found that affects the redesign. research-factory-231 found that t
 A citation in a note is `uncited claim ─► cited ─► resolved (key exists) ─► quote-checked`.
 `claimcheck` enforces each step for changed notes through `lab check --new-only`.
 DR042 added 8 uncited-claim warnings; they are Warn findings and stay visible in research-factory-193.
+Since lab 0.21.0, `lab check --new-only` fails on such a warning when a change adds it to a note it touches.
 
 ## 5. Loop machines (lab)
 
@@ -332,7 +333,7 @@ Explicit, with a file lock. An unreadable `last.json` cannot show a recent loop,
 |---|---|---|
 | Check run status | ok, findings, failed | `ok` means the checker ran to completion. An exit that disagrees with the findings adds a `check-exit-mismatch` warning: exit 1 without an error finding, and since lab 0.17.0 exit 0 with one. clap refuses `--new-only` with `--at`. Fixed by 217. |
 | Baseline | none, recorded | explicit |
-| Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn never fails a gate. Accepted as the meaning of Warn; each rule this document depends on is an Error. |
+| Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn fails no gate, except, since lab 0.21.0, a Warn that `lab check --new-only` finds new against the merge base in a file the change touches (research-factory-226). Accepted as the meaning of Warn; each rule this document depends on is an Error. |
 
 ### 5.6 Replay and worktree
 

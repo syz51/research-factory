@@ -144,7 +144,7 @@ impl Fallback {
         &self,
         paths: impl IntoIterator<Item = &'a str>,
     ) -> Result<BTreeSet<String>, String> {
-        let ignored = self.ignored(paths)?;
+        let ignored = ignored(&self.here, paths)?;
         Ok(ignored
             .into_iter()
             .filter(|p| self.main.join(p).exists())
@@ -164,59 +164,133 @@ impl Fallback {
     /// state that every checkout of the project shares, such as the search
     /// trace. It may not exist yet.
     pub fn shared(&self, rel: &str) -> Result<Option<PathBuf>, String> {
-        Ok(self.ignored([rel])?.pop_first().map(|p| self.main.join(p)))
+        Ok(ignored(&self.here, [rel])?
+            .pop_first()
+            .map(|p| self.main.join(p)))
     }
 
     /// `rel` in the main checkout, for a path that `resolve` returned.
     pub fn main_file(&self, rel: &str) -> PathBuf {
         self.main.join(rel)
     }
+}
 
-    /// The ignored ones of `paths`, from one `git check-ignore --stdin`.
-    fn ignored<'a>(
-        &self,
-        paths: impl IntoIterator<Item = &'a str>,
-    ) -> Result<BTreeSet<String>, String> {
-        let mut input = Vec::new();
-        for p in paths {
-            input.extend_from_slice(p.as_bytes());
-            input.push(0);
-        }
-        if input.is_empty() {
-            return Ok(BTreeSet::new());
-        }
-        let mut child = Command::new("git")
-            .args(["check-ignore", "-z", "--stdin"])
-            .current_dir(&self.here)
-            .env("LC_ALL", "C")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("git check-ignore: {e}"))?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        // Written from another thread, so a full stdout pipe cannot block both sides.
-        let writer = std::thread::spawn(move || stdin.write_all(&input));
-        let out = child
-            .wait_with_output()
-            .map_err(|e| format!("git check-ignore: {e}"))?;
-        writer
-            .join()
-            .expect("the writer thread does not panic")
-            .map_err(|e| format!("git check-ignore: {e}"))?;
-        // 0: some paths are ignored, 1: none is.
-        match out.status.code() {
-            Some(0) => Ok(out
-                .stdout
-                .split(|&b| b == 0)
-                .filter(|p| !p.is_empty())
-                .map(|p| String::from_utf8_lossy(p).into_owned())
-                .collect()),
-            Some(1) => Ok(BTreeSet::new()),
-            _ => Err(format!(
-                "git check-ignore: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
+/// The ones of `paths`, relative to `dir`, that git ignores there, from one
+/// `git check-ignore --stdin`.
+pub fn ignored<'a>(
+    dir: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>, String> {
+    let mut input = Vec::new();
+    for p in paths {
+        input.extend_from_slice(p.as_bytes());
+        input.push(0);
+    }
+    if input.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let mut child = Command::new("git")
+        .args(["check-ignore", "-z", "--stdin"])
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("git check-ignore: {e}"))?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // Written from another thread, so a full stdout pipe cannot block both sides.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("git check-ignore: {e}"))?;
+    writer
+        .join()
+        .expect("the writer thread does not panic")
+        .map_err(|e| format!("git check-ignore: {e}"))?;
+    // 0: some paths are ignored, 1: none is.
+    match out.status.code() {
+        Some(0) => Ok(out
+            .stdout
+            .split(|&b| b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect()),
+        Some(1) => Ok(BTreeSet::new()),
+        _ => Err(format!(
+            "git check-ignore: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Runs git in `dir`; `None` when it exits with a failure code, such as a
+/// missing ref, or git is not installed.
+fn git_maybe(dir: &Path, args: &[&str]) -> Result<Option<String>, String> {
+    match Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("LC_ALL", "C")
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(out) if out.status.success() => Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("git: {e}")),
+    }
+}
+
+/// The branch a change in `dir` merges into: the target of `origin/HEAD`, else
+/// the first of `main`, `master`, `origin/main` and `origin/master` that
+/// exists. `None` outside git or when none exists.
+pub fn default_branch(dir: &Path) -> Result<Option<String>, String> {
+    if let Some(b) = git_maybe(
+        dir,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )?
+    .filter(|b| !b.is_empty())
+    {
+        return Ok(Some(b));
+    }
+    for (name, full) in [
+        ("main", "refs/heads/main"),
+        ("master", "refs/heads/master"),
+        ("origin/main", "refs/remotes/origin/main"),
+        ("origin/master", "refs/remotes/origin/master"),
+    ] {
+        if git_maybe(dir, &["rev-parse", "--verify", "-q", full])?.is_some() {
+            return Ok(Some(name.to_string()));
         }
     }
+    Ok(None)
+}
+
+/// The commit where `HEAD` left `branch`; `None` without a common commit,
+/// such as in a shallow clone, or before the first commit.
+pub fn merge_base(dir: &Path, branch: &str) -> Result<Option<String>, String> {
+    git_maybe(dir, &["merge-base", "HEAD", branch])
+}
+
+/// The files below `dir`, relative to it, that differ from `base`: committed,
+/// staged or only in the work tree, and new files git does not ignore.
+pub fn changed_since(dir: &Path, base: &str) -> Result<BTreeSet<String>, String> {
+    let mut files = untracked(dir)?;
+    let diff = git(
+        dir,
+        &[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "--relative",
+            "-z",
+            base,
+            "--",
+        ],
+    )?
+    .unwrap_or_default();
+    files.extend(diff.split('\0').filter(|p| !p.is_empty()).map(String::from));
+    Ok(files)
 }
