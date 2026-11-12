@@ -6,7 +6,7 @@
 //! When the text has changed since, the derivative is stale: it is ignored
 //! and reported (docs/state-machines.md 4.1).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -513,6 +513,29 @@ fn stale_why(recorded: &str, actual: &str) -> String {
         short(recorded),
         short(actual)
     )
+}
+
+/// Every path that an entry of the registry names as a text, preferred or
+/// not, in the form of a walked path (`./a//b.md` is `a/b.md`). The `notes`
+/// scope leaves these files out: `texts` holds one text of each paper, and
+/// another extraction of it as a note would bring the duplicate back.
+pub fn text_paths(ctx: &Context, resolver: &mut Resolver) -> Result<HashSet<String>, String> {
+    Ok(Registry::read(ctx, resolver)?
+        .map(|reg| {
+            reg.entries
+                .iter()
+                .flat_map(|e| &e.texts)
+                .map(|t| {
+                    Path::new(&t.path)
+                        .components()
+                        .filter(|c| !matches!(c, std::path::Component::CurDir))
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// A `texts` source: the preferred text of an entry.

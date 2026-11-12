@@ -218,6 +218,76 @@ fn texts_hit_with_line_range_and_key_and_leave_out_the_references() {
 }
 
 #[test]
+fn a_paper_text_under_the_notes_globs_is_a_unit_of_texts_only() {
+    let dir = fixture();
+    let d = dir.path();
+    write(
+        d,
+        "research.toml",
+        &format!("{CONFIG}\n[lab.search]\nnotes = [\"docs/**/*.md\", \"sources/**/*.md\"]\n"),
+    );
+    write(d, "sources/reading.md", "# Reading\n\nwallaby habitats\n");
+    // A text the registry lists is not also a note; another Markdown file there is.
+    let notes = json(d, &["--in", "notes", "wallaby"]);
+    let paths: Vec<&str> = hits(&notes)
+        .iter()
+        .map(|h| h["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["sources/reading.md"], "{notes}");
+    assert_eq!(keys(&json(d, &["--in", "texts", "wallaby"])), ["15"]);
+    let both = json(d, &["--in", "notes,texts", "structured", "wallaby"]);
+    assert!(
+        hits(&both)
+            .iter()
+            .all(|h| h["scope"] != "notes" || h["path"] != "sources/texts/15.md"),
+        "{both}"
+    );
+    // A path in another form names the same file, and a text that `texts`
+    // does not prefer is no note either.
+    write(d, "sources/texts/18.md", "# Docling\n\nnumbat burrows\n");
+    write(d, "sources/texts/18-alt.md", "numbat burrows, quokka\n");
+    let entry = serde_json::json!({"key": "18", "title": "Numbat Paper",
+        "texts": [{"path": "./sources/texts/18.md", "extraction": "docling"},
+                  {"path": "sources//texts/18-alt.md", "extraction": "plain"}]});
+    let registry = std::fs::read_to_string(d.join("references.jsonl")).unwrap();
+    write(d, "references.jsonl", &format!("{registry}{entry}\n"));
+    assert_eq!(json(d, &["--in", "notes", "numbat"])["state"], "zero");
+    assert_eq!(keys(&json(d, &["--in", "texts", "numbat"])), ["18"]);
+    assert_eq!(json(d, &["--in", "texts", "quokka"])["state"], "zero");
+    // Once the registry no longer lists the file, a refresh makes it a note.
+    let registry = std::fs::read_to_string(d.join("references.jsonl")).unwrap();
+    let kept: Vec<&str> = registry
+        .lines()
+        .filter(|l| !l.contains("\"key\":\"15\""))
+        .collect();
+    assert_eq!(kept.len() + 1, registry.lines().count());
+    write(d, "references.jsonl", &(kept.join("\n") + "\n"));
+    let notes = json(d, &["--in", "notes", "wallaby"]);
+    assert!(
+        hits(&notes)
+            .iter()
+            .any(|h| h["path"] == "sources/texts/15.md"),
+        "{notes}"
+    );
+    // A registry that cannot be read leaves the texts in `notes` and says so.
+    std::fs::write(d.join("references.jsonl"), b"\xff\xfe not text\n").unwrap();
+    let o = lab(d, &["search", "--json", "--in", "notes", "numbat"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("the paper texts are not left out of notes"),
+        "{}",
+        stderr(&o)
+    );
+    let report: Value = serde_json::from_str(&stdout(&o)).unwrap();
+    assert!(
+        hits(&report)
+            .iter()
+            .any(|h| h["path"] == "sources/texts/18.md"),
+        "{report}"
+    );
+}
+
+#[test]
 fn a_stale_structure_file_and_a_stale_card_are_ignored_and_reported() {
     let dir = fixture();
     let d = dir.path();
