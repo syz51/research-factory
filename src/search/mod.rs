@@ -6,13 +6,20 @@
 //! Retrieved text is data: nothing here runs or follows what a note says.
 
 mod index;
+pub(crate) mod learn;
+mod missed;
 mod query;
+pub(crate) mod similar;
+mod thesaurus;
+mod topics;
+pub(crate) mod trace;
 mod units;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,7 +27,7 @@ use sha2::{Digest, Sha256};
 use crate::archive::Spec;
 use crate::archive::files::FileSet;
 use crate::config::Project;
-use query::{Hit, Outcome, Unknown};
+use query::{Expansion, Hit, Outcome, Unknown};
 
 /// The scopes `--in` accepts.
 const SCOPES: &[&str] = &["notes"];
@@ -45,6 +52,10 @@ pub struct SearchConfig {
     pub refresh_budget_ms: u64,
     /// How long a query waits for another process that builds the index.
     pub lock_timeout_ms: u64,
+    /// The tracked thesaurus file of equivalent terms, relative to the root.
+    pub thesaurus: Option<String>,
+    /// `lab retro` lists a thesaurus entry that no query used in this many days.
+    pub review_days: u32,
 }
 
 impl Default for SearchConfig {
@@ -56,6 +67,8 @@ impl Default for SearchConfig {
             stages: vec![Stage::Lexical],
             refresh_budget_ms: 5_000,
             lock_timeout_ms: 30_000,
+            thesaurus: None,
+            review_days: 90,
         }
     }
 }
@@ -267,16 +280,33 @@ pub struct Args {
     pub scopes: Vec<String>,
     pub explain: bool,
     pub rebuild: bool,
+    /// A topics file to answer, one query per topic, as a TREC run.
+    pub run: Option<PathBuf>,
+    /// Where `--run` writes the run; default stdout.
+    pub out: Option<PathBuf>,
+    /// `--run` also searches each topic's `phrasings`.
+    pub phrasings: bool,
 }
 
 /// How a query ended (docs/state-machines.md 3.3). `error` is the `Err` of `run`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum State {
+pub(crate) enum State {
     Hits,
     Partial,
     Zero,
     Error,
+}
+
+impl State {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hits => "hits",
+            Self::Partial => "partial",
+            Self::Zero => "zero",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// The `--json` output, schema `rf.search/1`.
@@ -287,18 +317,51 @@ struct Report<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
     query: &'a [String],
-    scopes: &'a [&'static str],
+    scopes: &'a [String],
     stages: BTreeMap<&'static str, &'static str>,
     /// Why the answer may be incomplete: a stale index, a stage that is not built.
     partial: &'a [String],
     unknown: &'a [Unknown],
+    /// The thesaurus entries the query used.
+    #[serde(skip_serializing_if = "<[Expansion]>::is_empty")]
+    expansions: &'a [Expansion],
     hits: &'a [Hit],
     more: usize,
+}
+
+/// One query, whoever asks it.
+pub(crate) struct Request<'a> {
+    pub phrasings: &'a [String],
+    pub scopes: &'a [String],
+    pub limit: usize,
+    pub records: bool,
+    pub statuses: &'a [String],
+    pub rebuild: bool,
+    /// Also weigh the terms of the first phrasing, for `similar`.
+    pub weigh: bool,
+}
+
+/// The answer to one query.
+pub(crate) struct Answer {
+    pub state: State,
+    pub hits: Vec<Hit>,
+    pub more: usize,
+    pub unknown: Vec<Unknown>,
+    pub partial: Vec<String>,
+    pub expansions: Vec<Expansion>,
+    /// The best units of the lexical stage before grouping.
+    pub candidates: Vec<(String, f64)>,
+    pub missing_stages: Vec<&'static str>,
+    /// With `weigh`: each term of the first phrasing and its weight.
+    pub weights: Vec<(String, f64)>,
 }
 
 /// `lab search`. Exit 0 for hits, a partial answer or no hit; `Err` (exit 2)
 /// for a bad query, an unreadable index or a lock timeout.
 pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
+    if let Some(topics) = &args.run {
+        return topics::run(project, args, topics);
+    }
     // Several arguments are several phrasings when one of them holds a
     // space; otherwise they are the words of one.
     let phrasings: Vec<String> =
@@ -309,28 +372,89 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         } else {
             vec![args.query.join(" ")]
         };
-    let answered = answer(project, args, &phrasings);
-    if args.json
-        && let Err(e) = &answered
-    {
+    if phrasings.is_empty() && args.rebuild {
+        check_scopes(&args.scopes)?;
+        let ctx = Context::new(project)?;
+        let opened = index::open(&ctx, true)?;
+        let (files, units) = index::counts(&opened.conn).map_err(String::from)?;
+        println!("Search index rebuilt: {units} unit(s) of {files} file(s).");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    let request = Request {
+        phrasings: &phrasings,
+        scopes: &args.scopes,
+        limit,
+        records: args.records,
+        statuses: &args.statuses,
+        rebuild: args.rebuild,
+        weigh: false,
+    };
+    let mut answer = match traced(project, "cli", &request) {
+        Ok(answer) => answer,
+        Err(e) => {
+            if args.json {
+                let report = Report {
+                    schema: "rf.search/1",
+                    state: State::Error,
+                    error: Some(&e),
+                    query: &phrasings,
+                    scopes: &args.scopes,
+                    stages: stages(),
+                    partial: &[],
+                    unknown: &[],
+                    expansions: &[],
+                    hits: &[],
+                    more: 0,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(|e| e.to_string())?
+                );
+            }
+            return Err(e);
+        }
+    };
+    if !args.explain {
+        for hit in &mut answer.hits {
+            hit.explain = None;
+        }
+    }
+    for notice in &answer.partial {
+        eprintln!("lab: partial: {notice}");
+    }
+    if args.json {
         let report = Report {
             schema: "rf.search/1",
-            state: State::Error,
-            error: Some(e),
+            state: answer.state,
+            error: None,
             query: &phrasings,
-            scopes: SCOPES,
+            scopes: &args.scopes,
             stages: stages(),
-            partial: &[],
-            unknown: &[],
-            hits: &[],
-            more: 0,
+            partial: &answer.partial,
+            unknown: &answer.unknown,
+            expansions: &answer.expansions,
+            hits: &answer.hits,
+            more: answer.more,
         };
         println!(
             "{}",
             serde_json::to_string(&report).map_err(|e| e.to_string())?
         );
+    } else {
+        print!(
+            "{}",
+            render(
+                &answer.hits,
+                answer.more,
+                &answer.unknown,
+                &answer.expansions,
+                args.explain,
+                limit
+            )
+        );
     }
-    answered
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Builds the search index, or brings it up to date with the files, without
@@ -356,14 +480,76 @@ fn stages() -> BTreeMap<&'static str, &'static str> {
         .collect()
 }
 
-fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCode, String> {
-    if let Some(unknown) = args.scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
-        return Err(format!(
+fn check_scopes(scopes: &[String]) -> Result<(), String> {
+    match scopes.iter().find(|s| !SCOPES.contains(&s.as_str())) {
+        Some(unknown) => Err(format!(
             "unknown scope `{unknown}`; the scopes are: {}",
             SCOPES.join(", ")
-        ));
+        )),
+        None => Ok(()),
     }
-    if args.limit == Some(0) {
+}
+
+/// Answers the request and appends its line to the query trace, also when
+/// it fails. `source` says who asked: `cli`, `run` or `similar`.
+pub(crate) fn traced(project: &Project, source: &str, req: &Request) -> Result<Answer, String> {
+    let started = Instant::now();
+    let answered = execute(project, req);
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut line = trace::QueryLine {
+        schema: trace::QUERY_SCHEMA.into(),
+        at: crate::finding::now(),
+        session: trace::session(),
+        source: source.into(),
+        query: req.phrasings.to_vec(),
+        scopes: req.scopes.to_vec(),
+        state: State::Error.name().into(),
+        stages: Vec::new(),
+        missing_stages: Vec::new(),
+        expansions: Vec::new(),
+        candidates: BTreeMap::new(),
+        hit_count: 0,
+        complete: 0,
+        hits: Vec::new(),
+        unknown: Vec::new(),
+        notices: Vec::new(),
+        error: None,
+        latency_ms,
+    };
+    match &answered {
+        Ok(a) => {
+            line.state = a.state.name().into();
+            line.stages = vec![Stage::Lexical.name().into()];
+            line.missing_stages = a.missing_stages.iter().map(|s| s.to_string()).collect();
+            line.expansions = a.expansions.clone();
+            line.candidates.insert(
+                Stage::Lexical.name().into(),
+                a.candidates
+                    .iter()
+                    .map(|(id, score)| trace::Scored {
+                        id: id.clone(),
+                        score: *score,
+                    })
+                    .collect(),
+            );
+            line.hit_count = a.hits.len() + a.more;
+            line.complete = a.hits.iter().filter(|h| h.missing.is_empty()).count();
+            line.hits = a.hits.iter().map(|h| h.anchor.clone()).collect();
+            line.unknown = a.unknown.iter().map(|u| u.word.clone()).collect();
+            line.notices = a.partial.clone();
+        }
+        Err(e) => line.error = Some(e.clone()),
+    }
+    trace::record(project, &line);
+    answered
+}
+
+fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
+    check_scopes(req.scopes)?;
+    if req.phrasings.is_empty() {
+        return Err("give the words to search for, or --rebuild".into());
+    }
+    if req.limit == 0 {
         return Err("--limit must be at least 1".into());
     }
     let ctx = Context::new(project)?;
@@ -372,56 +558,62 @@ fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCo
         .archive
         .as_ref()
         .map_or(&[][..], |a| &a.statuses[..]);
-    if let Some(unknown) = args.statuses.iter().find(|s| !archive_statuses.contains(s)) {
+    if let Some(unknown) = req.statuses.iter().find(|s| !archive_statuses.contains(s)) {
         return Err(format!(
             "unknown status `{unknown}`; the statuses are: {}",
             archive_statuses.join(", ")
         ));
     }
-    if phrasings.is_empty() {
-        if !args.rebuild {
-            return Err("give the words to search for, or --rebuild".into());
-        }
-        let opened = index::open(&ctx, true)?;
-        let (files, units) = index::counts(&opened.conn).map_err(String::from)?;
-        println!("Search index rebuilt: {units} unit(s) of {files} file(s).");
-        return Ok(ExitCode::SUCCESS);
-    }
-    let parsed: Vec<query::Phrasing> = phrasings
+    let mut parsed: Vec<query::Phrasing> = req
+        .phrasings
         .iter()
         .map(|p| query::parse(p))
         .collect::<Result<_, _>>()?;
-    let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
+    let entries = thesaurus::load(project)?;
+    let mut expansions: Vec<Expansion> = Vec::new();
+    for phrasing in &mut parsed {
+        for e in phrasing.expand(&entries) {
+            if !expansions.contains(&e) {
+                expansions.push(e);
+            }
+        }
+    }
     let opts = query::Options {
-        limit,
-        records: args.records,
-        statuses: &args.statuses,
+        limit: req.limit,
+        records: req.records,
+        statuses: req.statuses,
     };
-    let mut rebuild = args.rebuild;
-    let (outcome, stale) = loop {
+    let mut rebuild = req.rebuild;
+    let (outcome, stale, weights) = loop {
         let opened = index::open(&ctx, rebuild)?;
-        match query::search(&opened.conn, &ctx, &parsed, &opts) {
-            Ok(outcome) => break (outcome, opened.stale),
+        let searched = query::search(&opened.conn, &ctx, &parsed, &opts).and_then(|outcome| {
+            let weights = if req.weigh {
+                query::weights(&opened.conn, &parsed[0])?
+            } else {
+                Vec::new()
+            };
+            Ok((outcome, weights))
+        });
+        match searched {
+            Ok((outcome, weights)) => break (outcome, opened.stale, weights),
             // Corruption that only a query met: build anew, once.
             Err(index::Fault::Corrupt(_)) if !rebuild => rebuild = true,
             Err(e) => return Err(e.into()),
         }
     };
     let Outcome {
-        mut hits,
+        hits,
         more,
         unknown,
+        candidates,
     } = outcome;
-    if !args.explain {
-        for hit in &mut hits {
-            hit.explain = None;
-        }
-    }
     let mut partial: Vec<String> = stale
         .into_iter()
         .map(|why| format!("the index is stale: {why}"))
         .collect();
+    let mut missing_stages = Vec::new();
     for stage in ctx.cfg.stages.iter().filter(|s| s.state() != "ready") {
+        missing_stages.push(stage.name());
         partial.push(format!(
             "stage `{}` is {}; the results come without it",
             stage.name(),
@@ -435,30 +627,17 @@ fn answer(project: &Project, args: &Args, phrasings: &[String]) -> Result<ExitCo
     } else {
         State::Partial
     };
-    for notice in &partial {
-        eprintln!("lab: partial: {notice}");
-    }
-    if args.json {
-        let report = Report {
-            schema: "rf.search/1",
-            state,
-            error: None,
-            query: phrasings,
-            scopes: SCOPES,
-            stages: stages(),
-            partial: &partial,
-            unknown: &unknown,
-            hits: &hits,
-            more,
-        };
-        println!(
-            "{}",
-            serde_json::to_string(&report).map_err(|e| e.to_string())?
-        );
-    } else {
-        print!("{}", render(&hits, more, &unknown, limit));
-    }
-    Ok(ExitCode::SUCCESS)
+    Ok(Answer {
+        state,
+        hits,
+        more,
+        unknown,
+        partial,
+        expansions,
+        candidates,
+        missing_stages,
+        weights,
+    })
 }
 
 fn unknown_line(unknown: &[Unknown]) -> String {
@@ -476,8 +655,28 @@ fn unknown_line(unknown: &[Unknown]) -> String {
 }
 
 /// The text output: at most `limit` hits and about `limit * BYTES_PER_HIT` bytes.
-fn render(hits: &[Hit], more: usize, unknown: &[Unknown], limit: usize) -> String {
+fn render(
+    hits: &[Hit],
+    more: usize,
+    unknown: &[Unknown],
+    expansions: &[Expansion],
+    explain: bool,
+    limit: usize,
+) -> String {
     let mut out = String::new();
+    // The thesaurus terms a query added are always named.
+    for e in expansions {
+        let _ = write!(
+            out,
+            "Also searched: {} (for {})",
+            e.added.join(", "),
+            e.term
+        );
+        if explain {
+            let _ = write!(out, " · thesaurus: {}", e.entry);
+        }
+        out.push('\n');
+    }
     if hits.is_empty() {
         out.push_str("0 results\n");
         if !unknown.is_empty() {

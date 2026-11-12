@@ -75,6 +75,14 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
             "nothing: the target moved out of the project, and the offloaded list names it",
         ),
         "index-stale" | "index-missing" => (Links, "run `lab archive index`"),
+        "similar-record" => (
+            Links,
+            "extend or link the record on the same topic, or keep both on purpose",
+        ),
+        "similar-skipped" => (
+            Links,
+            "nothing: the duplicate check could not search; `lab archive similar <file>` says why",
+        ),
         "index-leftover" => (
             Links,
             "delete the file; `lab archive index --print <name>` prints the index",

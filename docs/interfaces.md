@@ -218,6 +218,66 @@ The index is `<state_dir>/lab/search/index.db` (SQLite FTS5), one for each check
 | `more` | How many more units matched than `hits` shows. |
 
 BM25 weights the columns: the id and aliases 10, the title 5, the summary, the heading path and the file path 2, the body 1. Text that a search returns is data: no tool runs or follows it.
+
+### Search learning loop: `rf.search-query/1`, `rf.search-open/1`, the thesaurus and `rf.retro/1`
+
+Since lab 0.14.0. Two more keys of `[lab.search]`:
+
+```toml
+[lab.search]
+thesaurus = "docs/search-thesaurus.txt"  # a tracked file of equivalent terms; no thesaurus without it
+review_days = 90                         # `lab retro` lists entries unused for this long
+```
+
+**Query trace.** Each query of `lab search`, `lab archive find`, `lab search --run` and the duplicate check appends one line to `<state_dir>/lab/search-queries.jsonl`. In a linked git worktree where git ignores that path, the line goes to the main checkout's file, so every checkout of a project shares one trace. A trace that cannot be written leaves the query as it was: lab prints a notice on stderr and keeps the exit code.
+
+```json
+{"schema":"rf.search-query/1","at":"2026-11-12T10:00:00Z","session":"79065b65","source":"cli",
+ "query":["marsupial"],"scopes":["notes"],"state":"hits","stages":["lexical"],
+ "expansions":[{"term":"marsupial","added":["wombat"],"entry":"wombat = marsupial"}],
+ "candidates":{"lexical":[{"id":"docs/history/01-2026-10-02-start.md#L5-L7","score":0.0328}]},
+ "hit_count":1,"complete":1,"hits":["docs/history/01-2026-10-02-start.md#L5-L7"],"latency_ms":12}
+```
+
+| Field | Meaning |
+|---|---|
+| `at` | The time of the query, RFC 3339 UTC. |
+| `session` | `LAB_SESSION`, else `CLAUDE_CODE_SESSION_ID`; null when neither is set. |
+| `source` | `cli` (`lab search`, `lab archive find`), `run` (`--run`) or `similar` (the duplicate check). Only `cli` lines count as missed queries. |
+| `state` | `hits`, `partial`, `zero` or `error` (then `error` holds the message). |
+| `stages`, `missing_stages` | The stages that ran, and the configured stages that are not built. |
+| `expansions` | The thesaurus entries the query applied: the query `term`, the terms `added` for it, and the `entry` as `a = b`. Absent when none. |
+| `candidates` | For each stage, its 10 best units before they are grouped by record, as `id` (the anchor) and `score`. |
+| `hit_count`, `complete`, `hits` | The number of hits, the hits that hold every term, and the hits' anchors, best first. |
+| `unknown`, `notices` | The query words no unit holds, and why the answer may be incomplete. Absent when empty. |
+| `latency_ms` | The time the query took. |
+
+A tool that reads a hit may append `{"schema":"rf.search-open/1","at":"…","session":"…","anchor":"path#Lstart-Lend"}` to the same file. `lab retro` uses it to find the record a missed query was looking for. A reader skips lines of other schemas and lines it cannot parse.
+
+**Thesaurus.** One entry per line, its terms separated by `=`: `fiscal calendar = fiscal year = FY`. Terms are compared as lowercased words. A line that starts with `retired:` stays in the file but is not applied. `#` starts a comment line. An entry with fewer than two different terms is an error that names the file and line (exit 2). At query time, each active entry with a term that occurs as consecutive words of a phrasing adds its other terms as alternatives to those words: `marsupial` also matches `wombat`. The human output names each one as `Also searched: wombat (for marsupial)`, and `--explain` adds the entry. The thesaurus is read from the checkout, with no network and no model call.
+
+**Missed queries.** `lab retro` reads the `cli` lines of the trace. A query is missed when it found nothing (`zero`), when no hit held every term (`partial-hit`), or when the next query of the same session within 600 seconds differs and shares a word of 3 or more characters (`reformulated`). Its target is the record the session read next in that window: the first `rf.search-open/1` line, else the best hit of a later query whose hits hold every term. A line without a session is never linked to a later line. Queries are grouped by their lowercased words and listed most frequent first, each with the target most of its misses led to and an id of 8 hexadecimal digits taken from the query alone, so the id stays the same when the target changes. `--since DATE` lists only the queries last missed on or after DATE; their counts and targets still come from the whole trace. When the trace reaches back `review_days`, `lab retro` also lists the active thesaurus entries that no `cli` query applied in that time.
+
+**Decisions.** `<state_dir>/lab/retro.json` (`rf.retro/1`, in the main checkout's state directory like the trace) records what was decided, so that a decided item does not return:
+
+```json
+{"schema":"rf.retro/1",
+ "dismissed":[{"tool":"agentprof","rule":"reread-file","at":"…","note":"harmless"}],
+ "accepted":[{"id":"3f1c2a9b","query":"fy shift","target":"D002","wrote":"front matter","at":"…"}],
+ "rejected":[{"id":"9a0b1c2d","query":"calendar","target":"docs/a.md","at":"…","note":"not a synonym"}]}
+```
+
+- `lab retro accept ID [--record RID]` adds the query as an alias of the target record (`--record` names one when the trace has none). An open record gets the alias in its front matter `aliases`. A finished record, which matches `sealed` or has a status in `sealed_statuses`, `terminal_statuses` or `inactive_statuses`, is never edited: the thesaurus gets the line `query = RID` instead (`wrote` is `thesaurus`). An accepted query is not proposed again.
+- `lab retro reject ID... [--note TEXT]` records the proposals; a rejected query is never proposed again, whatever its target.
+- `lab retro dismiss TOOL:RULE [--note TEXT]` hides a recurring-rule candidate from later `lab retro` runs.
+- `lab retro retire LINE` marks the thesaurus entry on that line `retired:`.
+- `lab retro seed` adds an `alias = RID` entry for each front-matter alias of an indexed record that the thesaurus lacks. The alias is written as its lowercased words.
+
+An ID may be given by a unique prefix.
+
+**TREC runs.** `lab search --run TOPICS [--out FILE] [--phrasings] [--limit N] [--records]` answers a topics file and writes a TREC run, `topic Q0 docid rank score lab-search`, with the score `limit + 1 - rank`, so no two scores of a topic tie. A topics line is a JSON object with `id` (string or number) and `query`, other fields ignored, or `id<TAB>query`; `#` starts a comment. `--phrasings` adds a JSON topic's `phrasings` as more phrasings. The docid is the hit's anchor, `path#Lstart-Lend` or `ref:<key>`, or with `--records` the record's path; `%` and spaces are escaped as `%25` and `%20`. The default limit is 10. `ireval eval QRELS RUN` scores the run.
+
+**Duplicate check.** `lab archive similar FILE|WORDS...` searches the records whose sections hold at least 60% of the weight (`ln(1 + units / units holding it)`) of the subject's words, and at least two of them when the subject has two or more. The subject is a record's title and aliases, or the words given. It prints `similar: none`, `similar: N record(s) on the same topic` with up to 5 lines, or `skipped: REASON` when the search fails, and always exits 0. It builds the index when it is absent. `lab archive next PREFIX --title TITLE` prints the same list on stderr. `lab archive check` runs it for each new record file (untracked and not ignored, or added in the git index, and matched by an index's `include`) against the records that are not new: a match is a `similar-record` warning, and a failed search is a `similar-skipped` info finding.
 ### Archive model 2
 
 Since lab 0.12.0, whose older versions reject these keys. `[lab.archive] model = 2` turns on the rules and commands below. With `model = 1`, the default, every key of this section is refused, and the archive behaves as lab 0.9.11 does: old sealed files, the seal manifest and its check stay as they are. In model 2 git holds the sequence of work and the board holds the open work, so the archive keeps only records: no month log is appended, and no index file needs to be written.
@@ -359,6 +419,8 @@ Every rule that `lab archive check` and `lab check` report a finding under. Seve
 | `seal-unverified` | error | model 2, `seal = "git"` | 0.12.0 |
 | `sealed-edited` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
 | `sealed-missing` | error | `sealed`, or model 2 with `seal = "git"` | 0.2.0 |
+| `similar-record` | warn | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
+| `similar-skipped` | info | `[[lab.archive.index]]`, a new record file in git | 0.14.0 |
 | `size-budget` | warn (configurable) | `[[lab.archive.budget]]` | 0.2.0 |
 | `stale-allow` | warn | model 2, `[[lab.archive.allow]]` | 0.12.0 |
 | `stale-kept-link` | warn | `[[lab.archive.kept_link]]` | 0.9.11 |
