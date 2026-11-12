@@ -150,7 +150,7 @@ Round 2 by topic after the regrade (`cli` / `mcp` correct of 2): K03 0/1, K08 0/
 
 - **Round 1.** One `mcp` session (T12) is now correct. `cli` 45 and `mcp` 44 of 48, p=1. No change in conclusion.
 - **Round 2.** Seven sessions are now correct: 2 `cli` (K11, T02) and 5 `mcp` (K03, T02 twice, T18 twice). `mcp` answered 14 of 30 against 8 of 30. The discordant pairs split 8 to 2 for `mcp`, exact McNemar p=0.109. The direction favours `mcp` more clearly, but the difference is still not significant at 0.05.
-- **Selection under the new key.** Three screening failures are now correct: K11 phrasing 1, K12 phrasing 1 and T02 phrasing 2. Under the new key, the round-2 rule would not have selected these three topics. Without them (12 topics, 24 pairs): `cli` 4 and `mcp` 9 of 24, discordant 2 to 7, p=0.18. The primary result stays the 15 topics as selected, because the rule was fixed before the sessions.
+- **Selection under the new key.** Three screening failures are now correct: K11 phrasing 1, K12 phrasing 1 and T02 phrasing 2. Under the new key, the round-2 rule would select 13 topics: K11 and T02 drop out, and K12 stays with phrasing 2, which was screened wrong but never compared. So the comparison ran the prompt that the new rule selects for 12 topics. On those 12 topics (24 pairs): `cli` 4 and `mcp` 9 of 24, discordant 2 to 7, p=0.18. The primary result stays the 15 topics as selected, because the rule was fixed before the sessions.
 - **K12 in round 1.** The record that all four round-1 K12 sessions cited (`brief-path4.md`) is now graded 1, not 2. Those four sessions stay wrong.
 - **Neither correct.** Four topics now fail in all four round-2 sessions: K08, K17, K28 and T09.
 
@@ -163,7 +163,7 @@ The bullets use the regraded results (test set at masters 410b5e4). The results 
 - On topics where `cli` is at ceiling (round 1), `mcp` does not raise correct answers (44 against 45 of 48, p=1). At 12f8ae8: 43 against 45, p=0.5.
 - On topics where a `cli` session failed (round 2, 15 topics), `mcp` answered 14 of 30 against 8 of 30. The direction favours `mcp`, but the test is not significant (p=0.109; at 12f8ae8, 9 against 6, p=0.51). E4b does not show that MCP delivery raises correct answers. The regrade did not change this conclusion; it made the direction clearer.
 - In both rounds, `mcp` costs about 2 more tool calls and 23–32% more tokens per session, at equal context in the last call. E4's decision (`lab mcp` as default, because it makes agents search) does not change: E4b gives no reason to reverse it, and no correctness gain to add to it.
-- To detect a gain of the size seen, a run needs more below-ceiling topics than this test set has. With `need` prompts the test set has about 4; with phrasings, 15 (12 under the new key). With the regraded split (a third of pairs discordant, 8 of 10 for `mcp`), an exact test at alpha 0.05 needs about 20–26 discordant pairs for power 0.80–0.87, about 60–80 pairs. With the split at 12f8ae8 (6 of 9), it needs about 250 pairs. research-factory-343 plans that study.
+- To detect a gain of the size seen, a run needs more below-ceiling topics than this test set has. With `need` prompts the test set has about 4; with phrasings, 15 (13 under the new key). With the regraded split (a third of pairs discordant, 8 of 10 for `mcp`), an exact test at alpha 0.05 needs about 20–26 discordant pairs for power 0.80–0.87, about 60–80 pairs. With the split at 12f8ae8 (6 of 9), it needs about 250 pairs. research-factory-343 plans that study.
 
 ## Cost and usage
 
@@ -209,7 +209,7 @@ uv run --no-project python order.py topics-round2.txt | E4B_OUT=out2 xargs -P4 -
 uv run --no-project python measure.py "$E4B_TESTSET" out2 > raw/round2-compare.jsonl
 uv run --no-project --with scipy python analyze.py raw/round2-compare.jsonl
 # Regrade (research-factory-342): the test set at masters 410b5e4, the transcripts from air
-git -C <masters> archive 410b5e4 docs/process/archive-search-testset-2026-11-12 | tar x -C ts
+git -C <masters> archive 410b5e4 docs/process/archive-search-testset-2026-11-12 | (mkdir -p ts && tar x -C ts)
 storagectl get air:research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
 T=ts/docs/process/archive-search-testset-2026-11-12
 uv run --no-project python measure.py "$T" out > raw/regrade-342/round1-need.jsonl
@@ -217,7 +217,7 @@ uv run --no-project python measure.py "$T" screen > raw/regrade-342/round2-scree
 uv run --no-project python measure.py "$T" out2 > raw/regrade-342/round2-compare.jsonl
 uv run --no-project --with scipy python analyze.py raw/regrade-342/round1-need.jsonl
 uv run --no-project --with scipy python analyze.py raw/regrade-342/round2-compare.jsonl
-# Without K11, K12 and T02 (the selection under the new key)
+# The 12 topics whose compared prompt the new-key rule also selects (it drops K11 and T02, and picks K12's phrasing 2)
 jq -c 'select(.topic != "K11" and .topic != "K12" and .topic != "T02")' raw/regrade-342/round2-compare.jsonl > r2-12.jsonl
 uv run --no-project --with scipy python analyze.py r2-12.jsonl
 ```
