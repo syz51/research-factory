@@ -348,7 +348,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         let attached = old
             .exists()
             .then(|| conn.execute("ATTACH DATABASE ?1 AS old", [old.to_string_lossy()]));
-        let mut tx = conn.transaction()?;
+        let tx = conn.transaction()?;
         tx.execute(
             "INSERT INTO meta VALUES ('schema_version', ?1), ('fingerprint', ?2), ('build', ?3)",
             params![SCHEMA_VERSION, ctx.fingerprint, build_id()],
@@ -368,12 +368,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         }
         // A build may replace a corrupt file: when its anchors do not read,
         // the new index starts without them.
-        let carried = attached.map(|attached| {
-            attached?;
-            let sp = tx.savepoint()?;
-            graph::carry_anchors(&sp)?;
-            sp.commit()
-        });
+        let carried = attached.map(|attached| attached.and_then(|_| graph::carry_anchors(&tx)));
         // The anchors do not change what a query finds, so their loss is no
         // partial result.
         if let Some(Err(e)) = carried {

@@ -247,38 +247,59 @@ pub fn drop_orphan_anchors(conn: &Connection) -> rusqlite::Result<()> {
 }
 
 /// The columns of `old_anchors` that [`carry_anchors`] can copy.
-const ANCHOR_COLUMNS: [&str; 5] = ["path", "start_line", "end_line", "hash", "version"];
+const ANCHOR_COLUMNS: &[&str] = &["path", "start_line", "end_line", "hash", "version"];
+
+/// The columns of `table` in the attached index `old`, in order.
+fn old_columns(conn: &Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("SELECT name FROM pragma_table_info(?1, 'old') ORDER BY cid")?
+        .query_map([table], |r| r.get(0))?
+        .collect()
+}
 
 /// Carries the anchors of the index a rebuild replaces, attached as `old`,
-/// into the new one: the anchors it kept, then, as the next version, the
-/// units of each file whose text changed since. Returns false, and copies
-/// nothing, when the old `old_anchors` table has other columns.
-pub fn carry_anchors(conn: &Connection) -> rusqlite::Result<bool> {
-    let columns: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('old_anchors', 'old') ORDER BY cid")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    if columns != ANCHOR_COLUMNS {
-        return Ok(false);
+/// into the new one, whose `old_anchors` is still empty: the anchors it kept,
+/// then, as the next version, the units of each file whose text changed
+/// since. It copies nothing when the old `old_anchors` has other columns, and
+/// skips the changed files when the old `files` or `units` lack a column it
+/// reads. On an error the new index keeps no anchor: the build's journal is
+/// off, so no rollback could undo a part copy.
+pub fn carry_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    let copied = copy_anchors(conn);
+    if copied.is_err() {
+        conn.execute("DELETE FROM main.old_anchors", [])?;
+    }
+    copied
+}
+
+fn copy_anchors(conn: &Connection) -> rusqlite::Result<()> {
+    if old_columns(conn, "old_anchors")? != ANCHOR_COLUMNS {
+        return Ok(());
     }
     conn.execute(
         "INSERT INTO main.old_anchors (path, start_line, end_line, hash, version) \
          SELECT path, start_line, end_line, hash, version FROM old.old_anchors",
         [],
     )?;
-    let changed: Vec<(i64, String)> = conn
-        .prepare(
-            "SELECT o.id, o.path FROM old.files o \
-             JOIN main.files n ON n.scope = o.scope AND n.path = o.path \
-             WHERE n.hash IS NOT o.hash ORDER BY o.id",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (file, path) in changed {
-        keep_anchors(conn, &path, "old.units", file)?;
+    let has = |table, wanted: &[&str]| -> rusqlite::Result<bool> {
+        let columns = old_columns(conn, table)?;
+        Ok(wanted.iter().all(|w| columns.iter().any(|c| c == w)))
+    };
+    if has("files", &["id", "scope", "path", "hash"])?
+        && has("units", &["file_id", "start_line", "end_line", "hash"])?
+    {
+        let changed: Vec<(i64, String)> = conn
+            .prepare(
+                "SELECT o.id, o.path FROM old.files o \
+                 JOIN main.files n ON n.scope = o.scope AND n.path = o.path \
+                 WHERE n.hash IS NOT o.hash ORDER BY o.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (file, path) in changed {
+            keep_anchors(conn, &path, "old.units", file)?;
+        }
     }
-    drop_orphan_anchors(conn)?;
-    Ok(true)
+    drop_orphan_anchors(conn)
 }
 
 /// The citation edges between papers, read from the structure sidecars of

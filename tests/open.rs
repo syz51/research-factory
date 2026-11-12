@@ -217,6 +217,40 @@ fn a_rebuild_over_a_corrupt_index_starts_without_old_anchors_and_says_so() {
 }
 
 #[test]
+fn a_rebuild_copies_what_it_can_read_of_the_replaced_index_and_no_part() {
+    let anchor = format!("{DR001}#L11-L42");
+    let prepare = |sql: &str| {
+        let dir = fixture();
+        ok(dir.path(), &["open", &anchor]);
+        move_dr001_table(dir.path());
+        ok(dir.path(), &["search", "wombat"]);
+        let db =
+            rusqlite::Connection::open(dir.path().join(".research/lab/search/index.db")).unwrap();
+        db.execute_batch(sql).unwrap();
+        drop(db);
+        let out = lab(dir.path(), &["search", "--rebuild", "wombat"]);
+        assert!(out.status.success(), "{out:?}");
+        (dir, String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    // Old units of another shape: the kept anchors still carry over.
+    let (dir, err) = prepare(
+        "DROP TABLE units; CREATE TABLE units (file_id INTEGER, start_line INTEGER, end_line INTEGER);",
+    );
+    assert!(!err.contains("not carried over"), "{err}");
+    let unit = json(dir.path(), &["open", &anchor]);
+    assert_eq!(unit["anchor"], format!("{DR001}#L14-L45"), "{unit}");
+    // Old units that fail to read after the copy began: no anchor stays.
+    let (dir, err) = prepare(
+        "CREATE TABLE gone (x); DROP TABLE units; CREATE VIEW units AS SELECT x FROM gone; DROP TABLE gone;",
+    );
+    assert!(
+        err.contains("the anchors of the replaced index were not carried over"),
+        "{err}"
+    );
+    assert_eq!(old_anchors(dir.path(), DR001).0, 0);
+}
+
+#[test]
 fn an_old_anchor_finds_its_text_after_a_front_matter_edit_moved_it() {
     let dir = fixture();
     let anchor = format!("{DR001}#L11-L42");
