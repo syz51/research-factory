@@ -1001,3 +1001,39 @@ fn a_record_left_out_of_a_kinds_index_is_still_checked() {
     let printed = stdout(&lab(d, &["archive", "index", "--print", "results"]));
     assert!(!printed.contains("[R1]"), "{printed}");
 }
+
+#[test]
+fn an_allow_entry_accepts_the_open_items_of_a_sealed_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    let config = CONFIG.to_string()
+        + "\n[lab.archive.open_items]\nsince = \"2026-11-01\"\nboards = [\"rf\"]\n";
+    archive(d, &config);
+    let log = "docs/log/2026-11.md";
+    write(
+        d,
+        log,
+        "---\ntask: rf-1\n---\n# November\n\n## Limits\n\n- The second source was not read.\n",
+    );
+    commit(d, "log");
+    let (code, text) = check(d);
+    assert_eq!(code, Some(1), "{text}");
+    assert_eq!(rules(&text), [format!("error open-item {log}:8")]);
+
+    let allowed = config
+        + &format!(
+            "\n[[lab.archive.allow]]\nrule = \"open-item\"\nsubject = \"{log}\"\nreason = \"Sealed text; rf-2 holds the item.\"\n"
+        );
+    write(d, "research.toml", &allowed);
+    let (code, text) = check(d);
+    assert_eq!(
+        (code, rules(&text)),
+        (Some(0), Vec::<String>::new()),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("info open-item {log}:8"))
+            && text.contains("(Sealed text; rf-2 holds the item.)"),
+        "{text}"
+    );
+}
