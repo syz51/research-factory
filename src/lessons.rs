@@ -207,6 +207,22 @@ impl Lesson {
         if to == Status::Verified && !from.active() {
             return Err("only an adopted lesson can be verified".into());
         }
+        // Status moves forward. Two moves back are allowed: a retired lesson
+        // reopens at any status, and a verified lesson returns to adopted when
+        // later evidence no longer shows it helps. Any other way back goes
+        // through `retired`, so the history says the lesson was given up.
+        let back = to < from
+            && from != Status::Retired
+            && !(from == Status::Verified && to == Status::Adopted);
+        if back {
+            return Err(format!(
+                "`{}` cannot move back from {} to {}; retire it, then reopen it at {}",
+                self.meta.id,
+                from.as_str(),
+                to.as_str(),
+                to.as_str()
+            ));
+        }
         self.meta.status = to;
         self.meta.updated = date.into();
         // Adoption starts the period `lab evaluate` measures, so a lesson that
@@ -404,6 +420,36 @@ mod tests {
         assert!(text.contains("- 2026-11-07: recorded as observed."));
         assert!(text.contains("- 2026-11-08: observed → adopted. agreed in review"));
         assert_eq!(load(dir.path()).unwrap()[0].meta.status, Status::Adopted);
+    }
+
+    #[test]
+    fn status_moves_back_only_from_verified_or_retired() {
+        let mut l = Lesson {
+            path: PathBuf::from("x.md"),
+            meta: meta("x"),
+            body: String::new(),
+        };
+        l.transition(Status::Proposed, "a", "2026-11-01").unwrap();
+        let err = l
+            .transition(Status::Observed, "b", "2026-11-02")
+            .unwrap_err();
+        assert!(
+            err.contains("cannot move back from proposed to observed"),
+            "{err}"
+        );
+        l.transition(Status::Adopted, "c", "2026-11-03").unwrap();
+        for to in [Status::Observed, Status::Proposed] {
+            assert!(l.transition(to, "d", "2026-11-04").is_err());
+        }
+        l.transition(Status::Verified, "e", "2026-11-05").unwrap();
+        assert!(l.transition(Status::Proposed, "f", "2026-11-06").is_err());
+        // Later evidence no longer shows it helps: back to adopted, same date.
+        l.transition(Status::Adopted, "g", "2026-11-07").unwrap();
+        assert_eq!(l.meta.adopted.as_deref(), Some("2026-11-03"));
+        // Given up, then reopened at the start.
+        l.transition(Status::Retired, "h", "2026-11-08").unwrap();
+        l.transition(Status::Observed, "i", "2026-11-09").unwrap();
+        assert_eq!(l.meta.status, Status::Observed);
     }
 
     #[test]

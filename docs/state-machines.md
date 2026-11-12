@@ -274,12 +274,12 @@ Accepted: depth describes how far a person or an agent read, and a re-read at a 
 | Machine | States | Note |
 |---|---|---|
 | Manifest | incomplete, `complete` | explicit flag |
-| Run record | placeholder, filled | **(implicit)**: a placeholder is a record with empty fields |
+| Run record | `incomplete` (placeholder), `complete` | explicit through `status`; a filled record says `complete` since prov 0.1.2, and a record without the field reads as complete |
 | Run outcome | ok, failed | explicit |
 | Rerun output | snapshot taken, compared | explicit |
-| Import pairing | paired, unpaired | **(implicit)** |
+| Import pairing | paired, unpaired | explicit: an unpaired entry yields `hash-without-path` or `record-without-path` |
 
-No defect was found that affects the redesign. Both implicit states are proposed in research-factory-231: a `state` field on the run record, and a named finding for an unpaired import.
+No defect was found that affects the redesign. research-factory-231 found that the placeholder already said `"status": "incomplete"` and readers refused it, and named the filled state (prov PR #4, a8f3c596). prov pairs a path field with a hash field inside one JSON object; it has no pairing between a run and an imported output.
 
 ### 4.6 Citation
 
@@ -293,7 +293,7 @@ DR042 added 8 uncited-claim warnings; they are Warn findings and stay visible in
 
 States (`src/lessons.rs:27`): `observed`, `proposed`, `adopted`, `verified`, `retired`. Masters has 11 observed, 5 adopted, 3 verified.
 
-Defect: the code allows a move backward; the docs say forward only. `adopted` and `reviewed` dates stay when a lesson leaves the active states. Proposed in research-factory-217.
+Status moves forward (`src/lessons.rs`, `transition`). Since lab 0.17.0 two moves back are allowed and every other one is refused: `verified → adopted`, when later evidence no longer shows the lesson helps, and a retired lesson reopening at any status. Masters' lesson histories hold only forward moves. A retired lesson keeps its `adopted` and `reviewed` dates as history; no reader uses them outside the active states, and re-adoption resets both. Fixed by research-factory-217.
 
 ### 5.2 Loop run
 
@@ -301,15 +301,15 @@ Defect: the code allows a move backward; the docs say forward only. `adopted` an
 hook fires ─► skip (disabled, background session) | too recent | lock held ─► measure ─► notify ─► record last.json
 ```
 
-Explicit, with a file lock. Defect: a corrupt `last.json` is ignored, so "too recent" is skipped. Proposed in 217.
+Explicit, with a file lock. An unreadable `last.json` cannot show a recent loop, so the loop runs. Since lab 0.17.0 it says so in `loop.log`, its output, the new record's `errors` and the brief. Fixed by 217.
 
 ### 5.3 Signal
 
 | Machine | States | Defect |
 |---|---|---|
 | Signal kind | fixed list | None |
-| Send state | pending, sent, resolved | Resolve clears `pending` before a send succeeds. Proposed in 217. |
-| Board task for a signal **(implicit)** | none, filed, repeated | `board-notify.sh` files or adds to a task. The state is on the board, not in lab: the board owns work state (rule 1). Proposed in a note on research-factory-217: lab stores the filed task id with the signal's send state. |
+| Send state | pending (`new`, `repeat`, `reopened`), sent, resolved | A notice still pending when its signal resolves is dropped, since the condition is gone. Since lab 0.17.0 the drop is reported (`unsent` in the loop record, the brief), and a signal never sent that comes back is `new`, not `reopened`. Fixed by 217. |
+| Board task for a signal | none, filed, repeated | explicit: `signals.json` keeps the task id that `board-notify.sh` returns as `ref`, and repeats go to that task. Since lab 0.17.0 the loop record carries the `ref` of each signal and of each resolved one, and `lab brief` names them. The task's own status stays on the board (rule 1). Fixed by 217. |
 
 ### 5.4 Evaluation
 
@@ -319,7 +319,7 @@ Explicit, with a file lock. Defect: a corrupt `last.json` is ignored, so "too re
 
 | Machine | States | Defect |
 |---|---|---|
-| Check run status | ok, findings, failed | Exit 0 with Error findings is recorded as `ok`. `--new-only` is ignored with `--at`. Proposed in 217. |
+| Check run status | ok, findings, failed | `ok` means the checker ran to completion. An exit that disagrees with the findings adds a `check-exit-mismatch` warning: exit 1 without an error finding, and since lab 0.17.0 exit 0 with one. clap refuses `--new-only` with `--at`. Fixed by 217. |
 | Baseline | none, recorded | explicit |
 | Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn never fails a gate. Accepted as the meaning of Warn; each rule this document depends on is an Error. |
 
@@ -433,8 +433,8 @@ Covered in section 4.1 (stale derivative). The joint is between `papers` (writer
 | 13 | Paper lifecycle | 4.1 | Built by 188, 198, 213, 191 |
 | 14 | Stale derivative | 4.1 | Built by 198, 213, 191 |
 | 15 | Seen index | 4.3 | Fixed by 188 |
-| 16 | Run record placeholder, import pairing | 4.5 | Proposed in 231 |
-| 17 | Board task for a signal | 5.3 | Proposed in 217 (note) |
+| 16 | Run record placeholder, import pairing | 4.5 | Fixed by 231 (prov 0.1.2); pairing was already explicit |
+| 17 | Board task for a signal | 5.3 | Fixed by 217 (lab 0.17.0) |
 | 18 | Retro candidate dismissal | 5.7 | Fixed by 205 |
 | 19 | Rule lifecycle | 5.8 | Fixed by 232 |
 | 20 | Session order | 5.9 | Fixed by 207, 208 |

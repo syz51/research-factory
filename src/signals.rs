@@ -493,6 +493,27 @@ pub struct Entry {
     pub pending: Option<Pending>,
 }
 
+/// What `State::plan` decided for one loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
+    /// Per signal of the loop, in order: whether to send it.
+    pub send: Vec<bool>,
+    /// The ids this loop resolved.
+    pub resolved: Vec<Resolved>,
+}
+
+/// A signal that the loop no longer produces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Resolved {
+    pub id: String,
+    /// The notify command's answer for it, such as the board task it filed.
+    #[serde(rename = "ref", default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// Its notice was still waiting to be sent, and is dropped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsent: bool,
+}
+
 /// `signals.json`: every signal id seen, and what was sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct State {
@@ -537,14 +558,16 @@ impl State {
     /// A signal is sent when its id is new, when it was resolved and came back
     /// at least `renotify` after its last send (`reopened`), when its detail changed and it was last sent at least
     /// `renotify` ago (`repeat`, with the stored `ref`), and on every loop
-    /// until a send succeeds. An id that this loop did not produce is
-    /// resolved.
+    /// until a send succeeds. A signal that was never sent and came back is
+    /// sent as new. An id that this loop did not produce is resolved; a
+    /// notice still waiting for it is dropped, since the condition is gone,
+    /// and reported in `Plan::resolved`.
     pub fn plan(
         &mut self,
         signals: &mut [Signal],
         now: jiff::Timestamp,
         renotify: jiff::SignedDuration,
-    ) -> Vec<bool> {
+    ) -> Plan {
         let at = now.to_string();
         let mut send = Vec::with_capacity(signals.len());
         for s in signals.iter_mut() {
@@ -569,7 +592,10 @@ impl State {
                     .as_deref()
                     .and_then(|t| t.parse::<jiff::Timestamp>().ok())
                     .is_some_and(|t| now.duration_since(t) < renotify);
-                if !recent {
+                if e.last_notified.is_none() {
+                    e.pending = Some(Pending::New);
+                    e.detail_hash = h;
+                } else if !recent {
                     e.pending = Some(Pending::Reopened);
                     e.detail_hash = h;
                 }
@@ -592,13 +618,18 @@ impl State {
             s.reopened = e.pending == Some(Pending::Reopened);
             send.push(e.pending.is_some());
         }
+        let mut resolved = Vec::new();
         for (id, e) in &mut self.signals {
             if e.resolved.is_none() && !signals.iter().any(|s| &s.id == id) {
                 e.resolved = Some(at.clone());
-                e.pending = None;
+                resolved.push(Resolved {
+                    id: id.clone(),
+                    reference: e.reference.clone(),
+                    unsent: e.pending.take().is_some(),
+                });
             }
         }
-        send
+        Plan { send, resolved }
     }
 
     /// A send succeeded; `reference` is the notify command's answer, if any.
@@ -837,23 +868,23 @@ mod tests {
         let day = jiff::SignedDuration::from_hours(24);
         let mut st = State::default();
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(0), day), [true], "new");
+        assert_eq!(st.plan(&mut s, t(0), day).send, [true], "new");
         assert!(!s[0].repeat && !s[0].reopened);
         st.sent("a", t(0), Some("board:42".into()));
 
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(1), day), [false], "same detail");
+        assert_eq!(st.plan(&mut s, t(1), day).send, [false], "same detail");
         assert_eq!(s[0].reference.as_deref(), Some("board:42"));
 
         let mut s = vec![sig("a", "two")];
         assert_eq!(
-            st.plan(&mut s, t(2), day),
+            st.plan(&mut s, t(2), day).send,
             [false],
             "changed within renotify_hours"
         );
         let mut s = vec![sig("a", "two")];
         assert_eq!(
-            st.plan(&mut s, t(25), day),
+            st.plan(&mut s, t(25), day).send,
             [true],
             "changed, renotify_hours passed"
         );
@@ -867,7 +898,7 @@ mod tests {
         );
 
         let mut s = vec![];
-        assert!(st.plan(&mut s, t(26), day).is_empty());
+        assert!(st.plan(&mut s, t(26), day).send.is_empty());
         assert_eq!(
             st.signals["a"].resolved,
             Some(t(26).to_string()),
@@ -876,7 +907,7 @@ mod tests {
 
         let mut s = vec![sig("a", "two")];
         assert_eq!(
-            st.plan(&mut s, t(27), day),
+            st.plan(&mut s, t(27), day).send,
             [false],
             "reappeared within renotify_hours of the last send: flapping"
         );
@@ -884,7 +915,7 @@ mod tests {
         st.plan(&mut [], t(28), day);
 
         let mut s = vec![sig("a", "two")];
-        assert_eq!(st.plan(&mut s, t(49), day), [true], "reappeared later");
+        assert_eq!(st.plan(&mut s, t(49), day).send, [true], "reappeared later");
         assert!(s[0].reopened && !s[0].repeat);
         assert_eq!(s[0].reference.as_deref(), Some("board:42"));
         assert_eq!(s[0].first_seen, t(0).to_string());
@@ -899,9 +930,17 @@ mod tests {
         st.sent("a", t(0), Some("r".into()));
         st.plan(&mut [], t(1), day);
         let mut s = vec![sig("a", "two")];
-        assert_eq!(st.plan(&mut s, t(2), day), [false], "back within a day");
+        assert_eq!(
+            st.plan(&mut s, t(2), day).send,
+            [false],
+            "back within a day"
+        );
         let mut s = vec![sig("a", "two")];
-        assert_eq!(st.plan(&mut s, t(25), day), [true], "the change is sent");
+        assert_eq!(
+            st.plan(&mut s, t(25), day).send,
+            [true],
+            "the change is sent"
+        );
         assert!(s[0].repeat && !s[0].reopened);
     }
 
@@ -914,17 +953,49 @@ mod tests {
         st.failed("a", "exit 1: board down".into());
         assert_eq!(st.signals["a"].last_notified, None);
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(1), day), [true], "retried next loop");
+        assert_eq!(st.plan(&mut s, t(1), day).send, [true], "retried next loop");
         st.sent("a", t(1), Some("r1".into()));
         assert_eq!(st.signals["a"].error, None);
         // A reopen whose send fails stays a reopen.
         st.plan(&mut [], t(2), day);
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(30), day), [true]);
+        assert_eq!(st.plan(&mut s, t(30), day).send, [true]);
         st.failed("a", "timeout".into());
         let mut s = vec![sig("a", "one")];
-        assert_eq!(st.plan(&mut s, t(31), day), [true]);
+        assert_eq!(st.plan(&mut s, t(31), day).send, [true]);
         assert!(s[0].reopened);
+    }
+
+    #[test]
+    fn a_signal_resolved_before_its_send_is_reported_and_comes_back_new() {
+        let day = jiff::SignedDuration::from_hours(24);
+        let mut st = State::default();
+        st.plan(&mut [sig("a", "one"), sig("b", "one")], t(0), day);
+        st.failed("a", "board down".into());
+        st.sent("b", t(0), Some("task-9".into()));
+        let plan = st.plan(&mut [], t(1), day);
+        assert_eq!(
+            plan.resolved,
+            [
+                Resolved {
+                    id: "a".into(),
+                    reference: None,
+                    unsent: true,
+                },
+                Resolved {
+                    id: "b".into(),
+                    reference: Some("task-9".into()),
+                    unsent: false,
+                },
+            ]
+        );
+        assert_eq!(st.signals["a"].pending, None);
+        assert!(st.plan(&mut [], t(2), day).resolved.is_empty(), "once");
+        // Never sent, so it comes back as new, not reopened.
+        let mut s = vec![sig("a", "one")];
+        assert_eq!(st.plan(&mut s, t(3), day).send, [true]);
+        assert!(!s[0].reopened && !s[0].repeat);
+        assert_eq!(st.signals["a"].pending, Some(Pending::New));
     }
 
     #[test]

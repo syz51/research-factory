@@ -409,12 +409,23 @@ fn run_one(
     } else if matches!(outcome.exit, Some(0 | 1)) {
         // interfaces.md: 0 = no errors, 1 = errors found, anything else = the check itself failed.
         outcome.status = "ok".into();
-        if outcome.exit == Some(1) && !findings.iter().any(|f| f.severity == Severity::Error) {
+        let errors = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .count();
+        if outcome.exit == Some(1) && errors == 0 {
             findings.push(lab_finding(
                 "check-exit-mismatch",
                 Severity::Warn,
                 &spec.name,
                 "exited 1 but reported no error finding".into(),
+            ));
+        } else if outcome.exit == Some(0) && errors > 0 {
+            findings.push(lab_finding(
+                "check-exit-mismatch",
+                Severity::Warn,
+                &spec.name,
+                format!("exited 0 but reported {errors} error finding(s)"),
             ));
         }
     }
@@ -1265,6 +1276,26 @@ mod tests {
                 .items
                 .iter()
                 .any(|i| i.finding.rule == "check-exit-mismatch")
+        );
+    }
+
+    #[test]
+    fn exit_zero_with_errors_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = project(dir.path(), &emit_script(dir.path(), &[FINDING_A], 0, false));
+        let report = run(&p, &[]).unwrap();
+        let outcome = &report.run.header.checks[0];
+        assert_eq!(outcome.status, "ok", "the check still ran to completion");
+        let mismatch: Vec<_> = report
+            .run
+            .items
+            .iter()
+            .filter(|i| i.finding.rule == "check-exit-mismatch")
+            .collect();
+        assert_eq!(mismatch.len(), 1);
+        assert_eq!(
+            mismatch[0].finding.message,
+            "exited 0 but reported 1 error finding(s)"
         );
     }
 }

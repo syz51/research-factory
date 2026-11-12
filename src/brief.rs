@@ -7,7 +7,7 @@ use std::path::Path;
 use crate::check::{CheckOutcome, Run};
 use crate::evaluate::{Evaluation, Introduced, Method, Verdict, p_label};
 use crate::finding::Severity;
-use crate::lesson_loop::{Record, SendStatus};
+use crate::lesson_loop::{Record, SendStatus, UNREADABLE_RECORD};
 use crate::lessons::{Kind, Lesson, Status};
 
 /// Adopted lessons older than this without a `verified` decision are listed
@@ -381,16 +381,40 @@ pub fn measurements(
             count(SendStatus::Pending)
         ));
     }
-    if r.errors.iter().any(|e| !e.starts_with("notify ")) {
+    let tracked: Vec<String> = r
+        .signals
+        .iter()
+        .filter_map(|s| Some(format!("`{}` ({})", s.id, s.reference.as_ref()?)))
+        .collect();
+    if !tracked.is_empty() {
+        notes.push(format!("Signals tracked: {}.", tracked.join(", ")));
+    }
+    if !r.resolved.is_empty() {
+        let resolved: Vec<String> = r
+            .resolved
+            .iter()
+            .map(|x| match (&x.reference, x.unsent) {
+                (Some(t), _) => format!("`{}` (its task {t} may be closed)", x.id),
+                (None, true) => format!("`{}` (its notice was never sent and is dropped)", x.id),
+                (None, false) => format!("`{}`", x.id),
+            })
+            .collect();
         notes.push(format!(
-            "The loop failed: {}.",
-            r.errors
-                .iter()
-                .filter(|e| !e.starts_with("notify "))
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("; ")
+            "Signals resolved in the last loop: {}.",
+            resolved.join(", ")
         ));
+    }
+    for e in r.errors.iter().filter(|e| e.starts_with(UNREADABLE_RECORD)) {
+        notes.push(format!("Before the last loop, {e}."));
+    }
+    let failures: Vec<&str> = r
+        .errors
+        .iter()
+        .filter(|e| !e.starts_with("notify ") && !e.starts_with(UNREADABLE_RECORD))
+        .map(String::as_str)
+        .collect();
+    if !failures.is_empty() {
+        notes.push(format!("The loop failed: {}.", failures.join("; ")));
     }
     if !notes.is_empty() {
         out.push('\n');
@@ -820,11 +844,32 @@ mod tests {
                 evaluation("c", Verdict::Improved),
                 unmeasurable,
             ],
-            signals: vec![SignalStatus {
-                id: "x".into(),
-                kind: "k".into(),
-                status: SendStatus::Pending,
-            }],
+            signals: vec![
+                SignalStatus {
+                    id: "x".into(),
+                    kind: "k".into(),
+                    status: SendStatus::Pending,
+                    reference: None,
+                },
+                SignalStatus {
+                    id: "y".into(),
+                    kind: "k".into(),
+                    status: SendStatus::Unchanged,
+                    reference: Some("board-7".into()),
+                },
+            ],
+            resolved: vec![
+                crate::signals::Resolved {
+                    id: "z".into(),
+                    reference: Some("board-3".into()),
+                    unsent: false,
+                },
+                crate::signals::Resolved {
+                    id: "w".into(),
+                    reference: None,
+                    unsent: true,
+                },
+            ],
             errors: vec![],
         };
         let tz = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
@@ -844,18 +889,37 @@ mod tests {
             "- `e`: not measured yet\n",
             "Measure commands failed: `agentprof scan` (exit 2).\n",
             "1 signal(s) pending",
+            "Signals tracked: `y` (board-7).\n",
+            "Signals resolved in the last loop: `z` (its task board-3 may be closed), \
+             `w` (its notice was never sent and is dropped).\n",
         ] {
             assert!(text.contains(line), "{line:?} in\n{text}");
         }
         assert!(!text.contains("hooks"), "{text}");
         let later: jiff::Timestamp = "2026-11-09T00:00:10Z".parse().unwrap();
-        let stale = measurements(Ok(Some(record)), None, later, &tz, &lessons, &[]);
+        let stale = measurements(Ok(Some(record.clone())), None, later, &tz, &lessons, &[]);
         assert!(
             stale.contains("(2 days ago). That is over a day: the hooks"),
             "{stale}"
         );
         let never = measurements(Ok(None), None, now, &tz, &lessons, &[]);
         assert!(never.ends_with("The loop has never run: run `lab loop`.\n"));
+        let mut replaced = record.clone();
+        replaced.errors = vec![
+            format!("{UNREADABLE_RECORD} (last.json: EOF); this loop replaces it"),
+            "evaluate: boom".into(),
+        ];
+        let text = measurements(Ok(Some(replaced)), None, now, &tz, &lessons, &[]);
+        assert!(
+            text.contains(
+                "Before the last loop, the previous loop record was unreadable (last.json: EOF); this loop replaces it.\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("The loop failed: evaluate: boom.\n"),
+            "{text}"
+        );
         let with = render(
             "demo",
             "2026-11-30",
