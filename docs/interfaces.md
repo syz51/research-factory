@@ -17,6 +17,7 @@ state_dir = ".research"        # tool-owned state (logs, caches, ledgers); safe 
 ```
 
 - A table's sub-tables belong to the same tool: `lab` owns `[lab.archive]`, `[[lab.archive.index]]`, `[[lab.archive.budget]]`, `[[lab.archive.offloaded]]`, `[[lab.archive.kept_link]]`, `[lab.archive.open_items]`, the tables of archive model 2 and `[lab.search]` (section 6), and `[lab.evaluate]` and `[lab.loop]` (section 7).
+- One key is shared: `[papers] registry`, the registry path (section 3). Any tool that reads the registry may read this key, and no other key of `[papers]`.
 - A tool with no `research.toml` and no `--config` still runs with defaults and explicit flags.
 - A tool never writes `research.toml`, except `lab init`, which creates it.
 
@@ -41,7 +42,7 @@ Every checker supports `--format jsonl` and then writes one finding per line on 
 
 ## 3. Reference registry: `rf.reference/1` (JSON Lines)
 
-`papers` owns the registry. Other tools only read it. The default location is `references.jsonl` next to `research.toml`; `[papers] registry = "<path>"` overrides it.
+`papers` owns the registry. Other tools only read it. The default location is `references.jsonl` next to `research.toml`; `[papers] registry = "<path>"` overrides it. A tool that reads the registry uses the first of these that is set: its own flag (such as `--registry`), its own table's `registry` key, `[papers] registry`, and then the default. Of the readers, only `claimcheck` has its own key, `[claimcheck] registry`; `lab` reads `[papers] registry`.
 
 One line per catalogue entry, ordered by `key`. The key is the archive's stable identifier: the catalogue number as a string (`"177"`) for numbered catalogues, or the note id for one-note-per-paper archives.
 
