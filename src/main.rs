@@ -844,7 +844,14 @@ fn check(
     new_only: bool,
     verbose: bool,
 ) -> Result<ExitCode, String> {
-    let report = check::run(project, only)?;
+    // The merge base's run for `--new-only` is made while the work tree's is.
+    let (report, base) = std::thread::scope(|s| {
+        let base = new_only.then(|| s.spawn(|| change::base(project, only)));
+        let report = check::run(project, only);
+        let base = base.map(|b| b.join().unwrap_or_else(|p| std::panic::resume_unwind(p)));
+        (report, base)
+    });
+    let report = report?;
     let run = &report.run;
     println!(
         "{:<14} {:>6} {:>7} {:>6} {:>5} {:>5} {:>9} {:>8}",
@@ -938,9 +945,9 @@ fn check(
             );
         }
     }
-    if new_only {
+    if let Some(base) = base {
         failing |= print_change(
-            &change::compare(project, only, run, &report.delta)?,
+            &change::compare(project, only, run, &report.delta, base)?,
             verbose,
         );
     }

@@ -66,29 +66,44 @@ pub enum Outcome<'r> {
     Compared(Change<'r>),
 }
 
-/// Compares `run`, the work tree's run, with the selected checks run on the
-/// merge base. `delta` is each check's change since its baseline.
-pub fn compare<'r>(
-    project: &Project,
-    only: &[String],
-    run: &'r Run,
-    delta: &BTreeMap<String, Option<Delta>>,
-) -> Result<Outcome<'r>, String> {
+/// The merge base's side of a comparison, made by `base` while the work
+/// tree's run is made, since both take about as long.
+pub struct Base(Result<BaseRun, String>);
+
+enum BaseRun {
+    Skipped(String),
+    Unchanged {
+        branch: String,
+        base: String,
+    },
+    Ran {
+        branch: String,
+        base: String,
+        changed: BTreeSet<String>,
+        /// `None` when the merge base has no project root.
+        ran: Option<crate::check::Ran>,
+    },
+}
+
+/// Finds the merge base of `HEAD` with the default branch and the files that
+/// differ from it, and runs the selected checks on it when any do. It runs
+/// every selected check: which of them run to completion in the work tree
+/// is not known yet, and `compare` uses only those.
+pub fn base(project: &Project, only: &[String]) -> Base {
+    Base(base_run(project, only))
+}
+
+fn base_run(project: &Project, only: &[String]) -> Result<BaseRun, String> {
     let root = &project.root;
-    if run.header.commit.is_none() {
-        return Ok(Outcome::Skipped(
-            "the project is not in a git repository with a commit".into(),
-        ));
-    }
     let Some(branch) = crate::worktree::default_branch(root)? else {
-        return Ok(Outcome::Skipped(
+        return Ok(BaseRun::Skipped(
             "no default branch: neither origin/HEAD nor main, master, origin/main or \
              origin/master exists"
                 .into(),
         ));
     };
     let Some(base) = crate::worktree::merge_base(root, &branch)? else {
-        return Ok(Outcome::Skipped(format!(
+        return Ok(BaseRun::Skipped(format!(
             "HEAD and {branch} share no commit"
         )));
     };
@@ -98,8 +113,44 @@ pub fn compare<'r>(
         .filter(|p| state.is_none_or(|s| !Path::new(p).starts_with(s)))
         .collect();
     if changed.is_empty() {
-        return Ok(Outcome::Unchanged { branch, base });
+        return Ok(BaseRun::Unchanged { branch, base });
     }
+    let specs = crate::check::select(project, only)?;
+    let ran = crate::replay::run_base(project, &specs, &base)?;
+    Ok(BaseRun::Ran {
+        branch,
+        base,
+        changed,
+        ran,
+    })
+}
+
+/// Compares `run`, the work tree's run, with the selected checks run on the
+/// merge base by `base`. `delta` is each check's change since its baseline.
+pub fn compare<'r>(
+    project: &Project,
+    only: &[String],
+    run: &'r Run,
+    delta: &BTreeMap<String, Option<Delta>>,
+    base: Base,
+) -> Result<Outcome<'r>, String> {
+    let root = &project.root;
+    // Outside git the base's errors say only that.
+    if run.header.commit.is_none() {
+        return Ok(Outcome::Skipped(
+            "the project is not in a git repository with a commit".into(),
+        ));
+    }
+    let (branch, base, changed, at_base) = match base.0? {
+        BaseRun::Skipped(reason) => return Ok(Outcome::Skipped(reason)),
+        BaseRun::Unchanged { branch, base } => return Ok(Outcome::Unchanged { branch, base }),
+        BaseRun::Ran {
+            branch,
+            base,
+            changed,
+            ran,
+        } => (branch, base, changed, ran),
+    };
     let ran_now: Vec<&str> = run
         .header
         .checks
@@ -114,7 +165,7 @@ pub fn compare<'r>(
     if specs.is_empty() {
         return Ok(Outcome::Skipped("no check ran to completion".into()));
     }
-    let Some(at_base) = crate::replay::run_base(project, &specs, &base)? else {
+    let Some(at_base) = at_base else {
         return Ok(Outcome::Skipped(format!(
             "the merge base {} has no project root",
             short(&base)
