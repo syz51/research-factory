@@ -377,6 +377,100 @@ fn a_link_to_a_file_git_does_not_track_is_a_warning_until_it_is_committed() {
     assert!(untracked(&lab(&m, &["archive", "check"])).is_empty());
 }
 
+#[test]
+fn a_link_to_a_file_git_ignores_is_a_warning_unless_git_tracks_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, w) = setup(ceiling);
+    std::fs::set_permissions(m.join("private"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = |d: &Path, args: &[&str]| run(LAB, d, ceiling, args);
+    let ignored = |out: &Output, file: &str| -> Vec<String> {
+        stdout(out)
+            .lines()
+            .filter(|l| l.contains("ignored-link") && l.contains(file))
+            .map(str::to_string)
+            .collect()
+    };
+    // The linked worktree finds the ignored targets in the main checkout and
+    // warns as the main checkout does; the missing one stays broken.
+    let there = ignored(&lab(&m, &["archive", "check"]), "docs/a.md");
+    assert_eq!(there.len(), 3, "{there:?}");
+    for dest in ["../data/big.csv", "../private/secret.pdf", "../notes/x.md"] {
+        assert!(there.iter().any(|l| l.contains(dest)), "{dest}: {there:?}");
+    }
+    let here = lab(&w, &["archive", "check"]);
+    assert_eq!(ignored(&here, "docs/a.md"), there, "{}", stdout(&here));
+
+    let top = m.parent().unwrap();
+    git(top, ceiling, &["switch", "-qc", "feat"]);
+    // `data/forced.csv` matches the ignore pattern but is committed; `notes/`
+    // is an ignored directory that git tracks nothing in.
+    write(&m, "docs/a.md", "# A\n");
+    write(&m, "data/absent.json", "{}\n");
+    write(&m, "data/forced.csv", "a\n");
+    git(top, ceiling, &["add", "-f", "proj/data/forced.csv"]);
+    write(
+        &m,
+        "docs/b.md",
+        "# B\n\n[data](../data/big.csv)\n[forced](../data/forced.csv)\n[notes](../notes/)\n\
+         [tracked](tracked.md)\n",
+    );
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "links"]);
+
+    let out = lab(&m, &["archive", "check"]);
+    let lines = ignored(&out, "docs/b.md");
+    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert!(
+        lines[0].starts_with("warn ignored-link docs/b.md:3")
+            && lines[0].contains(
+                "`../data/big.csv`, which git ignores, so no commit holds it; add a `!` \
+                 re-include rule to .gitignore or link a tracked file"
+            ),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with("warn ignored-link docs/b.md:5") && lines[1].contains("`../notes/`"),
+        "{}",
+        lines[1]
+    );
+    // A warning: the gate passes and names the fix.
+    let done = lab(&m, &["archive", "done"]);
+    assert_eq!(done.status.code(), Some(0), "{}", stdout(&done));
+    assert!(
+        stdout(&done).contains("add a `!` re-include rule to .gitignore or link a tracked file"),
+        "{}",
+        stdout(&done)
+    );
+
+    // `lab check --new-only` gates the warnings the change adds.
+    let new = lab(&m, &["check", "--new-only", "--only", "archive"]);
+    let text = stdout(&new);
+    assert_eq!(new.status.code(), Some(1), "{text}{}", stderr(&new));
+    assert!(
+        text.contains("docs/b.md:3 warn lab:ignored-link: links to `../data/big.csv`"),
+        "{text}"
+    );
+    assert!(!text.contains("forced.csv"), "{text}");
+
+    // A re-include rule makes the target committable, and then untracked.
+    write(
+        top,
+        ".gitignore",
+        ".research/\ndata/*\n!data/big.csv\nnotes/\nprivate/\n",
+    );
+    let out = lab(&m, &["archive", "check"]);
+    let lines = ignored(&out, "docs/b.md");
+    assert_eq!(lines.len(), 1, "{}", stdout(&out));
+    assert!(lines[0].contains("`../notes/`"), "{}", lines[0]);
+    assert!(
+        stdout(&out).contains("warn untracked-link docs/b.md:3"),
+        "{}",
+        stdout(&out)
+    );
+}
+
 const DIR_TEXTS: &str = r#"for f in "$1"/*.txt; do
 printf '{"schema":"rf.finding/1","tool":"dirtexts","rule":"text-read","severity":"warn","subject":"docs/a.md:1","message":"read","evidence":[{"path":"%s"}]}\n' "$f"
 done

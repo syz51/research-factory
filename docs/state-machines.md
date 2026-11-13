@@ -127,7 +127,9 @@ It replaces the instruction "run `lab archive update`, then `lab check --new-onl
 Link target **(implicit)**: a link resolves in this checkout, but its target can be `tracked`, `ignored` or `untracked` by git.
 An untracked target exists only in this checkout, so the link breaks in every other one.
 Since lab 0.20.0 (research-factory-228), `lab archive check` warns `untracked-link` for a link to an untracked file, or to a directory that holds untracked files when git tracks nothing in it (`src/archive/rules.rs:740-766`).
-It is a Warn: `lab archive done` prints the fix and still exits 0. Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
+It is a Warn: `lab archive done` prints the fix and still exits 0.
+Since lab 0.26.0 (research-factory-388), it warns `ignored-link` for a link to an ignored file, or to an ignored directory that git tracks nothing in: no commit holds the target, so a fresh clone lacks it (`ignored_targets` in `src/archive/rules.rs`).
+A target that a linked worktree finds in the main checkout counts too; the worktree data seed (section 5.6) still carries ignored targets to linked worktrees.
 
 ### 2.6 Topic pages and the entry page **(implicit)**
 

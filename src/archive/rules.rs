@@ -627,6 +627,53 @@ fn in_main_checkout<'f>(
     fallback.resolve(missing.iter().map(String::as_str))
 }
 
+/// The link targets of `files`, relative to the root, that git ignores: those
+/// that exist here and that `git check-ignore` matches, and those found in
+/// the main checkout (`in_main`), which git ignores by definition. A fresh
+/// clone lacks them. A directory that git tracks a file in does not count.
+/// A target below a symbolic link or in a submodule is not asked about,
+/// since git refuses such a path.
+fn ignored_targets<'f>(
+    root: &Path,
+    files: impl Iterator<Item = &'f &'f str>,
+    in_main: &BTreeSet<String>,
+    texts: &mut Texts,
+    listings: &mut Listings,
+) -> Result<BTreeSet<String>, String> {
+    let mut plain: HashMap<String, bool> = HashMap::new();
+    let mut here = BTreeSet::new();
+    for file in files {
+        let doc = texts.doc(&root.join(file))?;
+        let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
+        for link in &doc.links {
+            if let Target::There { rel: Some(r), .. } = resolve(root, dir, &link.dest)
+                && !r.is_empty()
+                && !in_main.contains(&r)
+                && listings.exists(root, &r)
+                && r.match_indices('/').all(|(i, _)| {
+                    *plain.entry(r[..i].to_string()).or_insert_with(|| {
+                        let abs = root.join(&r[..i]);
+                        abs.symlink_metadata().is_ok_and(|m| m.is_dir())
+                            && !abs.join(".git").exists()
+                    })
+                })
+            {
+                here.insert(r);
+            }
+        }
+    }
+    let mut ignored = BTreeSet::new();
+    // git check-ignore leaves tracked files out, but not a directory that
+    // holds them.
+    for r in crate::worktree::ignored(root, here.iter().map(String::as_str))? {
+        if !root.join(&r).is_dir() || !crate::worktree::tracks(root, &r)? {
+            ignored.insert(r);
+        }
+    }
+    ignored.extend(in_main.iter().cloned());
+    Ok(ignored)
+}
+
 fn link_problems(
     spec: &Spec,
     records: &[Record],
@@ -666,6 +713,7 @@ fn link_problems(
     } else {
         crate::worktree::untracked(root)?
     };
+    let ignored = ignored_targets(root, checked.iter(), &in_main, texts, &mut listings)?;
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -757,6 +805,19 @@ fn link_problems(
                                 "untracked-link",
                                 format!(
                                     "links to `{}`, {what}; commit it with this change",
+                                    link.dest
+                                ),
+                            );
+                            p.severity = Severity::Warn;
+                            out.push(p);
+                        } else if ignored.contains(r) {
+                            // A file that git ignores is in no commit: a fresh
+                            // clone lacks it.
+                            let mut p = problem(
+                                "ignored-link",
+                                format!(
+                                    "links to `{}`, which git ignores, so no commit holds it; \
+                                     add a `!` re-include rule to .gitignore or link a tracked file",
                                     link.dest
                                 ),
                             );

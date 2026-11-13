@@ -72,7 +72,11 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
         "stale-kept-link" | "stale-allow" => (Links, "remove the entry from research.toml"),
         "untracked-link" => (
             Links,
-            "commit the target in the same commit as the link, or have git ignore it on purpose",
+            "commit the target in the same commit as the link, or link a tracked file",
+        ),
+        "ignored-link" => (
+            Links,
+            "add a `!` re-include rule to .gitignore or link a tracked file",
         ),
         "stale-derivative" => (
             Stage::Sources,
