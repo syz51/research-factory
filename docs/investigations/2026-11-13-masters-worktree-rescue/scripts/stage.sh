@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # stage.sh <inventory dir> <worktree root> <stage dir> <repo name>
 # Copies every "unique" row of each <inventory dir>/<worktree>.tsv from <worktree root>/<worktree>
 # to <stage dir>/<repo name>/<worktree>/, and the manifest to <stage dir>/manifests/<repo name>--<worktree>.tsv.

@@ -1,27 +1,32 @@
-"""Inventory untracked and ignored files in each worktree against its main checkout.
+"""Inventory the files a worktree removal would lose, against the main checkout.
 
 Usage: inventory.py <main checkout> <out dir> <worktree>...
-Writes <out dir>/<worktree name>.tsv with: status, size, sha256, path.
+Lists untracked and ignored files (git ls-files -o) and tracked files with uncommitted
+edits (git diff HEAD). Files inside a nested repository that git reports as one
+directory entry are listed one by one. Writes <out dir>/<worktree name>.tsv with:
+status, size, sha256, path.
 Status: in-main (same path, same sha256 in main), unique, dup:<worktree> (same path and
-sha256 already kept from an earlier worktree), skip:<reason> (rebuildable cache).
+sha256 already kept from an earlier worktree), skip:<reason> (rebuildable or not a file).
 """
-import hashlib, os, subprocess, sys
+import hashlib, subprocess, sys
 from pathlib import Path
 
 SKIP_PARTS = {".venv": "venv", "__pycache__": "pycache", ".ruff_cache": "ruff-cache",
               ".pytest_cache": "pytest-cache", "node_modules": "node-modules"}
+# Runtime locks of lab and the reference registry; empty or a process id.
+RUNTIME_LOCKS = {".research/lab/search/lock", ".research/lab/search/board.lock",
+                 "docs/research/references.jsonl.lock"}
 
 def skip_reason(rel: str) -> str | None:
     parts = rel.split("/")
     for p in parts[:-1]:
         if p in SKIP_PARTS:
             return SKIP_PARTS[p]
-    name = parts[-1]
-    if name == ".DS_Store":
+    if parts[-1] == ".DS_Store":
         return "ds-store"
     if rel == ".research/lab/search/index.db":
         return "search-index"
-    if name.endswith(".lock") or rel == ".research/lab/search/lock":
+    if rel in RUNTIME_LOCKS:
         return "lock-file"
     return None
 
@@ -32,15 +37,27 @@ def sha256(path: Path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
+def git_paths(wt: Path, *args: str) -> list[str]:
+    out = subprocess.run(["git", "-C", str(wt), *args, "-z"], check=True, capture_output=True).stdout
+    return [raw.decode() for raw in out.split(b"\0") if raw]
+
+def candidates(wt: Path) -> set[str]:
+    paths = set(git_paths(wt, "diff", "--name-only", "HEAD"))
+    for rel in git_paths(wt, "ls-files", "-o"):
+        p = wt / rel
+        if rel.endswith("/") and p.is_dir() and not p.is_symlink():
+            # A nested repository: git lists only its directory.
+            paths.update(str(f.relative_to(wt)) for f in p.rglob("*") if f.is_file() or f.is_symlink())
+        else:
+            paths.add(rel.rstrip("/"))
+    return paths
+
 main, out = Path(sys.argv[1]), Path(sys.argv[2])
 out.mkdir(parents=True, exist_ok=True)
 kept: dict[tuple[str, str], str] = {}
 for wt in map(Path, sys.argv[3:]):
-    files = subprocess.run(["git", "-C", str(wt), "ls-files", "-o", "-z"],
-                           check=True, capture_output=True).stdout.split(b"\0")
     rows = []
-    for raw in filter(None, files):
-        rel = raw.decode()
+    for rel in candidates(wt):
         p = wt / rel
         if p.is_symlink() or not p.is_file():
             rows.append(("skip:not-regular-file", 0, "-", rel)); continue

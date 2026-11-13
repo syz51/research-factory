@@ -14,7 +14,7 @@ The masters repository has no remote. Which git-ignored or untracked files in it
 - The rest are small. They are run records, E5 output, untracked lab check records, paper caches, source texts, lab search boards and lab seals.
 - The 2026-11-12 archive-search bakeoff output is not at risk. Main holds all 67 of its output files with equal sha256. The 875 MB folder in `t3-3d22d7ca` is 822 MB of `.venv`.
 - `rf-166-check-errors` has no untracked files. Its one commit, dfc65dd, is not on main. Main's 2afed4b holds the same change with its own check records. The commit is saved as a patch.
-- Every copy matches the sha256 of its source. No worktree, branch or file was removed.
+- Each of the 393 manifest copies matches the sha256 of its source. The patch matches its own sha256. No worktree, branch or file was removed.
 
 ## Where the copies are
 
@@ -29,12 +29,12 @@ The destination is `air`, not `cloud`. masters AGENTS.md ("Confidentiality and s
 
 ## Method
 
-1. `scripts/inventory.py` lists each worktree's files with `git ls-files -o` (untracked and ignored).
+1. `scripts/inventory.py` lists each worktree's untracked and ignored files (`git ls-files -o`) and its tracked files with uncommitted edits (`git diff HEAD`). It lists the files of a nested repository one by one. No worktree had uncommitted edits to tracked files.
 2. For each file, it computes the sha256 and gives one status:
    - `in-main`: the main checkout has the same path with the same sha256.
    - `unique`: main lacks the path, or its sha256 differs.
    - `dup:<worktree>`: an earlier worktree already gave the same path and sha256. The file is copied once.
-   - `skip:<reason>`: a rebuildable file. These are `.venv`, `__pycache__`, `.ruff_cache`, `node_modules`, `.DS_Store`, `*.lock`, and `.research/lab/search/index.db` and its lock.
+   - `skip:<reason>`: a rebuildable file or not a regular file. The rebuildable files are under `.venv`, `__pycache__`, `.ruff_cache`, `.pytest_cache` or `node_modules`, or are `.DS_Store` or `.research/lab/search/index.db`. The runtime locks are `.research/lab/search/lock`, `.research/lab/search/board.lock` and `docs/research/references.jsonl.lock`. They are empty or hold a process id. The only files that are not regular are the interpreter symlinks in `.venv/bin`.
 3. `scripts/stage.sh` copies the `unique` rows and the manifests to a stage folder. Then `storagectl put <stage> air:masters/` sends the folder.
 4. `scripts/verify.sh` hashes each copy on the pool and its live source. It compares both with the manifest.
 
@@ -75,9 +75,13 @@ copies matching manifest: 393, mismatched: 0, sources changed since inventory: 0
 
 It exited 0.
 
+A later rerun gave the same counts, except 1 source changed: the lab seal of the live worktree `t3-9e67b28e`. The fixed `inventory.py` rerun gave the same unique files for every other worktree.
+
+`dfc65dd.patch` is in no manifest. Its sha256 on air equals that of `git format-patch -1 dfc65dd --stdout`: `68d63770c80fbaa8dc55df01d2627e7e8718256a3bccdd399490f843487c91d3`.
+
 ## Limits
 
-- `t3-9e67b28e` was a live worktree (research-factory-378). It committed during the copy. Its first inventory listed 7 files, which it then committed or which main received. Its manifest was taken again, and its 3 new unique files were sent. The 7 first-snapshot files also stay on air.
+- `t3-9e67b28e` was a live worktree (research-factory-378). It committed during the copy. Its first inventory listed 7 files, which it then committed or which main received. Its manifest was taken again, and its 3 new unique files were sent. The 7 first-snapshot files also stay on air. No manifest lists them, so `verify.sh` does not check them.
 - Other live worktrees can gain files after this inventory. Run the scripts again before a worktree is removed.
 - The air pool is on the same SSD as the worktrees. The copy survives a worktree removal, not a loss of the Air. The masters backup reads only the main checkout. vps-245 covers adding the worktrees and `~/Pool/masters` to the backup.
 - No file was copied into the masters main checkout. Lab seals and search boards differ per worktree, and copying them would overwrite main's.
