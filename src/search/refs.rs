@@ -697,17 +697,23 @@ pub fn list_texts(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, Str
             })),
         });
     }
-    if from_main > 0
-        && let Some(main) = resolver.main_checkout()
-    {
-        eprintln!(
-            "lab: search: this linked git worktree lacks {from_main} of the {} paper text(s), \
-             which git ignores; reading them from the main checkout {}",
-            docs.len(),
-            main.display()
-        );
-    }
-    Ok(Listing::complete(docs).with_notices(reg.notices(ctx)))
+    let info = resolver
+        .main_checkout()
+        .filter(|_| from_main > 0)
+        .map(|main| {
+            format!(
+                "this linked git worktree lacks {from_main} of the {} paper text(s), \
+                 which git ignores; reading them from the main checkout {}",
+                docs.len(),
+                main.display()
+            )
+        })
+        .into_iter()
+        .collect();
+    Ok(Listing {
+        info,
+        ..Listing::complete(docs).with_notices(reg.notices(ctx))
+    })
 }
 
 /// The passages of a text: within the sections of its structure file

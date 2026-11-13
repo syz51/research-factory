@@ -43,6 +43,9 @@ pub struct Listing {
     pub docs: Vec<Doc>,
     /// Why the answer from this scope may be incomplete.
     pub notices: Vec<String>,
+    /// What a reader should know that leaves the answer complete, such as
+    /// texts read from the main checkout. Only `lab search` prints it.
+    pub info: Vec<String>,
     /// false: some sources could not be listed, so stored ones that are not
     /// listed stay in the index.
     pub complete: bool,
@@ -53,6 +56,7 @@ impl Listing {
         Self {
             docs,
             notices: Vec::new(),
+            info: Vec::new(),
             complete: true,
         }
     }
@@ -61,8 +65,25 @@ impl Listing {
         Self {
             docs: Vec::new(),
             notices: vec![notice],
+            info: Vec::new(),
             complete: false,
         }
+    }
+}
+
+/// What the listings of the scopes a query searches said.
+#[derive(Default)]
+pub struct Said {
+    /// Why the answer may be incomplete: `Listing::notices`.
+    pub notices: Vec<String>,
+    /// `Listing::info`.
+    pub info: Vec<String>,
+}
+
+impl Said {
+    pub fn add(&mut self, listing: &Listing) {
+        self.notices.extend(listing.notices.iter().cloned());
+        self.info.extend(listing.info.iter().cloned());
     }
 }
 
