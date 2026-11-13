@@ -34,8 +34,17 @@
 set -u
 
 command -v jq >/dev/null 2>&1 || exit 0
-input=$(cat) || exit 0
-get() { printf '%s' "$input" | jq -r "$1" 2>/dev/null; }
+# One jq call reads the tool, its directory and its command or path, one per
+# line; the command or path is last, as it can hold newlines. The `.` keeps
+# empty lines at the end.
+nl='
+'
+fields=$(jq -r '.tool_name // "", .cwd // "", .tool_input.command // .tool_input.file_path // .tool_input.notebook_path // ""' 2>/dev/null && echo .) || exit 0
+fields=${fields%"$nl".}
+tool=${fields%%"$nl"*}
+fields=${fields#*"$nl"}
+cwd=${fields%%"$nl"*}
+arg=${fields#*"$nl"}
 
 deny() {
     msg="Refused: this would delete or edit a stored check run ($1). Stored check runs in .research/lab/checks/ are never deleted or edited (research-factory skill, \"Before reporting done\", step 1). A rerun supersedes an earlier run without removing it: commit every run of the session, superseded ones included. Only a person may remove one, outside the agent."
@@ -43,15 +52,12 @@ deny() {
     exit 0
 }
 
-tool=$(get '.tool_name // ""')
-cwd=$(get '.cwd // ""')
 [ -n "$cwd" ] || cwd=$(pwd)
 
 case "$tool" in
     Edit | Write | MultiEdit | NotebookEdit)
-        path=$(get '.tool_input.file_path // .tool_input.notebook_path // ""')
-        case "$path" in
-            */.research/lab/checks/* | .research/lab/checks/*) deny "$tool $path" ;;
+        case "$arg" in
+            */.research/lab/checks/* | .research/lab/checks/*) deny "$tool $arg" ;;
         esac
         exit 0
         ;;
@@ -59,8 +65,11 @@ case "$tool" in
     *) exit 0 ;;
 esac
 
-cmd=$(get '.tool_input.command // ""')
+cmd=$arg
 [ -n "$cmd" ] || exit 0
+# Each refusal below needs one of these words as a command word (also after a
+# `/`), or names .research/lab/checks, so most commands stop here.
+printf '%s\n' "$cmd" | grep -Eq '(^|[[:space:];|&<>/(!{])(rm|rmdir|unlink|shred|truncate|mv|git|sed|perl|find|cp|install|ln|tee|dd)([[:space:];|&<>]|$)|\.research/lab/checks' || exit 0
 
 # The command with `;`, `|`, `&`, `<` and `>` inside quotes replaced by
 # spaces, so that quoted text is not split or read as a redirect.
