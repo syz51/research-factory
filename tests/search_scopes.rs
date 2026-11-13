@@ -615,6 +615,23 @@ fn a_linked_worktree_reads_ignored_texts_from_the_main_checkout() {
     assert_eq!(hit["key"], "16");
     assert_eq!(hit["path"], "sources/texts/16.txt");
     assert_eq!(hit["info"]["structure"], "used");
+    // lab says on stderr that the texts come from the main checkout; the
+    // main checkout, which has them, says nothing.
+    let said = "paper text(s), which git ignores; reading them from the main checkout";
+    let o = lab(&linked, &["search", "--rebuild", "--in", "texts"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("lab: this linked git worktree lacks ")
+            && stderr(&o).matches(said).count() == 1,
+        "{}",
+        stderr(&o)
+    );
+    // A query says it once too.
+    let o = lab(&linked, &["search", "--in", "texts", "annealing"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stderr(&o).matches(said).count(), 1, "{}", stderr(&o));
+    let o = lab(&main, &["search", "--rebuild", "--in", "texts"]);
+    assert!(!stderr(&o).contains(said), "{}", stderr(&o));
 }
 
 /// The config with `board_export` in `[lab.archive]` and, when given, in

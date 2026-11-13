@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
-use super::sources::{self, Doc, Loader, Resolver};
+use super::sources::{self, Doc, Loader, Resolver, Said};
 use super::{Context, Scope, graph};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
@@ -136,6 +136,8 @@ pub struct Opened {
     /// Why the answer from a scope may be incomplete: a source that could not
     /// be read, a derivative that is stale.
     pub notices: Vec<String>,
+    /// What the listings said that leaves the answer complete: `Listing::info`.
+    pub info: Vec<String>,
 }
 
 /// The session messages left out of the `sessions` scope, by rule.
@@ -185,12 +187,14 @@ pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
     for _ in 0..3 {
         if !force && let Some(mut conn) = open_current(ctx)? {
             match refresh(ctx, &mut conn) {
-                Ok((stale, mut notices)) => {
-                    notices.extend(stale_notices(ctx, &conn).map_err(String::from)?);
+                Ok((stale, mut said)) => {
+                    said.notices
+                        .extend(stale_notices(ctx, &conn).map_err(String::from)?);
                     return Ok(Opened {
                         conn,
                         stale,
-                        notices,
+                        notices: said.notices,
+                        info: said.info,
                     });
                 }
                 // Open the file that replaced it.
@@ -200,14 +204,16 @@ pub fn open(ctx: &Context, rebuild: bool) -> Result<Opened, String> {
             }
         }
         // A build lists every scope; refreshing at once would list them again.
-        if let Some(mut notices) = build(ctx, force)?
+        if let Some(mut said) = build(ctx, force)?
             && let Some(conn) = open_current(ctx)?
         {
-            notices.extend(stale_notices(ctx, &conn).map_err(String::from)?);
+            said.notices
+                .extend(stale_notices(ctx, &conn).map_err(String::from)?);
             return Ok(Opened {
                 conn,
                 stale: None,
-                notices,
+                notices: said.notices,
+                info: said.info,
             });
         }
         force = false;
@@ -269,9 +275,9 @@ fn try_lock(ctx: &Context) -> Result<Option<File>, String> {
 }
 
 /// Builds the index in a new file and renames it over the old one, and
-/// returns the notices of its listings. Without `force`, an index that another
+/// returns what its listings said. Without `force`, an index that another
 /// process built while this one waited for the lock is kept: `None`.
-fn build(ctx: &Context, force: bool) -> Result<Option<Vec<String>>, String> {
+fn build(ctx: &Context, force: bool) -> Result<Option<Said>, String> {
     let waited = Instant::now();
     let _lock = loop {
         if let Some(lock) = try_lock(ctx)? {
@@ -292,11 +298,11 @@ fn build(ctx: &Context, force: bool) -> Result<Option<Vec<String>>, String> {
     let path = db_path(ctx);
     let tmp = ctx.dir.join(format!("index.db.tmp-{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let built = write_new(ctx, &tmp).and_then(|notices| {
+    let built = write_new(ctx, &tmp).and_then(|said| {
         // A journal that a crashed writer left belongs to the file being replaced.
         let _ = std::fs::remove_file(ctx.dir.join("index.db-journal"));
         std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Some(notices))
+        Ok(Some(said))
     });
     if built.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -339,10 +345,10 @@ fn set_built(tx: &Transaction, scopes: &BTreeSet<Scope>) -> rusqlite::Result<()>
     Ok(())
 }
 
-/// A new index of the scopes the query searches, and the notices of their
-/// listings.
-fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
-    let run = || -> Result<Vec<String>, Fault> {
+/// A new index of the scopes the query searches, and what their listings
+/// said.
+fn write_new(ctx: &Context, tmp: &Path) -> Result<Said, String> {
+    let run = || -> Result<Said, Fault> {
         let mut conn = Connection::open(tmp)?;
         // The file is thrown away on failure, so it needs no journal.
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
@@ -361,13 +367,13 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         )?;
         let mut resolver = Resolver::new(&ctx.project.root)?;
         let mut loader = Loader::new(ctx);
-        let mut notices = Vec::new();
+        let mut said = Said::default();
         for &scope in &ctx.scopes {
             let listing = sources::list(ctx, scope, &mut resolver)?;
             for doc in &listing.docs {
                 index_doc(ctx, &tx, &mut loader, doc, None)?;
             }
-            notices.extend(listing.notices);
+            said.add(&listing);
         }
         if let Some(papers) = graph::papers_changed(ctx, &tx)? {
             graph::write_papers(&tx, &papers)?;
@@ -383,7 +389,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Vec<String>, String> {
         set_built(&tx, &ctx.scopes.iter().copied().collect())?;
         sync_words(&tx)?;
         tx.commit()?;
-        Ok(notices)
+        Ok(said)
     };
     run().map_err(String::from)
 }
@@ -399,15 +405,15 @@ struct Change<'d> {
 /// Brings the index up to the sources of the scopes the query searches:
 /// removes the units of sources that are gone, reads the sources whose stamp
 /// changed and adds a scope the index lacks. Returns why the index is still
-/// stale, when it is, and the notices of the listings.
-fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<String>), Fault> {
+/// stale, when it is, and what the listings said.
+fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Said), Fault> {
     let have = built(conn)?;
     let mut resolver = Resolver::new(&ctx.project.root)?;
     let mut listings = Vec::new();
-    let mut notices = Vec::new();
+    let mut said = Said::default();
     for &scope in &ctx.scopes {
         let listing = sources::list(ctx, scope, &mut resolver)?;
-        notices.extend(listing.notices.iter().cloned());
+        said.add(&listing);
         listings.push((scope, listing));
     }
     let mut changed: Vec<Change> = Vec::new();
@@ -448,7 +454,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
     let new_scopes = ctx.scopes.iter().any(|s| !have.contains(s));
     let papers = graph::papers_changed(ctx, conn)?;
     if changed.is_empty() && gone.is_empty() && !new_scopes && papers.is_none() {
-        return Ok((None, notices));
+        return Ok((None, said));
     }
     let pending = changed.len() + gone.len();
     let Some(_lock) = try_lock(ctx)? else {
@@ -461,7 +467,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
             Some(format!(
                 "another process is updating the index; {what} not in it yet"
             )),
-            notices,
+            said,
         ));
     };
     // A build may have renamed a new file over the one this connection
@@ -508,7 +514,7 @@ fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Vec<
                 ctx.cfg.refresh_budget_ms
             )
         }),
-        notices,
+        said,
     ))
 }
 

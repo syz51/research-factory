@@ -651,6 +651,8 @@ pub fn list_texts(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, Str
     // Entries that are not marked duplicates may still share one text: the
     // first of them owns it.
     let mut seen = std::collections::HashSet::new();
+    // Texts that this linked worktree lacks and reads from the main checkout.
+    let mut from_main = 0;
     for (root, dups) in reg.groups() {
         let e = &reg.entries[root];
         let texts = std::iter::once(root)
@@ -667,6 +669,9 @@ pub fn list_texts(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, Str
         let Some(text_stamp) = file_stamp(&file) else {
             continue;
         };
+        if file != ctx.project.root.join(&t.path) {
+            from_main += 1;
+        }
         let stamp = format!(
             "{text_stamp}|{}|{}|{}|{:?}",
             sidecar
@@ -692,7 +697,23 @@ pub fn list_texts(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, Str
             })),
         });
     }
-    Ok(Listing::complete(docs).with_notices(reg.notices(ctx)))
+    let info = resolver
+        .main_checkout()
+        .filter(|_| from_main > 0)
+        .map(|main| {
+            format!(
+                "this linked git worktree lacks {from_main} of the {} paper text(s), \
+                 which git ignores; reading them from the main checkout {}",
+                docs.len(),
+                main.display()
+            )
+        })
+        .into_iter()
+        .collect();
+    Ok(Listing {
+        info,
+        ..Listing::complete(docs).with_notices(reg.notices(ctx))
+    })
 }
 
 /// The passages of a text: within the sections of its structure file

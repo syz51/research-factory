@@ -547,6 +547,8 @@ pub(crate) struct Answer {
     pub more: usize,
     pub unknown: Vec<Unknown>,
     pub partial: Vec<String>,
+    /// What the listings said that leaves the answer complete: `Listing::info`.
+    pub info: Vec<String>,
     pub expansions: Vec<Expansion>,
     /// The best units of the lexical stage before grouping.
     pub candidates: Vec<(String, f64)>,
@@ -677,6 +679,9 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         let scopes = requested(&args.scopes, &project.lab.search.default_scopes)?;
         let ctx = Context::new(project, scopes)?;
         let opened = index::open(&ctx, true)?;
+        for line in &opened.info {
+            eprintln!("lab: {line}");
+        }
         for notice in &opened.notices {
             eprintln!("lab: partial: {notice}");
         }
@@ -727,6 +732,9 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         for hit in &mut answer.hits {
             hit.explain = None;
         }
+    }
+    for line in &answer.info {
+        eprintln!("lab: {line}");
     }
     for notice in &answer.partial {
         eprintln!("lab: partial: {notice}");
@@ -885,7 +893,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
         }
     }
     let mut rebuild = req.rebuild;
-    let (outcome, stale, notices, weights) = loop {
+    let (outcome, stale, notices, info, weights) = loop {
         let opened = index::open(&ctx, rebuild)?;
         let filter = filters.units_sql(&opened.conn)?;
         let opts = query::Options {
@@ -905,7 +913,9 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
             Ok((outcome, weights))
         });
         match searched {
-            Ok((outcome, weights)) => break (outcome, opened.stale, opened.notices, weights),
+            Ok((outcome, weights)) => {
+                break (outcome, opened.stale, opened.notices, opened.info, weights);
+            }
             // Corruption that only a query met: build anew, once.
             Err(index::Fault::Corrupt(_)) if !rebuild => rebuild = true,
             Err(e) => return Err(e.into()),
@@ -951,6 +961,7 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
         more,
         unknown,
         partial,
+        info,
         expansions,
         candidates,
         missing_stages,
