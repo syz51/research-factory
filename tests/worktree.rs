@@ -196,6 +196,83 @@ fn check_in_a_linked_worktree_finds_ignored_files_in_the_main_checkout() {
     }
 }
 
+/// Reports `data/text.txt`, a file no argument names (as a registry names a
+/// source text): a warning with the file as evidence when it is missing.
+const TEXTS: &str = r#"[ -f data/text.txt ] && exit 0
+printf '{"schema":"rf.finding/1","tool":"texts","rule":"source-text-missing","severity":"warn","subject":"docs/a.md:1","message":"no source text","evidence":[{"path":"data/text.txt"}]}\n'
+"#;
+
+#[test]
+fn a_worktree_that_lacks_a_named_ignored_file_stores_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, w) = setup(ceiling);
+    std::fs::set_permissions(m.join("private"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = |d: &Path| run(LAB, d, ceiling, &["check", "--only", "texts"]);
+    let runs = |d: &Path| {
+        std::fs::read_dir(d.join(".research/lab/checks"))
+            .map(|r| r.count())
+            .unwrap_or(0)
+    };
+    for d in [&m, &w] {
+        let cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+        write(
+            d,
+            "research.toml",
+            &format!("{cfg}\n[[lab.checks]]\nname = \"texts\"\nrun = [\"sh\", \"texts.sh\"]\n"),
+        );
+        write(d, "texts.sh", TEXTS);
+    }
+    write(&m, "data/text.txt", "text\n");
+
+    // The main checkout has the text; the worktree lacks it, so its finding
+    // is not the main checkout's and no run is stored.
+    let out = lab(&w);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    let e = stderr(&out);
+    assert!(
+        e.contains("this linked git worktree lacks 1 git-ignored file(s) that the findings name")
+            && e.contains("such as data/text.txt")
+            && e.contains("no run is stored"),
+        "{e}"
+    );
+    assert_eq!(runs(&w), 0);
+
+    // A file missing in both checkouts is a finding of both.
+    std::fs::remove_file(m.join("data/text.txt")).unwrap();
+    let out = lab(&w);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert_eq!(runs(&w), 1, "{}", stdout(&out));
+
+    // Once the worktree has the main checkout's file, the run is stored.
+    write(&m, "data/text.txt", "text\n");
+    write(&w, "data/text.txt", "text\n");
+    let out = lab(&w);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).contains("stored "), "{}", stdout(&out));
+    assert_eq!(runs(&w), 2);
+    let out = lab(&m);
+    assert!(!stderr(&out).contains("lacks"), "{}", stderr(&out));
+}
+
 #[test]
 fn a_replay_does_not_look_in_the_main_checkout() {
     let dir = tempfile::tempdir().unwrap();
