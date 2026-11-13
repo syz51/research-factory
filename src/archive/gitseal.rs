@@ -12,7 +12,7 @@
 //! was clean in `<state_dir>/lab/archive-git-seal.json` and starts there next
 //! time. A missing, unreadable or unfitting cache means a full check.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -102,6 +102,67 @@ fn prefix(root: &Path) -> Option<String> {
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// The paths `git ls-files -z <args>` lists in `root`; `None` outside a git
+/// work tree or without git.
+fn listed(root: &Path, args: &[&str]) -> Result<Option<BTreeSet<String>>, String> {
+    let out = match command(root)
+        .arg("ls-files")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("git ls-files: {e}")),
+    };
+    let err = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        if err.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(format!("git ls-files: {}", err.trim()));
+    }
+    Ok(Some(
+        out.stdout
+            .split(|&b| b == 0)
+            .filter(|p| !p.is_empty())
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect(),
+    ))
+}
+
+/// Of the files at or below `paths`, relative to `root`, those that git
+/// neither tracks nor ignores, for each path that is not a tracked file and
+/// holds no tracked file. Git walks only the directories that lead to those
+/// paths, so a large ignored tree costs nothing. Empty outside a git work
+/// tree or without git.
+pub(super) fn untracked(root: &Path, paths: &BTreeSet<String>) -> Result<BTreeSet<String>, String> {
+    let Some(tracked) = listed(root, &["-z"])? else {
+        return Ok(BTreeSet::new());
+    };
+    let specs: Vec<String> = paths
+        .iter()
+        .filter(|p| {
+            let under = format!("{p}/");
+            !p.is_empty()
+                && !tracked.contains(p.as_str())
+                && !tracked
+                    .range(under.clone()..)
+                    .next()
+                    .is_some_and(|f| f.starts_with(&under))
+        })
+        .map(|p| format!(":(literal){p}"))
+        .collect();
+    let mut found = BTreeSet::new();
+    // Bounded so that the arguments stay well below the system's limit.
+    for chunk in specs.chunks(1000) {
+        let mut args = vec!["--others", "--exclude-standard", "-z", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        found.extend(listed(root, &args)?.unwrap_or_default());
+    }
+    Ok(found)
 }
 
 /// The record ids in the tree of `rev`, derived as `Spec::records` derives
@@ -261,7 +322,8 @@ impl Blobs {
         })
     }
 
-    /// The object `name` (a hash, or `HEAD:path`); `None` when it does not exist.
+    /// The blob `name` (a hash, or `HEAD:path`); `None` when it does not
+    /// exist or is not a blob, as `git cat-file blob` fails then.
     fn get(&mut self, name: &str) -> Result<Option<Vec<u8>>, String> {
         let err = |e: std::io::Error| format!("git cat-file {name}: {e}");
         writeln!(self.stdin, "{name}").map_err(err)?;
@@ -281,7 +343,7 @@ impl Blobs {
         let mut bytes = vec![0; size + 1];
         self.out.read_exact(&mut bytes).map_err(err)?;
         bytes.pop();
-        Ok(Some(bytes))
+        Ok((header.split(' ').nth(1) == Some("blob")).then_some(bytes))
     }
 }
 
@@ -626,93 +688,140 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
     Ok(std::mem::take(&mut checker.out))
 }
 
-/// How many bytes of `body`, the body of `file` now, are sealed: the length
-/// of its body at `HEAD`, when the file is sealed there and `body` still
-/// starts with that text.
-pub(super) fn sealed_len(spec: &Spec, file: &str, body: &[u8]) -> Result<Option<usize>, String> {
-    let Some(at_head) = sealed_at_head(spec, file)? else {
-        return Ok(None);
-    };
-    let head = front::sealed_body(&at_head);
-    Ok(body.starts_with(head).then_some(head.len()))
+/// Reads files as they are at one commit, and whether each is sealed there,
+/// for many files: the project's place in the repository, the baseline and
+/// one `git cat-file --batch` process serve them all, and each file is read
+/// once.
+pub(super) struct AtRev<'a> {
+    spec: &'a Spec<'a>,
+    rev: String,
+    /// The project root relative to the top of the work tree, found on first
+    /// use; `Some(None)` outside a git work tree.
+    prefix: Option<Option<String>>,
+    /// `seal_baseline` when `rev` contains it, found on first use.
+    baseline: Option<Option<String>>,
+    blobs: Option<Blobs>,
+    /// The content at `rev` of each file asked for, when it is sealed there.
+    sealed: BTreeMap<String, Option<Vec<u8>>>,
 }
 
-/// The content of `file` at `HEAD` when it is sealed there.
-pub(super) fn sealed_at_head(spec: &Spec, file: &str) -> Result<Option<Vec<u8>>, String> {
-    let root = spec.root();
-    let Some(prefix) = prefix(root) else {
-        return Ok(None);
-    };
-    let out = run(
-        root,
-        &["cat-file", "blob", &format!("HEAD:{prefix}{file}")],
-        b"",
-    )?;
-    if !out.status.success() {
-        return Ok(None);
+impl<'a> AtRev<'a> {
+    pub(super) fn new(spec: &'a Spec<'a>, rev: &str) -> Self {
+        Self {
+            spec,
+            rev: rev.into(),
+            prefix: None,
+            baseline: None,
+            blobs: None,
+            sealed: BTreeMap::new(),
+        }
     }
-    let sealed = spec.sealed.matches(file)
-        || front::status_of(&out.stdout).is_some_and(|s| spec.cfg.sealed_statuses.contains(&s))
-        || status_sealed_by(spec, "HEAD", file)?;
-    Ok(sealed.then_some(out.stdout))
-}
 
-/// Whether `file`, a record relative to the project root, had a status in
-/// `sealed_statuses` in a version up to `rev`, as the history check reads
-/// them: the version at `seal_baseline`, when set and an ancestor of `rev`,
-/// and each version a later commit made. A record sealed by status stays
-/// sealed when a later commit changes its status; a file in no index is
-/// never sealed by status.
-pub(super) fn status_sealed_by(spec: &Spec, rev: &str, file: &str) -> Result<bool, String> {
-    let cfg = spec.cfg;
-    let root = spec.root();
-    if cfg.sealed_statuses.is_empty() || !spec.indexes.iter().any(|i| i.files.matches(file)) {
-        return Ok(false);
-    }
-    let Some(prefix) = prefix(root) else {
-        return Ok(false);
-    };
-    let path = format!("{prefix}{file}");
-    let baseline = match &cfg.seal_baseline {
-        None => None,
-        Some(b) => Some(commit(root, b)?.ok_or_else(|| {
-            format!("[lab.archive] seal_baseline `{b}` is not a commit in this repository")
-        })?),
-    };
-    // A baseline that `rev` does not contain bounds nothing before `rev`.
-    let baseline = match baseline {
-        Some(b)
-            if run(root, &["merge-base", "--is-ancestor", &b, rev], b"")?
-                .status
-                .success() =>
-        {
-            Some(b)
+    /// The content of `file`, relative to the project root, at `rev` when
+    /// the file is sealed there: it matches `sealed`, or its status there or
+    /// in an earlier version is one of `sealed_statuses`.
+    pub(super) fn sealed(&mut self, file: &str) -> Result<Option<&[u8]>, String> {
+        if !self.sealed.contains_key(file) {
+            let content = self.read_sealed(file)?;
+            self.sealed.insert(file.to_string(), content);
         }
-        _ => None,
-    };
-    let range = match &baseline {
-        Some(b) => format!("{b}..{rev}"),
-        None => rev.to_string(),
-    };
-    let log = output(
-        root,
-        &["log", "--full-history", "--format=%H", &range, "--", &path],
-        b"",
-    )?;
-    let mut blobs = Blobs::open(root)?;
-    for c in String::from_utf8_lossy(&log)
-        .split_whitespace()
-        .chain(baseline.as_deref())
-    {
-        if blobs
-            .get(&format!("{c}:{path}"))?
-            .and_then(|b| front::status_of(&b))
-            .is_some_and(|s| cfg.sealed_statuses.contains(&s))
-        {
-            return Ok(true);
-        }
+        Ok(self.sealed[file].as_deref())
     }
-    Ok(false)
+
+    fn read_sealed(&mut self, file: &str) -> Result<Option<Vec<u8>>, String> {
+        let spec = self.spec;
+        let Some(prefix) = self
+            .prefix
+            .get_or_insert_with(|| prefix(spec.root()))
+            .clone()
+        else {
+            return Ok(None);
+        };
+        let path = format!("{prefix}{file}");
+        let Some(bytes) = self.blob(&format!("{}:{path}", self.rev))? else {
+            return Ok(None);
+        };
+        let sealed = spec.sealed.matches(file)
+            || front::status_of(&bytes).is_some_and(|s| spec.cfg.sealed_statuses.contains(&s))
+            || self.status_sealed_by(file, &path)?;
+        Ok(sealed.then_some(bytes))
+    }
+
+    /// The blob `name` names, such as `HEAD:path`; `None` when there is none.
+    fn blob(&mut self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let root = self.spec.root();
+        if name.contains('\n') {
+            // `git cat-file --batch` reads one name per line.
+            let out = run(root, &["cat-file", "blob", name], b"")?;
+            return Ok(out.status.success().then_some(out.stdout));
+        }
+        if self.blobs.is_none() {
+            self.blobs = Some(Blobs::open(root)?);
+        }
+        self.blobs.as_mut().expect("opened above").get(name)
+    }
+
+    /// Whether `file`, a record relative to the project root at `path` in the
+    /// repository, had a status in `sealed_statuses` in a version up to
+    /// `rev`, as the history check reads them: the version at
+    /// `seal_baseline`, when set and an ancestor of `rev`, and each version a
+    /// later commit made. A record sealed by status stays sealed when a later
+    /// commit changes its status; a file in no index is never sealed by status.
+    fn status_sealed_by(&mut self, file: &str, path: &str) -> Result<bool, String> {
+        let spec = self.spec;
+        let cfg = spec.cfg;
+        if cfg.sealed_statuses.is_empty() || !spec.indexes.iter().any(|i| i.files.matches(file)) {
+            return Ok(false);
+        }
+        let baseline = self.baseline()?;
+        let range = match &baseline {
+            Some(b) => format!("{b}..{}", self.rev),
+            None => self.rev.clone(),
+        };
+        let log = output(
+            spec.root(),
+            &["log", "--full-history", "--format=%H", &range, "--", path],
+            b"",
+        )?;
+        for c in String::from_utf8_lossy(&log)
+            .split_whitespace()
+            .chain(baseline.as_deref())
+        {
+            if self
+                .blob(&format!("{c}:{path}"))?
+                .and_then(|b| front::status_of(&b))
+                .is_some_and(|s| cfg.sealed_statuses.contains(&s))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// `seal_baseline` as a commit when `rev` contains it: a baseline that
+    /// `rev` does not contain bounds nothing before `rev`.
+    fn baseline(&mut self) -> Result<Option<String>, String> {
+        if let Some(b) = &self.baseline {
+            return Ok(b.clone());
+        }
+        let root = self.spec.root();
+        let found = match &self.spec.cfg.seal_baseline {
+            None => None,
+            Some(name) => {
+                let b = commit(root, name)?.ok_or_else(|| {
+                    format!(
+                        "[lab.archive] seal_baseline `{name}` is not a commit in this repository"
+                    )
+                })?;
+                run(root, &["merge-base", "--is-ancestor", &b, &self.rev], b"")?
+                    .status
+                    .success()
+                    .then_some(b)
+            }
+        };
+        self.baseline = Some(found.clone());
+        Ok(found)
+    }
 }
 
 /// `git log` of one file, oldest change last: for `lab archive log <record>`.
@@ -747,5 +856,72 @@ mod tests {
         assert_eq!(summary, [("aaaa", b'M', "a.md"), ("bbbb", b'A', "c d.md")]);
         assert_eq!((got[0].old.as_str(), got[0].new.as_str()), ("1111", "2222"));
         assert!(changes(b":100644 M\0a.md\0", "").is_err());
+    }
+
+    /// A git repository with `files` committed in `root`.
+    fn repo(root: &Path, files: &[&str]) {
+        let git = |args: &[&str]| assert!(command(root).args(args).status().unwrap().success());
+        git(&["init", "-q"]);
+        for f in files {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "x\n").unwrap();
+        }
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "c",
+        ]);
+    }
+
+    #[test]
+    fn reads_blobs_and_no_other_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        repo(root, &["d/a.md"]);
+        let mut blobs = Blobs::open(root).unwrap();
+        assert_eq!(
+            blobs.get("HEAD:d/a.md").unwrap().as_deref(),
+            Some(&b"x\n"[..])
+        );
+        // `git cat-file blob` fails on a tree, so the batch answer is none too.
+        assert_eq!(blobs.get("HEAD:d").unwrap(), None);
+        assert_eq!(blobs.get("HEAD:d/none.md").unwrap(), None);
+        assert_eq!(
+            blobs.get("HEAD:d/a.md").unwrap().as_deref(),
+            Some(&b"x\n"[..])
+        );
+    }
+
+    #[test]
+    fn lists_untracked_files_only_at_or_below_paths_that_hold_nothing_tracked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        repo(root, &["t/a.md", ".gitignore"]);
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        for f in ["t/new.md", "u/b.md", "u/c.log", "n.md", "other/x.md"] {
+            std::fs::create_dir_all(root.join(f).parent().unwrap()).unwrap();
+            std::fs::write(root.join(f), "x\n").unwrap();
+        }
+        let paths = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let got = untracked(root, &paths(&["t", "t/a.md", "u", "n.md", "gone.md", ""])).unwrap();
+        // `t` holds a tracked file, so its untracked file is not listed for it;
+        // `other` is not asked for.
+        assert_eq!(got, paths(&["n.md", "u/b.md"]));
+        let got = untracked(root, &paths(&["t/new.md"])).unwrap();
+        assert_eq!(got, paths(&["t/new.md"]));
+        let outside = tempfile::tempdir().unwrap();
+        assert!(
+            untracked(outside.path(), &paths(&["a"]))
+                .unwrap()
+                .is_empty()
+        );
     }
 }
