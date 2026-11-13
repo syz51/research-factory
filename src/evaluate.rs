@@ -2640,6 +2640,10 @@ mod tests {
     /// Three intervals of 100 new sentences on each side of adoption
     /// (2026-11-03), with `before` and `after` findings introduced in each.
     fn three_and_three(before: usize, after: usize) -> Vec<Run> {
+        measured_runs(&three_and_three_steps(before, after))
+    }
+
+    fn three_and_three_steps(before: usize, after: usize) -> Vec<(&'static str, u64, usize)> {
         let mut steps = Vec::new();
         let mut found = 0;
         for (i, day) in ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"]
@@ -2656,7 +2660,36 @@ mod tests {
             found += after;
             steps.push((day, 400 + 100 * i as u64, found));
         }
-        measured_runs(&steps)
+        steps
+    }
+
+    #[test]
+    fn a_verifying_run_changes_no_interval() {
+        // A check of a merged head repeats the run before it, at the commit
+        // that adds that run: the same units and findings, at another commit.
+        // lab 0.23.0 stores no such run; one stored earlier counts the same.
+        let steps = three_and_three_steps(10, 3);
+        let verified: Vec<_> = steps.iter().flat_map(|&s| [s, s]).collect();
+        let without = eval_min(&measured_runs(&steps), 3);
+        let with = eval_min(&measured_runs(&verified), 3);
+        let sides =
+            |e: &Evaluation| [&e.before, &e.after].map(|s| (s.n, s.findings, s.new_units, s.rate));
+        assert_eq!(sides(&with), sides(&without));
+        assert_eq!(
+            sides(&without),
+            [
+                (3, Some(30), Some(300), Some(0.1)),
+                (3, Some(9), Some(300), Some(0.03))
+            ]
+        );
+        assert_eq!(
+            (with.verdict, with.p_lower, with.p_upper),
+            (without.verdict, without.p_lower, without.p_upper)
+        );
+        assert_eq!(
+            with.introduced.map(|i| i.count),
+            without.introduced.map(|i| i.count)
+        );
     }
 
     #[test]

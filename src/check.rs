@@ -59,7 +59,7 @@ impl Measure {
 }
 
 /// A stored `rf.measure/1` record with the check that printed it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MeasureItem {
     pub schema: String,
     pub check: String,
@@ -212,6 +212,18 @@ pub fn history_with_replays(project: &Project) -> Result<Vec<Run>, String> {
 }
 
 fn load_runs(project: &Project, replays: bool) -> Result<Vec<Run>, String> {
+    let mut runs = Vec::new();
+    for path in &run_paths(project)? {
+        // A replayed run is left out by its header, before its lines are parsed.
+        if let Some(run) = Run::read(path, replays)? {
+            runs.push(run);
+        }
+    }
+    Ok(runs)
+}
+
+/// The stored run files, in the order they were stored.
+fn run_paths(project: &Project) -> Result<Vec<PathBuf>, String> {
     let dir = project.checks_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -226,14 +238,7 @@ fn load_runs(project: &Project, replays: bool) -> Result<Vec<Run>, String> {
         }
     }
     paths.sort_by_cached_key(|p| run_order(p));
-    let mut runs = Vec::new();
-    for path in &paths {
-        // A replayed run is left out by its header, before its lines are parsed.
-        if let Some(run) = Run::read(path, replays)? {
-            runs.push(run);
-        }
-    }
-    Ok(runs)
+    Ok(paths)
 }
 
 /// `<stamp>.jsonl` sorts before `<stamp>-1.jsonl`, which sorts before `<stamp>-2.jsonl`.
@@ -456,7 +461,12 @@ pub struct Delta {
 }
 
 pub struct Report {
+    /// The run; when it was not stored, its `path` is the stored run it repeats.
     pub run: Run,
+    /// `None` when the run was stored. When it repeats the newest stored run
+    /// (see `repeats`) and was not stored, the number of findings that are
+    /// in one of the two runs and not in the other.
+    pub not_stored: Option<usize>,
     /// Per check that ran: the change since that check's baseline, or `None`
     /// when it has no baseline.
     pub delta: BTreeMap<String, Option<Delta>>,
@@ -483,6 +493,18 @@ fn git(project: &Project, args: &[&str]) -> Result<Option<std::process::Output>,
     Ok(Some(out))
 }
 
+/// A pathspec that leaves out the state directory: tool-owned state, such as
+/// a run's own file, is not checked text. A state directory outside the root
+/// is outside the `.` pathspec anyway.
+fn state_exclude(project: &Project) -> Option<String> {
+    project
+        .state_dir
+        .strip_prefix(&project.root)
+        .ok()
+        .filter(|p| crate::config::below_root(p))
+        .map(|p| format!(":(exclude,literal){}", p.display()))
+}
+
 /// The `HEAD` commit of the git repository holding the project root, and
 /// whether the files under the root differ from it, leaving out the state
 /// directory; `(None, None)` when git is missing, the root is not in a
@@ -496,14 +518,7 @@ fn git_state(project: &Project) -> Result<(Option<String>, Option<bool>), String
             String::from_utf8_lossy(&out.stderr).trim()
         )
     };
-    // Tool-owned state, such as this run's own file, is not checked text. A
-    // state directory outside the root is outside the pathspec anyway.
-    let exclude = project
-        .state_dir
-        .strip_prefix(&project.root)
-        .ok()
-        .filter(|p| crate::config::below_root(p))
-        .map(|p| format!(":(exclude,literal){}", p.display()));
+    let exclude = state_exclude(project);
     // No optional locks, so a background run never blocks the user's own git
     // commands; untracked files are listed whatever the user's config says.
     let mut args = vec![
@@ -769,7 +784,31 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         replayed: false,
         checks: Vec::new(),
     };
-    let run = store_run(project, header, ran)?;
+    let same = repeats(project, &header, &ran).unwrap_or_else(|e| {
+        eprintln!("lab: the run is stored, since the newest stored run could not be read: {e}");
+        None
+    });
+    let (run, not_stored) = match same {
+        Some((path, differing)) => {
+            let Ran {
+                outcomes,
+                items,
+                measures,
+            } = ran;
+            let header = RunHeader {
+                checks: outcomes,
+                ..header
+            };
+            let run = Run {
+                path,
+                header,
+                items,
+                measures,
+            };
+            (run, Some(differing))
+        }
+        None => (store_run(project, header, ran)?, None),
+    };
     let mut delta = BTreeMap::new();
     for outcome in run.header.checks.iter().filter(|c| c.ran()) {
         let entry = baseline.checks.get(&outcome.name).map(|b| {
@@ -782,7 +821,130 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         });
         delta.insert(outcome.name.clone(), entry);
     }
-    Ok(Report { run, delta })
+    Ok(Report {
+        run,
+        delta,
+        not_stored,
+    })
+}
+
+/// The newest stored live run and the number of info findings that differ
+/// from it, when this clean run repeats it: that run is clean too, dated the
+/// same day in the project's zone, git finds no difference between the two
+/// commits outside the state directory, the same checks (names, commands,
+/// exits, statuses and versions, in order) measured the same units, and
+/// their error and warning findings are equal. Such a run checks no new
+/// text, and storing it would leave a file that needs one more commit, and
+/// so one more check: a check of a merged head whose own run is committed
+/// is one.
+///
+/// Only info findings may differ, such as a checkout path that a checker
+/// prints; the stored run stays the record of that text. `lab baseline set`
+/// and `--new-only` read errors and warnings, which are equal. `lab evaluate`
+/// counts the same new units: the interval between the two runs has none, so
+/// it is left out, and the next interval starts from the same measures. The
+/// same day keeps every run on the same side of an adoption date. Any doubt,
+/// such as a commit git cannot compare, stores the run.
+/// The header of a stored run, without reading the rest of the file.
+fn read_header(path: &Path) -> Result<RunHeader, String> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+        if !line.trim().is_empty() {
+            return serde_json::from_str(&line).map_err(|e| format!("{}:1: {e}", path.display()));
+        }
+    }
+    Err(format!("{}: empty check run", path.display()))
+}
+
+fn repeats(
+    project: &Project,
+    header: &RunHeader,
+    ran: &Ran,
+) -> Result<Option<(PathBuf, usize)>, String> {
+    let (Some(commit), Some(false)) = (header.commit.as_deref(), header.dirty) else {
+        return Ok(None);
+    };
+    // Headers only, so replays stored after the newest live run are not read
+    // in full.
+    let mut newest = None;
+    for path in run_paths(project)?.iter().rev() {
+        if !read_header(path)?.replayed {
+            newest = Run::read(path, false)?;
+            break;
+        }
+    }
+    let Some(prev) = newest else {
+        return Ok(None);
+    };
+    let (Some(prev_commit), Some(false)) = (prev.header.commit.as_deref(), prev.header.dirty)
+    else {
+        return Ok(None);
+    };
+    if project.date_of(&prev.header.at)? != project.date_of(&header.at)? {
+        return Ok(None);
+    }
+    let same_check = |a: &CheckOutcome, b: &CheckOutcome| {
+        a.name == b.name
+            && a.command == b.command
+            && a.exit == b.exit
+            && a.status == b.status
+            && a.version == b.version
+            && a.uncommitted_inputs == b.uncommitted_inputs
+    };
+    let same_checks = prev.header.checks.len() == ran.outcomes.len()
+        && prev
+            .header
+            .checks
+            .iter()
+            .zip(&ran.outcomes)
+            .all(|(a, b)| same_check(a, b));
+    if !same_checks || prev.measures != ran.measures {
+        return Ok(None);
+    }
+    if prev_commit != commit {
+        let mut args = vec![
+            "--no-optional-locks",
+            "diff",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            prev_commit,
+            commit,
+            "--",
+            ".",
+        ];
+        let exclude = state_exclude(project);
+        args.extend(exclude.as_deref());
+        // Exit 0: no difference. 1: a difference; anything else, such as a
+        // commit this repository lacks, cannot show the text is the same.
+        let same_text = git(project, &args)?.is_some_and(|out| out.status.code() == Some(0));
+        if !same_text {
+            return Ok(None);
+        }
+    }
+    // Findings counted by fingerprint, one side positive and the other
+    // negative; any error or warning left over stores the run.
+    let mut balance: BTreeMap<(&str, &str), (i64, Severity)> = BTreeMap::new();
+    for (items, sign) in [(&ran.items, 1), (&prev.items, -1)] {
+        for i in items {
+            let entry = balance
+                .entry((&i.check, &i.fingerprint))
+                .or_insert((0, i.finding.severity));
+            entry.0 += sign;
+        }
+    }
+    let mut differing = 0;
+    for (n, severity) in balance.values() {
+        if *n != 0 {
+            if *severity != Severity::Info {
+                return Ok(None);
+            }
+            differing += n.unsigned_abs() as usize;
+        }
+    }
+    Ok(Some((prev.path, differing)))
 }
 
 pub const BASELINE_SCHEMA: &str = "rf.labbaseline/1";

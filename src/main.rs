@@ -946,7 +946,22 @@ fn check(
             verbose,
         );
     }
-    println!("stored {}", run.path.display());
+    match report.not_stored {
+        None => println!("stored {}", run.path.display()),
+        Some(differing) => {
+            println!(
+                "not stored: the newest stored run {} checked the same text with the same checks \
+                 and measures",
+                run.path.display()
+            );
+            if differing > 0 {
+                println!(
+                    "{differing} info finding(s) differ from that run, such as a checkout path; \
+                     it stays the record of this text"
+                );
+            }
+        }
+    }
     Ok(if failing {
         ExitCode::from(1)
     } else {
