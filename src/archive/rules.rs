@@ -121,6 +121,10 @@ pub(super) fn invalid_problem(r: &Record) -> Option<Problem> {
 }
 
 pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
+    // The board export runs while the files are walked and read.
+    let board = (spec.cfg.model >= 2)
+        .then(|| super::meta_rules::BoardExport::start(spec))
+        .flatten();
     let mut extra = vec![&spec.sealed, &spec.links, &spec.current];
     extra.extend(spec.budgets.iter());
     let found = spec.walk(&extra)?;
@@ -173,7 +177,7 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
         seal_problems(spec, sealed, &manifest, &mut out)?;
     }
     if spec.cfg.model >= 2 {
-        super::meta_rules::problems(spec, &records, &mut texts, &mut out)?;
+        super::meta_rules::problems(spec, &records, &mut texts, board, &mut out)?;
     }
     out.sort_by(|a, b| {
         (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
