@@ -828,20 +828,36 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     })
 }
 
-/// The newest stored live run and the number of findings that differ from
-/// it, when this clean run repeats it: that run is clean too, git finds no
-/// difference between the two commits outside the state directory, and the
-/// same checks (names, commands, statuses and versions, in order) measured
-/// the same units. Such a run checks no new text, and storing it would leave
-/// a file that needs one more commit, and so one more check: a check of a
-/// merged head whose own run is committed is one.
+/// The newest stored live run and the number of info findings that differ
+/// from it, when this clean run repeats it: that run is clean too, dated the
+/// same day in the project's zone, git finds no difference between the two
+/// commits outside the state directory, the same checks (names, commands,
+/// exits, statuses and versions, in order) measured the same units, and
+/// their error and warning findings are equal. Such a run checks no new
+/// text, and storing it would leave a file that needs one more commit, and
+/// so one more check: a check of a merged head whose own run is committed
+/// is one.
 ///
-/// Its findings may differ, but only through what no commit holds, such as
-/// git-ignored inputs or a checkout path that a checker prints; the stored run
-/// stays the record of that text. `lab evaluate` counts the same new units
-/// either way: the interval between the two runs has none, so it is left out,
-/// and the next interval starts from the same measures. Any doubt, such as a
-/// commit git cannot compare, stores the run.
+/// Only info findings may differ, such as a checkout path that a checker
+/// prints; the stored run stays the record of that text. `lab baseline set`
+/// and `--new-only` read errors and warnings, which are equal. `lab evaluate`
+/// counts the same new units: the interval between the two runs has none, so
+/// it is left out, and the next interval starts from the same measures. The
+/// same day keeps every run on the same side of an adoption date. Any doubt,
+/// such as a commit git cannot compare, stores the run.
+/// The header of a stored run, without reading the rest of the file.
+fn read_header(path: &Path) -> Result<RunHeader, String> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+        if !line.trim().is_empty() {
+            return serde_json::from_str(&line).map_err(|e| format!("{}:1: {e}", path.display()));
+        }
+    }
+    Err(format!("{}: empty check run", path.display()))
+}
+
 fn repeats(
     project: &Project,
     header: &RunHeader,
@@ -850,10 +866,12 @@ fn repeats(
     let (Some(commit), Some(false)) = (header.commit.as_deref(), header.dirty) else {
         return Ok(None);
     };
+    // Headers only, so replays stored after the newest live run are not read
+    // in full.
     let mut newest = None;
     for path in run_paths(project)?.iter().rev() {
-        if let Some(run) = Run::read(path, false)? {
-            newest = Some(run);
+        if !read_header(path)?.replayed {
+            newest = Run::read(path, false)?;
             break;
         }
     }
@@ -864,9 +882,13 @@ fn repeats(
     else {
         return Ok(None);
     };
+    if project.date_of(&prev.header.at)? != project.date_of(&header.at)? {
+        return Ok(None);
+    }
     let same_check = |a: &CheckOutcome, b: &CheckOutcome| {
         a.name == b.name
             && a.command == b.command
+            && a.exit == b.exit
             && a.status == b.status
             && a.version == b.version
             && a.uncommitted_inputs == b.uncommitted_inputs
@@ -902,15 +924,26 @@ fn repeats(
             return Ok(None);
         }
     }
-    // Findings counted by fingerprint, one side positive and the other negative.
-    let mut balance: BTreeMap<(&str, &str), i64> = BTreeMap::new();
-    for i in &ran.items {
-        *balance.entry((&i.check, &i.fingerprint)).or_default() += 1;
+    // Findings counted by fingerprint, one side positive and the other
+    // negative; any error or warning left over stores the run.
+    let mut balance: BTreeMap<(&str, &str), (i64, Severity)> = BTreeMap::new();
+    for (items, sign) in [(&ran.items, 1), (&prev.items, -1)] {
+        for i in items {
+            let entry = balance
+                .entry((&i.check, &i.fingerprint))
+                .or_insert((0, i.finding.severity));
+            entry.0 += sign;
+        }
     }
-    for i in &prev.items {
-        *balance.entry((&i.check, &i.fingerprint)).or_default() -= 1;
+    let mut differing = 0;
+    for (n, severity) in balance.values() {
+        if *n != 0 {
+            if *severity != Severity::Info {
+                return Ok(None);
+            }
+            differing += n.unsigned_abs() as usize;
+        }
     }
-    let differing = balance.values().map(|n| n.unsigned_abs() as usize).sum();
     Ok(Some((prev.path, differing)))
 }
 

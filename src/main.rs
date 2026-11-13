@@ -956,8 +956,8 @@ fn check(
             );
             if differing > 0 {
                 println!(
-                    "{differing} finding(s) differ from that run, through what no commit holds, \
-                     such as git-ignored inputs; it stays the record of this text"
+                    "{differing} info finding(s) differ from that run, such as a checkout path; \
+                     it stays the record of this text"
                 );
             }
         }

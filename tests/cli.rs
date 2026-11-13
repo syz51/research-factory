@@ -406,21 +406,54 @@ fn a_check_of_a_committed_run_s_head_stores_no_run() {
     assert_eq!(new.len(), 1);
     git(d, ceiling, &["add", ".research/lab/checks"]);
     git(d, ceiling, &["commit", "-qm", "Check runs"]);
-    // Findings that change only through an ignored input are not stored:
-    // the run reports them and says how many differ from the stored run.
-    std::fs::write(d.join("f.jsonl"), errors(&[1])).unwrap();
+    // Info findings that change only through an ignored input are not
+    // stored: the run reports them and says how many differ.
+    let info = ERR.replace("\"error\"", "\"info\"");
+    std::fs::write(d.join("f.jsonl"), &info).unwrap();
     let (out, new) = check_stores(d, ceiling, &[]);
-    assert_eq!((out.status.code(), new.len()), (Some(1), 0));
+    assert_eq!((out.status.code(), new.len()), (Some(0), 0));
     assert!(
-        stdout(&out).contains("1 finding(s) differ from that run"),
+        stdout(&out).contains("1 info finding(s) differ from that run"),
         "{}",
         stdout(&out)
     );
-    // A new checker version is stored, as is a dirty run.
-    std::fs::write(d.join("v.txt"), "2.0\n").unwrap();
+    // Errors that change are stored, since `lab baseline set` reads them.
+    std::fs::write(d.join("f.jsonl"), errors(&[1])).unwrap();
     let (out, new) = check_stores(d, ceiling, &[]);
     assert_eq!((out.status.code(), new.len()), (Some(1), 1));
     assert!(stdout(&out).contains("stored "), "{}", stdout(&out));
+    std::fs::write(d.join("f.jsonl"), errors(&[2])).unwrap();
+    let (out, new) = check_stores(d, ceiling, &[]);
+    assert_eq!((out.status.code(), new.len()), (Some(1), 1), "other errors");
+    // So is a new checker version.
+    std::fs::write(d.join("v.txt"), "2.0\n").unwrap();
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1, "a new version");
+    // So is a run after one whose commit git cannot compare, or after one
+    // from another day, which may lie on the other side of an adoption.
+    let edit = |path: &Path, from: &str, to: &str| {
+        let text = std::fs::read_to_string(path).unwrap();
+        let (header, rest) = text.split_once('\n').unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(header).unwrap();
+        assert!(value[from].is_string(), "{header}");
+        value[from] = to.into();
+        std::fs::write(path, format!("{value}\n{rest}")).unwrap();
+    };
+    edit(
+        &new[0],
+        "commit",
+        "0123456789abcdef0123456789abcdef01234567",
+    );
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1, "after an unknown commit");
+    edit(&new[0], "at", "2000-01-01T12:00:00Z");
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1, "after another day");
+    // A replay stored after the newest live run is passed over.
+    let (out, new) = check_stores(d, ceiling, &["--at", "HEAD"]);
+    assert_eq!(new.len(), 1, "{}{}", stdout(&out), stderr(&out));
+    let (out, new) = check_stores(d, ceiling, &[]);
+    assert!(new.is_empty(), "{}{}", stdout(&out), stderr(&out));
     std::fs::write(d.join("doc.md"), "edited\n").unwrap();
     let (_, new) = check_stores(d, ceiling, &[]);
     assert_eq!(new.len(), 1, "a dirty run");
