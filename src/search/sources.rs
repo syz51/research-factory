@@ -174,6 +174,12 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    /// The main checkout's project directory, in a linked worktree that
+    /// reads git-ignored files from it.
+    pub fn main_checkout(&self) -> Option<&Path> {
+        self.fallback.as_ref().map(Fallback::main)
+    }
+
     /// The file at `rel`, here or in the main checkout once `prepare` found it there.
     pub fn get(&self, rel: &str) -> Option<PathBuf> {
         let here = self.root.join(rel);
