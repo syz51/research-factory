@@ -146,11 +146,13 @@ impl Run {
 
     #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self, String> {
-        Ok(Self::read(path, true)?.expect("replayed runs are kept"))
+        Ok(Self::read(path, true, true)?.expect("replayed runs are kept"))
     }
 
-    /// Loads a stored run; `None` for a replayed one unless `replays`.
-    fn read(path: &Path, replays: bool) -> Result<Option<Self>, String> {
+    /// Loads a stored run; `None` for a replayed one unless `replays`. Its
+    /// measure lines, which can be most of the file, are read only with
+    /// `measures`.
+    fn read(path: &Path, replays: bool, measures: bool) -> Result<Option<Self>, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut lines = text
             .lines()
@@ -169,15 +171,22 @@ impl Run {
         }
         // Lines of another schema are records a later lab version added;
         // skipping them keeps a shared run directory readable.
+        // The schema is read without building the record: a JSON value tree
+        // of each line cost more than the record itself.
+        #[derive(Deserialize)]
+        struct Schema<'a> {
+            #[serde(borrow)]
+            schema: Option<std::borrow::Cow<'a, str>>,
+        }
         let mut items = Vec::new();
-        let mut measures = Vec::new();
+        let mut kept = Vec::new();
         for (i, line) in lines {
             let at = |e: serde_json::Error| format!("{}:{}: {e}", path.display(), i + 1);
-            let value: serde_json::Value = serde_json::from_str(line).map_err(at)?;
-            match value.get("schema").and_then(|s| s.as_str()) {
-                Some(ITEM_SCHEMA) => items.push(serde_json::from_value::<Item>(value).map_err(at)?),
-                Some(MEASURE_ITEM_SCHEMA) => {
-                    measures.push(serde_json::from_value::<MeasureItem>(value).map_err(at)?);
+            let schema = serde_json::from_str::<Schema>(line).map_err(at)?.schema;
+            match schema.as_deref() {
+                Some(ITEM_SCHEMA) => items.push(serde_json::from_str::<Item>(line).map_err(at)?),
+                Some(MEASURE_ITEM_SCHEMA) if measures => {
+                    kept.push(serde_json::from_str::<MeasureItem>(line).map_err(at)?);
                 }
                 Some(_) => {}
                 None => return Err(format!("{}:{}: no schema", path.display(), i + 1)),
@@ -187,7 +196,7 @@ impl Run {
             path: path.to_path_buf(),
             header,
             items,
-            measures,
+            measures: kept,
         }))
     }
 
@@ -200,26 +209,63 @@ impl Run {
     }
 }
 
-/// Stored runs of the work tree, oldest first, without replayed runs, which
-/// only `lab evaluate` reads. A missing directory means no history.
+/// Stored runs of the work tree, oldest first, without replayed runs and
+/// without measures, which only `lab evaluate` reads. A missing directory
+/// means no history.
 pub fn history(project: &Project) -> Result<Vec<Run>, String> {
     load_runs(project, false)
 }
 
-/// Every stored run, replayed ones included, in the order they were stored.
+/// Every stored run, replayed ones and measures included, in the order they
+/// were stored.
 pub fn history_with_replays(project: &Project) -> Result<Vec<Run>, String> {
     load_runs(project, true)
 }
 
-fn load_runs(project: &Project, replays: bool) -> Result<Vec<Run>, String> {
+fn load_runs(project: &Project, evaluate: bool) -> Result<Vec<Run>, String> {
+    // A replayed run is left out by its header, before its lines are parsed.
+    let read = parallel_map(&run_paths(project)?, |path| {
+        Run::read(path, evaluate, evaluate)
+    });
     let mut runs = Vec::new();
-    for path in &run_paths(project)? {
-        // A replayed run is left out by its header, before its lines are parsed.
-        if let Some(run) = Run::read(path, replays)? {
-            runs.push(run);
-        }
+    for run in read {
+        runs.extend(run?);
     }
     Ok(runs)
+}
+
+/// `f` of each item, on up to as many threads as the machine runs at once,
+/// in the order of `items`. A panic in `f` goes on in the caller.
+pub(crate) fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else {
+                            return mine;
+                        };
+                        mine.push((i, f(item)));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    });
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, r)| r).collect()
 }
 
 /// The stored run files, in the order they were stored.
@@ -587,13 +633,13 @@ pub(crate) struct Ran {
     pub measures: Vec<MeasureItem>,
 }
 
-/// Runs `specs` in `root`, each with its version from `versions` and, for a
-/// replay, the uncommitted inputs linked for it.
+/// Runs `specs` in `root`, each with its version (see `version`) and, for a
+/// replay, the uncommitted inputs linked for it. The checks run at the same
+/// time, each after its version command; the run keeps the order of `specs`.
 pub(crate) fn run_checks(
     project: &Project,
     root: &Path,
     specs: &[&CheckSpec],
-    versions: &BTreeMap<String, Option<String>>,
     linked: &BTreeMap<String, Vec<String>>,
     fallback: Option<&crate::worktree::Fallback>,
 ) -> Ran {
@@ -602,9 +648,10 @@ pub(crate) fn run_checks(
         items: Vec::new(),
         measures: Vec::new(),
     };
-    for spec in specs {
-        let version = versions.get(&spec.name).cloned().flatten();
-        let (mut outcome, findings, measured) = run_one(project, root, spec, version, fallback);
+    let results = parallel_map(specs, |spec| {
+        run_one(project, root, spec, version(project, root, spec), fallback)
+    });
+    for (spec, (mut outcome, findings, measured)) in specs.iter().zip(results) {
         outcome.uncommitted_inputs = linked.get(&spec.name).cloned().unwrap_or_default();
         ran.measures
             .extend(measured.into_iter().map(|measure| MeasureItem {
@@ -675,34 +722,23 @@ fn version_command(spec: &CheckSpec) -> Option<Vec<String>> {
     (bare && !interpreter).then(|| vec![program.clone(), "--version".into()])
 }
 
-/// Each check's version: the first line its version command prints, run in
+/// A check's version: the first line its version command prints, run in
 /// `root` (the project root, or a replayed commit's copy of it, where the
 /// check runs) with its program resolved as the check's is. A command that
 /// fails, times out or prints no short, non-JSON line gives `None`, with a
 /// warning on stderr.
-pub(crate) fn versions(
-    project: &Project,
-    root: &Path,
-    specs: &[&CheckSpec],
-) -> BTreeMap<String, Option<String>> {
-    specs
-        .iter()
-        .map(|spec| {
-            let version = version_command(spec).and_then(|argv| {
-                version_of(project, root, &argv)
-                    .map_err(|e| {
-                        eprintln!(
-                            "lab: check `{}`: no version from `{}`: {e}; set `version` in its \
-                             [[lab.checks]] entry, or `version = []` for none",
-                            spec.name,
-                            argv.join(" ")
-                        );
-                    })
-                    .ok()
-            });
-            (spec.name.clone(), version)
+fn version(project: &Project, root: &Path, spec: &CheckSpec) -> Option<String> {
+    let argv = version_command(spec)?;
+    version_of(project, root, &argv)
+        .map_err(|e| {
+            eprintln!(
+                "lab: check `{}`: no version from `{}`: {e}; set `version` in its \
+                 [[lab.checks]] entry, or `version = []` for none",
+                spec.name,
+                argv.join(" ")
+            );
         })
-        .collect()
+        .ok()
 }
 
 fn version_of(project: &Project, root: &Path, argv: &[String]) -> Result<String, String> {
@@ -758,24 +794,31 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let specs = select(project, only)?;
     let baseline = Baseline::load(project)?;
     let at = finding::now();
-    let (commit, dirty) = git_state(project).unwrap_or_else(|e| {
+    // `git status` reads the whole work tree, which can take as long as a
+    // check, so it runs while the checks do.
+    let (state, fallback, ran) = std::thread::scope(|s| {
+        let state = s.spawn(|| git_state(project));
+        // A linked git worktree lacks the main checkout's ignored files, such as downloads.
+        let fallback = crate::worktree::Fallback::find(&project.root).unwrap_or_else(|e| {
+            eprintln!("lab: ignored files are not looked up in a main checkout: {e}");
+            None
+        });
+        let ran = run_checks(
+            project,
+            &project.root,
+            &specs,
+            &BTreeMap::new(),
+            fallback.as_ref(),
+        );
+        let state = state
+            .join()
+            .unwrap_or_else(|p| std::panic::resume_unwind(p));
+        (state, fallback, ran)
+    });
+    let (commit, dirty) = state.unwrap_or_else(|e| {
         eprintln!("lab: the run records no commit: {e}");
         (None, None)
     });
-    let versions = versions(project, &project.root, &specs);
-    // A linked git worktree lacks the main checkout's ignored files, such as downloads.
-    let fallback = crate::worktree::Fallback::find(&project.root).unwrap_or_else(|e| {
-        eprintln!("lab: ignored files are not looked up in a main checkout: {e}");
-        None
-    });
-    let ran = run_checks(
-        project,
-        &project.root,
-        &specs,
-        &versions,
-        &BTreeMap::new(),
-        fallback.as_ref(),
-    );
     if let Some(fallback) = &fallback {
         // Any doubt stores the run, as when the main checkout cannot be found.
         let lacking = lacking_inputs(project, &specs, &ran.items, fallback).unwrap_or_else(|e| {
@@ -943,7 +986,7 @@ fn repeats(
     let mut newest = None;
     for path in run_paths(project)?.iter().rev() {
         if !read_header(path)?.replayed {
-            newest = Run::read(path, false)?;
+            newest = Run::read(path, false, true)?;
             break;
         }
     }
@@ -1392,6 +1435,58 @@ mod tests {
         // The temporary directory is not a git repository, so the run is
         // not clean and keeps no keys.
         assert_eq!(report.run.header.dirty, None);
+        // Only `lab evaluate`'s history reads measures.
+        assert_eq!(history_with_replays(&p).unwrap()[0].measures.len(), 1);
+        let runs = history(&p).unwrap();
+        assert_eq!((runs[0].items.len(), runs[0].measures.len()), (1, 0));
+    }
+
+    #[test]
+    fn checks_run_at_once_and_keep_their_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = |name: &str, secs: &str| {
+            format!(
+                "[[lab.checks]]\nname = \"{name}\"\nrun = [\"sh\", \"-c\", \"sleep {secs}\"]\n\
+                 version = [\"sh\", \"-c\", \"sleep {secs}; echo {name}\"]\n"
+            )
+        };
+        let p = project(
+            dir.path(),
+            &[check("slow", "1"), check("mid", "0.5"), check("fast", "0")].concat(),
+        );
+        let started = Instant::now();
+        let report = run(&p, &[]).unwrap();
+        let elapsed = started.elapsed();
+        let checks: Vec<(&str, Option<&str>)> = report
+            .run
+            .header
+            .checks
+            .iter()
+            .map(|c| (c.name.as_str(), c.version.as_deref()))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("slow", Some("slow")),
+                ("mid", Some("mid")),
+                ("fast", Some("fast"))
+            ]
+        );
+        // One after another they take 3 s.
+        if std::thread::available_parallelism().map_or(1, std::num::NonZero::get) >= 3 {
+            assert!(elapsed.as_secs_f64() < 2.5, "{elapsed:?}");
+        }
+    }
+
+    #[test]
+    fn parallel_map_keeps_the_order_of_its_items() {
+        let items: Vec<u64> = (0..200).collect();
+        let doubled = parallel_map(&items, |&i| {
+            std::thread::sleep(std::time::Duration::from_micros((200 - i) * 10));
+            i * 2
+        });
+        assert_eq!(doubled, items.iter().map(|i| i * 2).collect::<Vec<_>>());
+        assert!(parallel_map(&[] as &[u64], |&i| i).is_empty());
     }
 
     #[test]
