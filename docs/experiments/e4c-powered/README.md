@@ -171,3 +171,14 @@ The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue:
 - 2026-11-13 03:30Z: resumed (amendment commit 03:30:45Z, first session 03:30:57Z). The user reported a usage reset and lifted the 95% and 97% caps of "Stopping and usage rules" for now. The board's usage endpoint still read 97% at 03:29Z (resets_at 2026-11-15 01:00Z), so the reading may lag the reset.
 - Effect: sessions launch without the usage check until the user restores the cap. Every other rule stays the same. Usage does not enter selection or the analysis, so no measure changes.
 - Pins, recorded before the first screening session: `lab` 0.22.0, `claude` CLI 2.1.323, model claude-opus-5-5, research-factory skill at 9961a5f (`git archive`).
+
+### Amendment 2 (2026-11-13): a leak through git history
+
+- Found after batch 2 screening, before any further session. The copies were `git clone`s, as in E4b. Removing the test-set folder from the working tree left it in git history.
+- Leak: one of 65 screening sessions (batch 2, K80 phrasing 2) ran `git grep ... HEAD -- docs/process/archive-search-testset-2026-11-12`. The output showed K80's own lines of `topics.jsonl` and `extension-343/written.jsonl`, with its seed record. That session answered correctly.
+- Other exposures, no answer leak: in batch 1, K77 phrasing 2 read the test-set README and `git show --stat HEAD` (file names and line counts only). The README names three other `grep-hard-343` topics with grade-0 records. T30 phrasing 1 read one README line.
+- Changes, for every session from now on:
+  - Copies: after `git clone --no-local` and checkout of C_b or C, `git filter-repo --path-glob 'docs/process/archive-search-testset-*' --invert-paths` (git-filter-repo through `uv run`). HEAD's tree stays the same as C_b or C without the test set. No commit in any ref keeps a test-set file. Commits that touched only the test set drop out.
+  - Leak check: it also scans tool results, not only tool inputs, for `qrels`, `topics.jsonl`, `extension-*/` key files and `archive-search-testset` paths.
+  - K80 phrasing 2 is invalid. It runs again once in a filtered copy at a71b91b, and the new run replaces it in screening. The invalid transcript is kept and reported.
+- Batches 1 and 2 otherwise stand, screened in unfiltered copies. This is a limit: the screening copies differ from the comparison copies in git history only.
