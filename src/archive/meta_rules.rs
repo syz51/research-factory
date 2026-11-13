@@ -4,8 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use super::files::{self, FileSet};
 use super::front::{self, Meta};
@@ -213,6 +214,7 @@ pub(super) fn problems(
     spec: &Spec,
     records: &[Record],
     texts: &mut Texts,
+    board: Option<Result<BoardExport, String>>,
     out: &mut Vec<Problem>,
 ) -> Result<(), String> {
     let unique = unique_refs(&records.iter().collect::<Vec<_>>());
@@ -225,7 +227,7 @@ pub(super) fn problems(
     status(spec, &valid, out);
     amendments(&valid, out);
     summaries(spec, records, &valid, out);
-    tasks(spec, &valid, out);
+    tasks(spec, &valid, board, out);
     historical_links(spec, &unique, texts, out)?;
     pages(spec, out)?;
     allow(spec, out);
@@ -372,40 +374,84 @@ struct Task {
     updated: Option<String>,
 }
 
-/// Runs `board_export` and reads its JSON: an array of tasks, or an object
-/// with a `tasks` array. The error says why the board gave no task ids.
-fn board_tasks(spec: &Spec, command: &[String]) -> Result<Vec<Task>, String> {
-    let (program, args) = command.split_first().ok_or("`board_export` is empty")?;
-    let mut child = Command::new(spec.project.resolve_program(program))
-        .args(args)
-        .current_dir(spec.root())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("`{program}` did not start: {e}"))?;
-    let mut stdout = child.stdout.take().expect("stdout is piped");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut text = Vec::new();
-        let read = stdout.read_to_end(&mut text).map(|_| text);
-        let _ = tx.send(read);
-    });
-    let text = match rx.recv_timeout(BOARD_TIMEOUT) {
-        Ok(read) => read.map_err(|e| format!("`{program}`: {e}"))?,
-        Err(_) => {
+/// The `board_export` command, started before the archive walk so that it runs
+/// while the files are read (research-factory-414). Dropping it unfinished
+/// stops the command.
+pub(super) struct BoardExport {
+    program: String,
+    child: Option<Child>,
+    read: Receiver<std::io::Result<Vec<u8>>>,
+    deadline: Instant,
+}
+
+impl BoardExport {
+    /// Starts the command of `board_export`; `None` when none is configured.
+    pub(super) fn start(spec: &Spec) -> Option<Result<Self, String>> {
+        let command = spec.cfg.board_export.as_ref()?;
+        Some(Self::spawn(spec, command))
+    }
+
+    fn spawn(spec: &Spec, command: &[String]) -> Result<Self, String> {
+        let (program, args) = command.split_first().ok_or("`board_export` is empty")?;
+        let mut child = Command::new(spec.project.resolve_program(program))
+            .args(args)
+            .current_dir(spec.root())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("`{program}` did not start: {e}"))?;
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let (tx, read) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut text = Vec::new();
+            let read = stdout.read_to_end(&mut text).map(|_| text);
+            let _ = tx.send(read);
+        });
+        Ok(Self {
+            program: program.clone(),
+            child: Some(child),
+            read,
+            deadline: Instant::now() + BOARD_TIMEOUT,
+        })
+    }
+
+    /// Waits for the output, up to `BOARD_TIMEOUT` after the start.
+    fn output(mut self) -> Result<Vec<u8>, String> {
+        let program = self.program.clone();
+        let wait = self.deadline.saturating_duration_since(Instant::now());
+        let text = match self.read.recv_timeout(wait) {
+            Ok(read) => read.map_err(|e| format!("`{program}`: {e}"))?,
+            Err(_) => {
+                return Err(format!(
+                    "`{program}` did not finish in {} seconds",
+                    BOARD_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        let mut child = self.child.take().expect("the child is waited for once");
+        let status = child.wait().map_err(|e| format!("`{program}`: {e}"))?;
+        if !status.success() {
+            return Err(format!("`{program}` failed ({status})"));
+        }
+        Ok(text)
+    }
+}
+
+impl Drop for BoardExport {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!(
-                "`{program}` did not finish in {} seconds",
-                BOARD_TIMEOUT.as_secs()
-            ));
         }
-    };
-    let status = child.wait().map_err(|e| format!("`{program}`: {e}"))?;
-    if !status.success() {
-        return Err(format!("`{program}` failed ({status})"));
     }
+}
+
+/// Reads the JSON of a started board export: an array of tasks, or an object
+/// with a `tasks` array. The error says why the board gave no task ids.
+fn board_tasks(export: BoardExport) -> Result<Vec<Task>, String> {
+    let program = export.program.clone();
+    let text = export.output()?;
     let value: serde_json::Value = serde_json::from_slice(&text)
         .map_err(|e| format!("`{program}` did not print JSON: {e}"))?;
     let list = value
@@ -437,7 +483,12 @@ fn board_tasks(spec: &Spec, command: &[String]) -> Result<Vec<Task>, String> {
 }
 
 /// A record names its task and kind, and the task is on the board.
-fn tasks(spec: &Spec, records: &[&Record], out: &mut Vec<Problem>) {
+fn tasks(
+    spec: &Spec,
+    records: &[&Record],
+    board: Option<Result<BoardExport, String>>,
+    out: &mut Vec<Problem>,
+) {
     let cfg = spec.cfg;
     if let Some(from) = &cfg.task_from {
         for r in records {
@@ -487,7 +538,7 @@ fn tasks(spec: &Spec, records: &[&Record], out: &mut Vec<Problem>) {
         p.detail = detail;
         out.push(p);
     };
-    let Some(command) = &cfg.board_export else {
+    let Some(board) = board else {
         if cfg.task_from.is_some() || !named.is_empty() {
             skipped(
                 "skipped: no `board_export` is configured, so no `task` value was compared \
@@ -497,7 +548,7 @@ fn tasks(spec: &Spec, records: &[&Record], out: &mut Vec<Problem>) {
         }
         return;
     };
-    let board = match board_tasks(spec, command) {
+    let board = match board.and_then(board_tasks) {
         Ok(tasks) => tasks,
         Err(reason) => {
             skipped(
