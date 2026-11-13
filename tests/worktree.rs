@@ -376,3 +376,41 @@ fn a_link_to_a_file_git_does_not_track_is_a_warning_until_it_is_committed() {
     git(top, ceiling, &["commit", "-qm", "run"]);
     assert!(untracked(&lab(&m, &["archive", "check"])).is_empty());
 }
+
+const DIR_TEXTS: &str = r#"for f in "$1"/*.txt; do
+printf '{"schema":"rf.finding/1","tool":"dirtexts","rule":"text-read","severity":"warn","subject":"docs/a.md:1","message":"read","evidence":[{"path":"%s"}]}\n' "$f"
+done
+"#;
+
+#[test]
+fn a_file_below_a_directory_argument_read_from_the_main_checkout_does_not_stop_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, w) = setup(ceiling);
+    std::fs::set_permissions(m.join("private"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    for d in [&m, &w] {
+        let cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+        write(
+            d,
+            "research.toml",
+            &format!(
+                "{cfg}\n[[lab.checks]]\nname = \"dirtexts\"\nrun = [\"sh\", \"dirtexts.sh\", \"data/texts\"]\n"
+            ),
+        );
+        write(d, "dirtexts.sh", DIR_TEXTS);
+    }
+    write(&m, "data/texts/a.txt", "text\n");
+
+    // The worktree lacks data/texts; lab passes the main checkout's copy, so
+    // the files below it that the finding names were read, not missed.
+    let out = run(LAB, &w, ceiling, &["check", "--only", "dirtexts"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(stdout(&out).contains("stored "), "{}", stdout(&out));
+    assert!(!stderr(&out).contains("lacks"), "{}", stderr(&out));
+}

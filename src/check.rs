@@ -777,7 +777,11 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         fallback.as_ref(),
     );
     if let Some(fallback) = &fallback {
-        let lacking = lacking_inputs(project, &specs, &ran.items, fallback)?;
+        // Any doubt stores the run, as when the main checkout cannot be found.
+        let lacking = lacking_inputs(project, &specs, &ran.items, fallback).unwrap_or_else(|e| {
+            eprintln!("lab: {e}; the run is stored");
+            BTreeSet::new()
+        });
         if !lacking.is_empty() {
             let shown: Vec<&str> = lacking.iter().take(3).map(String::as_str).collect();
             return Err(format!(
@@ -843,30 +847,13 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     })
 }
 
-/// The newest stored live run and the number of info findings that differ
-/// from it, when this clean run repeats it: that run is clean too, dated the
-/// same day in the project's zone, git finds no difference between the two
-/// commits outside the state directory, the same checks (names, commands,
-/// exits, statuses and versions, in order) measured the same units, and
-/// their error and warning findings are equal. Such a run checks no new
-/// text, and storing it would leave a file that needs one more commit, and
-/// so one more check: a check of a merged head whose own run is committed
-/// is one.
-///
-/// Only info findings may differ, such as a checkout path that a checker
-/// prints; the stored run stays the record of that text. `lab baseline set`
-/// and `--new-only` read errors and warnings, which are equal. `lab evaluate`
-/// counts the same new units: the interval between the two runs has none, so
-/// it is left out, and the next interval starts from the same measures. The
-/// same day keeps every run on the same side of an adoption date. Any doubt,
-/// such as a commit git cannot compare, stores the run.
 /// The files that findings name, relative to the project root, that this
 /// linked worktree lacks and its main checkout has, where git ignores them: a
 /// source text that only the main checkout downloaded, for example. A checker
 /// that reports such a file as missing found something the main checkout
 /// would not, so the run is not the project's record of its text. A file a
-/// check's argument names does not count: the check read the main
-/// checkout's copy (`main_checkout_args`).
+/// check's argument names, or a file below a directory it names, does not
+/// count: the check read the main checkout's copy (`main_checkout_args`).
 fn lacking_inputs(
     project: &Project,
     specs: &[&CheckSpec],
@@ -894,7 +881,16 @@ fn lacking_inputs(
         absent.extend(
             crate::change::named(root, cwd, &item.finding)
                 .into_iter()
-                .filter(|p| !args.is_some_and(|a| a.contains(p)) && !root.join(p).exists()),
+                .filter(|p| {
+                    let read_from_main = args.is_some_and(|a| {
+                        a.iter().any(|a| {
+                            p == a
+                                || p.strip_prefix(a.as_str())
+                                    .is_some_and(|r| r.starts_with('/'))
+                        })
+                    });
+                    !read_from_main && !root.join(p).exists()
+                }),
         );
     }
     fallback
@@ -917,6 +913,23 @@ fn read_header(path: &Path) -> Result<RunHeader, String> {
     Err(format!("{}: empty check run", path.display()))
 }
 
+/// The newest stored live run and the number of info findings that differ
+/// from it, when this clean run repeats it: that run is clean too, dated the
+/// same day in the project's zone, git finds no difference between the two
+/// commits outside the state directory, the same checks (names, commands,
+/// exits, statuses and versions, in order) measured the same units, and
+/// their error and warning findings are equal. Such a run checks no new
+/// text, and storing it would leave a file that needs one more commit, and
+/// so one more check: a check of a merged head whose own run is committed
+/// is one.
+///
+/// Only info findings may differ, such as a checkout path that a checker
+/// prints; the stored run stays the record of that text. `lab baseline set`
+/// and `--new-only` read errors and warnings, which are equal. `lab evaluate`
+/// counts the same new units: the interval between the two runs has none, so
+/// it is left out, and the next interval starts from the same measures. The
+/// same day keeps every run on the same side of an adoption date. Any doubt,
+/// such as a commit git cannot compare, stores the run.
 fn repeats(
     project: &Project,
     header: &RunHeader,
