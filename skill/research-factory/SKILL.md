@@ -48,7 +48,7 @@ Accuracy comes before speed. A value you cannot establish is reported as unknown
 }
 ```
 
-`--background` returns at once; the detached loop does nothing when the last one finished less than 15 minutes ago or another is running, and writes its output to `.research/lab/loop/loop.log`. To file signals as tasks on a work board, set `notify` to the script `scripts/board-notify.sh` in this skill: it reads one `rf.signal/1` object on stdin and prints the task's reference. Then also set `[lab.loop] home` to the project's checkout path (lab 0.25.0 or later). A clone or copy of the project, such as an experiment's scratch copy, keeps the hooks; without `home`, its loop files stale and duplicate tasks.
+`--background` returns at once; the detached loop does nothing when the last one finished less than 15 minutes ago or another is running, and writes its output to `.research/lab/loop/loop.log`. To file signals as tasks on a work board, set `notify` to the script `scripts/board-notify.sh` in this skill: it reads one `rf.signal/1` object on stdin and prints the task's reference. Then also set `[lab.loop] home` to the project's checkout path. Older lab rejects the key, so first install lab 0.25.0 or later on every machine that runs the hooks, and set `[lab] min_version = "0.25.0"`. A clone or copy of the project, such as an experiment's scratch copy, keeps the hooks; without `home`, its loop files stale and duplicate tasks.
 
 ## Archive search delivery
 

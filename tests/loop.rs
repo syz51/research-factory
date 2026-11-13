@@ -796,6 +796,26 @@ fn only_the_home_checkout_runs_the_loop_not_a_clone_or_copy() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(sent(&home).len(), 3, "nothing sent twice");
 
+    // A home below `~/` is the same checkout.
+    write(
+        &home,
+        "research.toml",
+        &format!("{CONFIG}home = \"~/home\"\n"),
+    );
+    let mut tilde = Command::new(env!("CARGO_BIN_EXE_lab"));
+    tilde
+        .args(["loop"])
+        .current_dir(&home)
+        .env("HOME", ceiling)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CEILING_DIRECTORIES", ceiling);
+    let out = tilde.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!stdout(&out).contains("did nothing"), "{}", stdout(&out));
+    let out = tilde.current_dir(&copy).output().unwrap();
+    assert!(stdout(&out).contains("did nothing"), "{}", stdout(&out));
+
     // A home that does not exist here runs the loop nowhere; a relative one is an error.
     write(&copy, "research.toml", &config(&ceiling.join("gone")));
     let out = lab(&copy, &["loop"]);
