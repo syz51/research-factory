@@ -134,6 +134,13 @@ fn deleting_or_editing_a_stored_run_is_refused_with_the_rule() {
         format!("ln -sf /tmp/x {run}"),
         format!("echo x | tee -a {run}"),
         format!("dd if=/dev/null of={run}"),
+        // Command words that the early exit must still see, in commands
+        // that do not name the checks directory.
+        "/bin/rm -rf .research".to_string(),
+        "(rm -rf .research )".to_string(),
+        "X=1 rm -rf .research".to_string(),
+        "ls\nrm -rf .research".to_string(),
+        "true&&git rm -r .research/lab".to_string(),
     ] {
         assert!(
             refusal(c, &bash(&p, &command)).is_some(),
@@ -152,11 +159,17 @@ fn deleting_or_editing_a_stored_run_is_refused_with_the_rule() {
         );
     }
     assert_eq!(refusal(c, &bash(c, "rm -rf .research/lab/*")), None);
+    // From the checks directory the command need not name it.
+    let checks = p.join(".research/lab/checks");
+    assert!(refusal(c, &bash(&checks, "rm 20261112T000000.000Z.jsonl")).is_some());
     for tool in ["Edit", "Write", "MultiEdit"] {
         let event = json!({"tool_name": tool, "cwd": p,
                            "tool_input": {"file_path": p.join(run)}});
         assert!(refusal(c, &event).is_some(), "{tool} not refused");
     }
+    let event = json!({"tool_name": "NotebookEdit", "cwd": p,
+                       "tool_input": {"notebook_path": p.join(".research/lab/checks/a.ipynb")}});
+    assert!(refusal(c, &event).is_some(), "NotebookEdit not refused");
 }
 
 #[test]
@@ -187,6 +200,9 @@ fn reading_committing_and_other_files_are_allowed() {
         format!("cp {run} /tmp/x.jsonl"),
         format!("ln -s {run} latest.jsonl"),
         format!("tee /tmp/x < {run}"),
+        // No command word that can delete or write: the early exit.
+        "ls -la docs && grep -rn rmdir src | head -5".to_string(),
+        "cargo test 2>&1 | tail -20".to_string(),
     ] {
         assert_eq!(refusal(c, &bash(&p, &command)), None, "refused: {command}");
     }
