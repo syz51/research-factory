@@ -185,7 +185,7 @@ The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue:
 
 ### Amendment 3 (2026-11-13): a narrower leak-check pattern
 
-- Set before batch 3 screening (board note #5915 on research-factory-343, 07:58Z); recorded here with the results.
+- Set before batch 3 screening, in board note #5915 on research-factory-343 (2026-11-13 07:58Z). Batch 3 started at 08:09Z. This commit came later, with the results, so it breaks the rule of "Amendments" above. See "Limits".
 - Amendment 2's pattern matched any `qrels` or `topics.jsonl` text. On batches 1 and 2 it flagged 14 of 65 sessions, mostly archive prose that mentions qrels. That is too broad for a pass or fail check.
 - New pattern, on tool inputs and tool results: test-set paths under `qrels`, `topics.jsonl` or `extension-<n>/`, lines of `qrels-records.txt`, and a `"seeds": [` field. On batches 1 and 2 it flags K80 phrasing 2 (the leak), K77 phrasing 2 and T30 phrasing 1, the three exposures that amendment 2 lists.
 - Each flagged session is read by hand. Batches 3 to 5 ran in filtered copies, and the check flagged none of their 85 sessions.
@@ -205,9 +205,9 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 | 5 | 3da6935 | 30 | 22 | 30 | not completed | 10 | at most 10 | none |
 | All | | 153 | 110 | 150 | | 45 | 20 to 30 | |
 
-- Sessions: one `cli` session per gate-passing phrasing. All 150 ended in success. None needed a rerun. The invalid K80 phrasing 2 run (amendment 2) is left out.
+- Sessions: one `cli` session per gate-passing phrasing. All 150 ended in success; none ran again for a missing result. K80 phrasing 2 of batch 2 ran again after the leak (amendment 2). The invalid first run is left out of the rows and counts.
 - Selected topics, batches 1 to 4 (topic and compared phrasing): [raw/selected-b1-b4.txt](raw/selected-b1-b4.txt). Batch 5 before completion: [raw/selected-b5-before-completion.txt](raw/selected-b5-before-completion.txt).
-- Rows: `raw/screen-b<b>.jsonl` with the completed key, and `raw/screen-b<b>-before-completion.jsonl` with the key at C_b (batches 1 and 2: at a71b91b). Start order: `raw/screen-b<b>-order.log`.
+- Rows: `raw/screen-b<b>.jsonl` with the completed key, and `raw/screen-b<b>-before-completion.jsonl` with the key at C_b (batches 1 and 2: at a71b91b). Start order: `raw/screen-b<b>-order.log`. The batch 2 log keeps both K80 phrasing 2 starts: 03:34:59Z (invalid) and 03:41:20Z, marked `rerun`. `measure.py` reads only 5-field lines, so for batch 2 drop the first K80 2 line and the `rerun` word before measuring.
 - The selected count can only fall with key completion. So n is at most 20 + 10 = 30 whatever batch 5's completion finds. Batch 5's completion did not run, because it cannot change the outcome.
 
 ### What the screening shows
@@ -215,7 +215,7 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 - **s is lower than planned.** The plan assumed s = 0.3 and needed s ≥ 0.16. Over batches 1 to 4, s = 20 / 160 = 0.125. With batch 5 at its maximum, s ≤ 30 / 200 = 0.15.
 - **`cli` answers most grep-hard prompts.** With the completed key, `cli` named a grade-2 file in 98 of 120 screened phrasings of batches 1 to 4 (82%). The gate keeps phrasings that grep and BM25 rank poorly, yet the agent still found a relevant record. 134 of the 150 sessions ran `lab search`.
 - **Key completion removed most failures.** Before completion, 35 topics of batches 1 to 4 were selected. With the completed key, 20 were. 20 sessions turned correct (batches 1–2: 7, batch 3: 8, batch 4: 5). Each named a file that the test set had not judged for its topic and that the blind judges graded 2. The pooled key misses relevant records that an agent finds.
-- **Kinds.** Of the 20 selected topics, 9 are paraphrase, 5 supersession, 3 table and 3 cross-record. All 3 cross-record topics come from batches 1 and 2. From batch 3 on, the cross-record grade check (judge-system.md: a record with part of the need is grade 1) admitted few of them: none in batch 3, T47 in batch 4 and T55 in batch 5.
+- **Kinds.** Of the 20 selected topics, 9 are paraphrase, 5 supersession, 3 table and 3 cross-record. All 3 cross-record topics come from batches 1 and 2. All batches used the same judge rule (judge-system.md: a record that gives only part of the need is grade 1). From batch 3 on, the batch threads added one step: a fresh blind regrade of every grade-2 unit of the cross-record topics (decision on research-factory-353). Batches 1 and 2 did not have this step. Batches 3 to 5 then admitted few cross-record topics: none in batch 3, T47 in batch 4 and T55 in batch 5. See "Limits".
 
 ### Cost and usage
 
@@ -223,6 +223,9 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 - Weekly usage read 55% before batch 3, 67% before batch 4 and 69% before batch 5. Batches 1 and 2 ran under amendment 1.
 
 ### Limits
+
+- Amendment 3 (the narrower leak-check pattern) was set on the board before batch 3, but committed to this file only after batches 3 to 5 ran. As a check, amendment 2's broad pattern was run on batches 3 to 5 afterwards. It flags 10 of 85 sessions (K113-2, K125-2, K132-1, K139-1, K151-1, K159-2, K178-1, K186-2, K200-2, K201-1). Each hit was read by hand: all are archive prose that mentions qrels, a test-set script name, or the counts of a key-completion record. None shows a topic, seed or grade of the test set.
+- The extra cross-record regrade ran in batches 3 to 5 only. The 3 selected cross-record topics of batches 1 and 2 did not get it, so their admission may be looser than in later batches.
 
 - Batches 1 and 2 were screened in unfiltered copies (amendment 2). K80 phrasing 2 saw its own key and was rerun. K77 phrasing 2 read figures and README lines through `git show`, but no K77 grade; both K77 phrasings were correct.
 - One `cli` session per phrasing decides selection. A topic can pass or fail by chance. E4b's fresh `cli` sessions on its selected topics were correct 6 of 30 times, so a single failure is a weak signal.
