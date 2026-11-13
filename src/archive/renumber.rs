@@ -285,7 +285,7 @@ pub fn renumber(
         _ => Some(Manifest::load(&spec.manifest)?),
     };
     let is_sealed = match &manifest {
-        None => gitseal::sealed_at_head(&spec, path)?.is_some(),
+        None => gitseal::AtRev::new(&spec, "HEAD").sealed(path)?.is_some(),
         Some(m) => m.files.contains_key(path),
     };
     if is_sealed {
@@ -383,7 +383,7 @@ pub fn renumber(
 
     // Links to the record, and to its title heading from inside it.
     let seals = match &manifest {
-        None => Seals::Git(&spec),
+        None => Seals::git(&spec),
         Some(m) => Seals::Manifest {
             sealed: sealed.iter().map(String::as_str).collect(),
             manifest: m,
