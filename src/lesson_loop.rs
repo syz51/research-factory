@@ -385,14 +385,19 @@ pub enum Checkout {
 /// The checkout `lab loop` runs for. In a linked git worktree it is the main
 /// checkout: agent sessions run there, and one lock, `--if-older` state and
 /// signal state per project keep the worktrees from measuring nothing and
-/// signalling apart. `config` is the `--config` path, if any.
+/// signalling apart. With `[lab.loop] home`, only that checkout runs it: a
+/// standalone copy, such as a clone, has no sessions and a fresh signal
+/// state, so it would file stale and repeated signals. `config` is the
+/// `--config` path, if any.
 pub fn checkout(project: &Project, config: Option<&Path>) -> Result<Checkout, String> {
     let here = project.root.display();
     let path = match crate::worktree::locate(&project.root)? {
-        crate::worktree::Location::NotLinked => return Ok(Checkout::This),
+        crate::worktree::Location::NotLinked => {
+            return Ok(away_from_home(project).map_or(Checkout::This, Checkout::Skip));
+        }
         crate::worktree::Location::Bare => {
             return Ok(Checkout::Skip(format!(
-                "{here} is a linked git worktree of a bare repository"
+                "{here} is a linked git worktree of a bare repository; {ONLY_MAIN}"
             )));
         }
         crate::worktree::Location::Linked { main, .. } => main,
@@ -403,14 +408,38 @@ pub fn checkout(project: &Project, config: Option<&Path>) -> Result<Checkout, St
     let file = path.join(name);
     if !file.is_file() {
         return Ok(Checkout::Skip(format!(
-            "{here} is a linked git worktree, and the main checkout has no {}",
+            "{here} is a linked git worktree, and the main checkout has no {}; {ONLY_MAIN}",
             file.display()
         )));
     }
-    Ok(Checkout::Main(Box::new(Project::discover(
-        &path,
-        Some(&file),
-    )?)))
+    let main = Project::discover(&path, Some(&file))?;
+    Ok(match away_from_home(&main) {
+        Some(reason) => Checkout::Skip(reason),
+        None => Checkout::Main(Box::new(main)),
+    })
+}
+
+const ONLY_MAIN: &str = "the loop runs only in a main checkout";
+
+/// Why `project` is not the loop's `[lab.loop] home`, or `None` when it is
+/// or no home is set.
+fn away_from_home(project: &Project) -> Option<String> {
+    let home = project.lab.lesson_loop.as_ref()?.home.as_deref()?;
+    let home = crate::config::expand_home(home);
+    let Ok(canonical) = home.canonicalize() else {
+        return Some(format!(
+            "the loop's home checkout {} ([lab.loop] home) does not exist here; the loop runs only there",
+            home.display()
+        ));
+    };
+    if project.root.canonicalize().is_ok_and(|r| r == canonical) {
+        return None;
+    }
+    Some(format!(
+        "{} is not the loop's home checkout {} ([lab.loop] home); the loop runs only there",
+        project.root.display(),
+        home.display()
+    ))
 }
 
 /// `lab loop` in the foreground. `worktree` is the linked git worktree it

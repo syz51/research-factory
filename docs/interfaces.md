@@ -600,7 +600,10 @@ baseline_days = 90             # baseline: observations this many days before ad
 measure = [["agentprof", "scan", "--out", ".research/agentprof", "--timezone", "Asia/Tokyo"]]
 notify = ["sh", "scripts/notify.sh"]   # optional
 renotify_hours = 24            # at most 87600
+home = "~/projects/demo"       # optional: the one checkout that runs the loop
 ```
+
+`home` (since lab 0.25.0) is an absolute path or one below `~/`. When it is set, `lab loop` and its brief section run only for that checkout and its linked worktrees. A standalone copy of the project, such as a git clone or an export used as an experiment's scratch copy, does nothing: it says so and exits 0. Such a copy has no agent sessions or git-ignored data, and a fresh signal state, so its loop would file stale and repeated signals under the identity of the session that started it. When the home path does not exist on this machine, the loop runs nowhere there. Without `home`, every checkout that is not a linked worktree runs the loop.
 
 **`rf.evaluation/2`**: one per active lesson, printed by `lab evaluate --format jsonl` and stored in `last.json`. Version 2 (lab 0.4.0) counts agent sessions in session groups: `unit` `session-group`, and `sessions` on each side. lab 0.4 still reads version 1 records in an older `last.json`; lab 0.3 cannot read version 2. lab 0.5.0 adds `introduced` for check-run metrics, and lab 0.6.0 its `reviewed` and `latest_run`; older readers ignore them. lab 0.8.0 adds the unit `interval`, the method `conditional-binomial`, `measure`, and `findings` and `new_units` on each side; lab 0.7 and older cannot read a `last.json` that has the new unit or method, so update lab on every machine that shares the state directory.
 

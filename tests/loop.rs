@@ -730,3 +730,91 @@ fn evaluate_in_a_linked_worktree_reads_the_main_checkouts_ignored_agent_scan() {
     );
     assert_eq!(verdicts(&tracked), ["unmeasurable", "unmeasurable"]);
 }
+
+#[test]
+fn only_the_home_checkout_runs_the_loop_not_a_clone_or_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (home, clone, copy) = (
+        ceiling.join("home"),
+        ceiling.join("clone"),
+        ceiling.join("copy"),
+    );
+    let config = |root: &Path| format!("{CONFIG}home = \"{}\"\n", root.display());
+    project(&home);
+    write(&home, "research.toml", &config(&home));
+    // The measured data is not committed, so a clone has none of it.
+    write(&home, ".gitignore", ".research/\nagent/\nsent.jsonl\n");
+    git(&home, ceiling, &["init", "-q"]);
+    git(&home, ceiling, &["add", "-A"]);
+    git(&home, ceiling, &["commit", "-qm", "project"]);
+    let lab = |d: &Path, args: &[&str]| isolated(env!("CARGO_BIN_EXE_lab"), d, ceiling, args);
+
+    // A clone, such as an experiment's scratch copy, files nothing and keeps no state.
+    git(ceiling, ceiling, &["clone", "-q", "home", "clone"]);
+    let out = lab(&clone, &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains(&format!(
+            "is not the loop's home checkout {} ([lab.loop] home); the loop runs only there, \
+             so `lab loop` did nothing.",
+            home.display()
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert!(sent(&clone).is_empty() && sent(&home).is_empty());
+    assert!(!clone.join(".research").exists(), "no state in the clone");
+    let out = lab(&clone, &["loop", "--background", "--if-older", "15"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!clone.join(".research").exists(), "no background loop");
+    let text = stdout(&lab(&clone, &["brief"]));
+    assert!(
+        text.contains("the loop runs only there, so there are no measurements to show."),
+        "{text}"
+    );
+
+    // A copy outside git does not run it either.
+    project(&copy);
+    write(&copy, "research.toml", &config(&home));
+    let out = lab(&copy, &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains("did nothing"), "{}", stdout(&out));
+    assert!(sent(&copy).is_empty() && !copy.join(".research").exists());
+
+    // The home checkout runs it, and so does a linked worktree, for the home checkout.
+    git(&home, ceiling, &["worktree", "add", "-q", "../linked"]);
+    let out = lab(&ceiling.join("linked"), &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("ran the loop for the main checkout"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(sent(&home).len(), 3);
+    let out = lab(&home, &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(sent(&home).len(), 3, "nothing sent twice");
+
+    // A home that does not exist here runs the loop nowhere; a relative one is an error.
+    write(&copy, "research.toml", &config(&ceiling.join("gone")));
+    let out = lab(&copy, &["loop"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("does not exist here"),
+        "{}",
+        stdout(&out)
+    );
+    write(
+        &copy,
+        "research.toml",
+        &format!("{CONFIG}home = \"home\"\n"),
+    );
+    let out = lab(&copy, &["loop"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("[lab.loop] home must be an absolute path or start with `~/`"),
+        "{}",
+        stderr(&out)
+    );
+}

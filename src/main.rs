@@ -517,8 +517,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         show(lesson_loop::read_record(&main), Some(&main.root))
                     }
                     Ok(lesson_loop::Checkout::Skip(reason)) => brief::no_measurements(&format!(
-                        "{reason}; the loop runs only in a main checkout, so there are no \
-                         measurements to show."
+                        "{reason}, so there are no measurements to show."
                     )),
                     Err(e) => brief::no_measurements(&format!(
                         "Cannot find the checkout the loop runs for: {e}."
@@ -685,9 +684,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 lesson_loop::Checkout::This => (project, None),
                 lesson_loop::Checkout::Main(main) => (*main, Some(project.root)),
                 lesson_loop::Checkout::Skip(reason) => {
-                    let message = format!(
-                        "{reason}; `lab loop` runs only in a main checkout, so it did nothing."
-                    );
+                    let message = format!("{reason}, so `lab loop` did nothing.");
                     if format == Format::Jsonl {
                         eprintln!("{message}");
                     } else {
@@ -739,6 +736,7 @@ recurrence = 3
 # measure = [["agentprof", "scan", "--out", ".research/agentprof", "--timezone", "Asia/Tokyo"]]
 # notify = ["sh", "scripts/notify.sh"]
 # renotify_hours = 24
+# home = "~/projects/demo"   # only this checkout runs the loop, not a clone or copy of it
 
 # Each check prints rf.finding/1 JSON Lines and exits 0 (no errors), 1 (errors) or 2 (failed).
 # Names must be unique. After the first `lab check`, accept the existing backlog with
