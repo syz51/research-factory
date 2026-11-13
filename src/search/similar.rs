@@ -72,6 +72,7 @@ pub fn similar(project: &Project, subject: &str, exclude: &[String]) -> Outcome 
         rebuild: false,
         weigh: true,
         graph: &GraphArgs::default(),
+        listed: None,
     };
     let answer = match traced(project, "similar", &request) {
         Ok(answer) => answer,
