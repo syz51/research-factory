@@ -776,6 +776,25 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
         &BTreeMap::new(),
         fallback.as_ref(),
     );
+    if let Some(fallback) = &fallback {
+        // Any doubt stores the run, as when the main checkout cannot be found.
+        let lacking = lacking_inputs(project, &specs, &ran.items, fallback).unwrap_or_else(|e| {
+            eprintln!("lab: {e}; the run is stored");
+            BTreeSet::new()
+        });
+        if !lacking.is_empty() {
+            let shown: Vec<&str> = lacking.iter().take(3).map(String::as_str).collect();
+            return Err(format!(
+                "this linked git worktree lacks {} git-ignored file(s) that the findings name and \
+                 the main checkout {} has, such as {}. The findings would differ from the main \
+                 checkout's, so no run is stored. Copy the main checkout's git-ignored files into \
+                 this worktree (a project may have a step that seeds them), then run the check again",
+                lacking.len(),
+                fallback.main().display(),
+                shown.join(", ")
+            ));
+        }
+    }
     let header = RunHeader {
         schema: RUN_SCHEMA.into(),
         at,
@@ -828,6 +847,72 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     })
 }
 
+/// The files that findings name, relative to the project root, that this
+/// linked worktree lacks and its main checkout has, where git ignores them: a
+/// source text that only the main checkout downloaded, for example. A checker
+/// that reports such a file as missing found something the main checkout
+/// would not, so the run is not the project's record of its text. A file a
+/// check's argument names, or a file below a directory it names, does not
+/// count: the check read the main checkout's copy (`main_checkout_args`).
+fn lacking_inputs(
+    project: &Project,
+    specs: &[&CheckSpec],
+    items: &[Item],
+    fallback: &crate::worktree::Fallback,
+) -> Result<BTreeSet<String>, String> {
+    let root = &project.root;
+    let by_name: BTreeMap<&str, (Option<&str>, BTreeSet<String>)> = specs
+        .iter()
+        .map(|s| {
+            let cwd = s.cwd.as_deref();
+            let args = s.run[1..]
+                .iter()
+                .filter(|a| a.contains('/'))
+                .filter_map(|a| crate::change::relative(root, cwd, a))
+                .collect();
+            (s.name.as_str(), (cwd, args))
+        })
+        .collect();
+    let mut absent = BTreeSet::new();
+    for item in items {
+        let (cwd, args) = by_name
+            .get(item.check.as_str())
+            .map_or((None, None), |(c, a)| (*c, Some(a)));
+        absent.extend(
+            crate::change::named(root, cwd, &item.finding)
+                .into_iter()
+                .filter(|p| {
+                    let read_from_main = args.is_some_and(|a| {
+                        a.iter().any(|a| {
+                            p == a
+                                || p.strip_prefix(a.as_str())
+                                    .is_some_and(|r| r.starts_with('/'))
+                        })
+                    });
+                    !read_from_main && !root.join(p).exists()
+                }),
+        );
+    }
+    fallback
+        .resolve(absent.iter().map(String::as_str))
+        .map_err(|e| {
+            format!("cannot tell whether this worktree lacks the main checkout's files: {e}")
+        })
+}
+
+/// The header of a stored run, without reading the rest of the file.
+fn read_header(path: &Path) -> Result<RunHeader, String> {
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
+        if !line.trim().is_empty() {
+            return serde_json::from_str(&line).map_err(|e| format!("{}:1: {e}", path.display()));
+        }
+    }
+    Err(format!("{}: empty check run", path.display()))
+}
+
 /// The newest stored live run and the number of info findings that differ
 /// from it, when this clean run repeats it: that run is clean too, dated the
 /// same day in the project's zone, git finds no difference between the two
@@ -845,19 +930,6 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
 /// it is left out, and the next interval starts from the same measures. The
 /// same day keeps every run on the same side of an adoption date. Any doubt,
 /// such as a commit git cannot compare, stores the run.
-/// The header of a stored run, without reading the rest of the file.
-fn read_header(path: &Path) -> Result<RunHeader, String> {
-    use std::io::BufRead as _;
-    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    for line in std::io::BufReader::new(file).lines() {
-        let line = line.map_err(|e| format!("{}: {e}", path.display()))?;
-        if !line.trim().is_empty() {
-            return serde_json::from_str(&line).map_err(|e| format!("{}:1: {e}", path.display()));
-        }
-    }
-    Err(format!("{}: empty check run", path.display()))
-}
-
 fn repeats(
     project: &Project,
     header: &RunHeader,

@@ -147,14 +147,7 @@ pub fn compare<'r>(
         }
         let (place, files) = place(root, spec.cwd.as_deref(), &item.finding);
         let line = line_of(&item.finding.subject);
-        let mut inputs = files.clone();
-        for e in &item.finding.evidence {
-            if let Some(rel) = relative(root, spec.cwd.as_deref(), &e.path)
-                && !inputs.contains(&rel)
-            {
-                inputs.push(rel);
-            }
-        }
+        let inputs = named(root, spec.cwd.as_deref(), &item.finding);
         new.push(New {
             item,
             place,
@@ -248,6 +241,25 @@ fn place(root: &Path, cwd: Option<&str>, f: &Finding) -> (String, Vec<String>) {
     (place, files)
 }
 
+/// The files a finding names, relative to the project root: its subject when
+/// that is a path, then its evidence paths, each once.
+pub(crate) fn named(root: &Path, cwd: Option<&str>, f: &Finding) -> Vec<String> {
+    let subject = without_line(&f.subject);
+    let subject = looks_like_path(subject).then_some(subject);
+    let mut files = Vec::new();
+    for p in subject
+        .into_iter()
+        .chain(f.evidence.iter().map(|e| e.path.as_str()))
+    {
+        if let Some(rel) = relative(root, cwd, p)
+            && !files.contains(&rel)
+        {
+            files.push(rel);
+        }
+    }
+    files
+}
+
 /// A path has a directory part or an extension, as in `without_line`.
 fn looks_like_path(s: &str) -> bool {
     !s.is_empty() && (s.contains('/') || s.contains('.'))
@@ -256,7 +268,7 @@ fn looks_like_path(s: &str) -> bool {
 /// `p`, as a checker run in `cwd` (relative to the project root) printed it,
 /// relative to the project root, without `.` and `..` parts, as git names
 /// files; `None` for a path outside the project root.
-fn relative(root: &Path, cwd: Option<&str>, p: &str) -> Option<String> {
+pub(crate) fn relative(root: &Path, cwd: Option<&str>, p: &str) -> Option<String> {
     let path = Path::new(p);
     let rel = if path.is_absolute() {
         path.strip_prefix(root).ok()?.to_path_buf()

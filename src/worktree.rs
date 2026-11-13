@@ -204,6 +204,11 @@ impl Fallback {
             .map(|p| self.main.join(p)))
     }
 
+    /// The directory in the main checkout that paths are relative to.
+    pub fn main(&self) -> &Path {
+        &self.main
+    }
+
     /// `rel` in the main checkout, for a path that `resolve` returned.
     pub fn main_file(&self, rel: &str) -> PathBuf {
         self.main.join(rel)
