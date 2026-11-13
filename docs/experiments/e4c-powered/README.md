@@ -192,7 +192,14 @@ The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue:
 
 ## Results: screening, and the study is underpowered
 
-Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are selected, below the minimum of 32. By "Screening", the comparison does not run. research-factory-343 asks the user what to do.
+Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are selected, below the minimum of 32. By "Screening", the comparison does not run.
+
+### Outcome and decision
+
+- **Outcome: underpowered.** n is at most 30, below the minimum of 32. No comparison session ran, so this study has no cli vs mcp result. E4b ([../e4b-grep-hard/README.md](../e4b-grep-hard/README.md)) stays the only paired result on grep-hard topics.
+- **Decision (14 November 2026).** The pre-registration asked the user what to do (ask #174 on research-factory-343). The options were: stop and report underpowered; run an exploratory comparison on the selected topics; or add batches past 200 topics. The owner chose the first: "take option 1 for ask 174". The study stops here. Batch 5's key completion and the comparison do not run.
+- **What it found.** Grep-hard topics are rarer than planned: s = 0.125 over batches 1 to 4, against the planned 0.3. `cli` answered 98 of 120 screened phrasings correctly. Key completion cut the selected topics of batches 1 to 4 from 35 to 20: 20 sessions named relevant files that the key had not judged. See "What the screening shows".
+- A new study needs an amendment to this pre-registration, such as a higher topic maximum or a different selection rule.
 
 ### Per batch
 
@@ -231,4 +238,7 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 - One `cli` session per phrasing decides selection. A topic can pass or fail by chance. E4b's fresh `cli` sessions on its selected topics were correct 6 of 30 times, so a single failure is a weak signal.
 - The key grades files, from the paths an answer names, as in E4 and E4b. Each new grade comes from one blind Opus judge per unit.
 - Batch 5's 10 topics before completion are an upper bound. Batches 3 and 4 kept 5 of 15 after completion.
-- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool at `research-factory/e4c-powered/` (`e4c-screening-b1-b2.tgz`, `e4c-screening-b3.tgz` to `e4c-screening-b5.tgz`).
+- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool only, never in cloud storage:
+  - `air:research-factory/e4c-powered/e4c-screening-b1-b2.tgz`: batches 1 and 2 (transcripts and queues).
+  - `air:research-factory/e4c-powered/e4c-screening-b3.tgz`, `e4c-screening-b4.tgz` and `e4c-screening-b5.tgz`: batches 3 to 5.
+  - `air:research-factory/e4c-powered/e4c-work.tgz`: the batch script (`screen_batch.sh`), the queues, the batch logs, the measured rows and the selected lists.
