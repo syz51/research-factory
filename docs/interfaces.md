@@ -7,7 +7,7 @@ Version every record with a `schema` field. A reader rejects a major version it 
 ## 1. Project config: `research.toml`
 
 - Each tool locates the project by walking up from the current directory to the first `research.toml`. `--config <path>` overrides the search. Relative paths in the file resolve against the file's directory.
-- Each tool owns one table named after it and ignores the others: `[papers]`, `[agentprof]`, `[claimcheck]`, `[prov]`, `[ireval]` and `[lab]`. The top-level `[project]` table is shared:
+- Each tool owns one table named after it and ignores the others, except the shared key `[papers] registry` below: `[papers]`, `[agentprof]`, `[claimcheck]`, `[prov]`, `[ireval]` and `[lab]`. The top-level `[project]` table is shared:
 
 ```toml
 [project]
@@ -42,7 +42,7 @@ Every checker supports `--format jsonl` and then writes one finding per line on 
 
 ## 3. Reference registry: `rf.reference/1` (JSON Lines)
 
-`papers` owns the registry. Other tools only read it. The default location is `references.jsonl` next to `research.toml`; `[papers] registry = "<path>"` overrides it. A tool that reads the registry uses the first of these that is set: its own flag (such as `--registry`), its own table's `registry` key, `[papers] registry`, and then the default. Of the readers, only `claimcheck` has its own key, `[claimcheck] registry`; `lab` reads `[papers] registry`.
+`papers` owns the registry. Other tools only read it. The default location is `references.jsonl` next to `research.toml`; `[papers] registry = "<path>"` overrides it. A tool that reads the registry uses the first of these that is set: its own flag (such as `--registry`), its own table's `registry` key, `[papers] registry`, and then the default. Of the readers, only `claimcheck` has its own key, `[claimcheck] registry`; `lab` reads `[papers] registry`. One exception: lab's `cites` edges (section 6) read only `[papers] registry` and have no default.
 
 One line per catalogue entry, ordered by `key`. The key is the archive's stable identifier: the catalogue number as a string (`"177"`) for numbered catalogues, or the note id for one-note-per-paper archives.
 
