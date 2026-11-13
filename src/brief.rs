@@ -131,6 +131,14 @@ pub fn render(
             let _ = writeln!(out, "- {n} × {tool}:{rule}");
         }
     }
+    if !checks.is_empty() {
+        out.push_str(
+            "Commit each run that `lab check` stores, with the text it checked. To check a head \
+             whose run is committed, such as after a merge, run `lab check --new-only` again: \
+             it stores no run that repeats the newest one for the same text and checkers, and \
+             says `not stored`.\n",
+        );
+    }
 
     if let Some(m) = measurements {
         out.push_str(m);
@@ -697,6 +705,12 @@ mod tests {
         assert!(text.contains("- 1 × lab:r1"), "{text}");
         assert!(!text.contains("lab:c1"), "{text}");
         assert!(text.contains("Never run: sources."), "{text}");
+        assert!(
+            text.contains("such as after a merge, run `lab check --new-only` again"),
+            "{text}"
+        );
+        let none = render("demo", "2026-11-07", &[], &runs, &[], &[], 0, None);
+        assert!(!none.contains("Commit each run"), "{none}");
     }
 
     #[test]

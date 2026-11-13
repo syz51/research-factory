@@ -300,9 +300,9 @@ fn check_runs_record_the_commit_and_a_dirty_work_tree() {
     git(top, ceiling, &["add", "-A"]);
     git(top, ceiling, &["commit", "-qm", "init"]);
     let head = git(top, ceiling, &["rev-parse", "HEAD"]);
-    // Runs stored after the commit are untracked but in the state directory,
+    // Files added to the state directory after the commit are untracked but
     // not checked text.
-    check_header(d, ceiling);
+    std::fs::write(d.join(".research/lab/checks/x.txt"), "").unwrap();
     let clean = check_header(d, ceiling);
     assert_eq!(clean["commit"], head.as_str());
     assert_eq!(clean["dirty"], false, "{clean}");
@@ -321,6 +321,111 @@ fn check_runs_record_the_commit_and_a_dirty_work_tree() {
     git(top, ceiling, &["commit", "-qm", "ignore"]);
     let ignored = check_header(d, ceiling);
     assert_eq!(ignored["dirty"], true, "{ignored}");
+}
+
+/// Runs `lab check` with `args` in `d` and returns its output and the run
+/// files it added.
+fn check_stores(d: &Path, ceiling: &Path, args: &[&str]) -> (Output, Vec<std::path::PathBuf>) {
+    let dir = d.join(".research/lab/checks");
+    let runs = || -> std::collections::BTreeSet<std::path::PathBuf> {
+        std::fs::read_dir(&dir)
+            .map(|r| r.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default()
+    };
+    let before = runs();
+    let out = isolated(&mut Command::new(env!("CARGO_BIN_EXE_lab")), ceiling)
+        .arg("check")
+        .args(args)
+        .current_dir(d)
+        .output()
+        .expect("run lab");
+    (out, runs().difference(&before).cloned().collect())
+}
+
+#[test]
+fn a_check_of_a_committed_run_s_head_stores_no_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let d = &ceiling.join("repo");
+    std::fs::create_dir_all(d).unwrap();
+    project(d);
+    // The checker's input and version are git-ignored, as source texts are,
+    // so its results and version can change while the committed text does not.
+    let cfg = std::fs::read_to_string(d.join("research.toml")).unwrap();
+    std::fs::write(
+        d.join("research.toml"),
+        cfg + "version = [\"cat\", \"v.txt\"]\n",
+    )
+    .unwrap();
+    std::fs::write(d.join(".gitignore"), "f.jsonl\nv.txt\n").unwrap();
+    std::fs::write(d.join("f.jsonl"), "").unwrap();
+    std::fs::write(d.join("v.txt"), "1.0\n").unwrap();
+    std::fs::write(d.join("doc.md"), "text\n").unwrap();
+    git(d, ceiling, &["init", "-q"]);
+    git(d, ceiling, &["add", "-A"]);
+    git(d, ceiling, &["commit", "-qm", "text"]);
+    let checks_status = || {
+        git(
+            d,
+            ceiling,
+            &["status", "--short", "--", ".research/lab/checks"],
+        )
+    };
+
+    // Record a run of the committed text, commit it, then check the new head
+    // as the skill says: `lab check --new-only`.
+    let (out, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(
+        (out.status.code(), new.len()),
+        (Some(0), 1),
+        "{}",
+        stderr(&out)
+    );
+    git(d, ceiling, &["add", ".research/lab/checks"]);
+    git(d, ceiling, &["commit", "-qm", "Check runs"]);
+    let (out, new) = check_stores(d, ceiling, &["--new-only"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert!(new.is_empty(), "{new:?}");
+    assert!(
+        stdout(&out).contains("not stored: the newest stored run "),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(checks_status(), "");
+
+    // Changed text is stored, even with the same results.
+    std::fs::write(d.join("doc.md"), "more text\n").unwrap();
+    git(d, ceiling, &["commit", "-qam", "more text"]);
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1);
+    git(d, ceiling, &["add", ".research/lab/checks"]);
+    git(d, ceiling, &["commit", "-qm", "Check runs"]);
+    // Findings that change only through an ignored input are not stored:
+    // the run reports them and says how many differ from the stored run.
+    std::fs::write(d.join("f.jsonl"), errors(&[1])).unwrap();
+    let (out, new) = check_stores(d, ceiling, &[]);
+    assert_eq!((out.status.code(), new.len()), (Some(1), 0));
+    assert!(
+        stdout(&out).contains("1 finding(s) differ from that run"),
+        "{}",
+        stdout(&out)
+    );
+    // A new checker version is stored, as is a dirty run.
+    std::fs::write(d.join("v.txt"), "2.0\n").unwrap();
+    let (out, new) = check_stores(d, ceiling, &[]);
+    assert_eq!((out.status.code(), new.len()), (Some(1), 1));
+    assert!(stdout(&out).contains("stored "), "{}", stdout(&out));
+    std::fs::write(d.join("doc.md"), "edited\n").unwrap();
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1, "a dirty run");
+    let (_, new) = check_stores(d, ceiling, &[]);
+    assert_eq!(new.len(), 1, "a dirty run, again");
 }
 
 #[test]
