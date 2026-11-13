@@ -196,10 +196,10 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 
 ### Outcome and decision
 
-- **Outcome: underpowered.** n is at most 30, below the minimum of 32. No comparison session ran, so this study has no cli vs mcp result. E4b ([../e4b-grep-hard/README.md](../e4b-grep-hard/README.md)) stays the only paired result on grep-hard topics.
+- **Outcome: underpowered.** No comparison session ran, so this study has no cli vs mcp result. E4b ([../e4b-grep-hard/README.md](../e4b-grep-hard/README.md)) stays the only paired result on grep-hard topics.
 - **Decision (14 November 2026).** The pre-registration asked the user what to do (ask #174 on research-factory-343). The options were: stop and report underpowered; run an exploratory comparison on the selected topics; or add batches past 200 topics. The owner chose the first: "take option 1 for ask 174". The study stops here. Batch 5's key completion and the comparison do not run.
-- **What it found.** Grep-hard topics are rarer than planned: s = 0.125 over batches 1 to 4, against the planned 0.3. `cli` answered 98 of 120 screened phrasings correctly. Key completion cut the selected topics of batches 1 to 4 from 35 to 20: 20 sessions named relevant files that the key had not judged. See "What the screening shows".
-- A new study needs an amendment to this pre-registration, such as a higher topic maximum or a different selection rule.
+- **What it found.** See "What the screening shows".
+- This pre-registration is closed. A later study on the same question needs its own pre-registration, written with these screening results in view.
 
 ### Per batch
 
@@ -239,6 +239,5 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 - The key grades files, from the paths an answer names, as in E4 and E4b. Each new grade comes from one blind Opus judge per unit.
 - Batch 5's 10 topics before completion are an upper bound. Batches 3 and 4 kept 5 of 15 after completion.
 - The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool only, never in cloud storage:
-  - `air:research-factory/e4c-powered/e4c-screening-b1-b2.tgz`: batches 1 and 2 (transcripts and queues).
-  - `air:research-factory/e4c-powered/e4c-screening-b3.tgz`, `e4c-screening-b4.tgz` and `e4c-screening-b5.tgz`: batches 3 to 5.
-  - `air:research-factory/e4c-powered/e4c-work.tgz`: the batch script (`screen_batch.sh`), the queues, the batch logs, the measured rows and the selected lists.
+  - `air:research-factory/e4c-powered/e4c-screening-b1-b2.tgz`, `e4c-screening-b3.tgz`, `e4c-screening-b4.tgz` and `e4c-screening-b5.tgz`: each holds its batches' transcripts and session queues. These are the source copies of the queues.
+  - `air:research-factory/e4c-powered/e4c-work.tgz`: the batch script (`screen_batch.sh`), the batch logs of batches 3 to 5, the measured rows, the selected lists, and copies of the batch 3 to 5 queues.
