@@ -103,6 +103,15 @@ impl Default for LabConfig {
     }
 }
 
+/// `~/x` as a path below the home directory.
+pub fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map_or_else(|| PathBuf::from(path), |home| Path::new(&home).join(rest)),
+        None => PathBuf::from(path),
+    }
+}
+
 /// The numbers of a dotted version such as `0.10.0`.
 pub fn version_numbers(version: &str) -> Option<Vec<u64>> {
     let parts: Option<Vec<u64>> = version.trim().split('.').map(|p| p.parse().ok()).collect();
@@ -163,6 +172,10 @@ pub struct LoopConfig {
     /// have passed since it was last sent.
     #[serde(default = "default_renotify_hours")]
     pub renotify_hours: u64,
+    /// The one checkout the loop runs in, as an absolute path or one below
+    /// `~/`. A copy of the project elsewhere, such as a clone, does not run it.
+    #[serde(default)]
+    pub home: Option<String>,
 }
 
 fn default_renotify_hours() -> u64 {
@@ -175,6 +188,7 @@ impl Default for LoopConfig {
             measure: Vec::new(),
             notify: None,
             renotify_hours: default_renotify_hours(),
+            home: None,
         }
     }
 }
@@ -689,6 +703,13 @@ impl Project {
             }
             if l.notify.as_ref().is_some_and(Vec::is_empty) {
                 return Err("[lab.loop] `notify` needs a program".into());
+            }
+            if let Some(h) = &l.home
+                && !(h.starts_with('/') || h.starts_with("~/"))
+            {
+                return Err(format!(
+                    "[lab.loop] home must be an absolute path or start with `~/`, got `{h}`"
+                ));
             }
         }
         if let Some(v) = &raw.lab.min_version

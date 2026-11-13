@@ -7,7 +7,7 @@
 //! (docs/state-machines.md 3.6 and 7.2).
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
@@ -25,15 +25,6 @@ pub struct SessionDoc {
     /// The transcript path as the session list gives it.
     listed: String,
     file: PathBuf,
-}
-
-/// `~/x` as a path below the home directory.
-fn expand(path: &str) -> PathBuf {
-    match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
-            .map_or_else(|| PathBuf::from(path), |home| Path::new(&home).join(rest)),
-        None => PathBuf::from(path),
-    }
 }
 
 pub fn list_sessions(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, String> {
@@ -70,7 +61,7 @@ pub fn list_sessions(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, 
             continue;
         };
         let key = format!("session:{source}:{id}");
-        let file = expand(&listed);
+        let file = crate::config::expand_home(&listed);
         let Some(stamp) = file_stamp(&file) else {
             continue;
         };
