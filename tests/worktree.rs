@@ -377,6 +377,167 @@ fn a_link_to_a_file_git_does_not_track_is_a_warning_until_it_is_committed() {
     assert!(untracked(&lab(&m, &["archive", "check"])).is_empty());
 }
 
+#[test]
+fn a_link_that_a_change_adds_to_a_file_git_ignores_is_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let ceiling = dir.path();
+    let (m, w) = setup(ceiling);
+    std::fs::set_permissions(m.join("private"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let lab = |d: &Path, args: &[&str]| run(LAB, d, ceiling, args);
+    let ignored = |out: &Output| -> Vec<String> {
+        stdout(out)
+            .lines()
+            .filter(|l| l.contains("ignored-link"))
+            .map(str::to_string)
+            .collect()
+    };
+    let top = m.parent().unwrap();
+    // The default branch holds the links, so neither checkout reports them.
+    assert_eq!(
+        ignored(&lab(&m, &["archive", "check"])),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ignored(&lab(&w, &["archive", "check"])),
+        Vec::<String>::new()
+    );
+    // A line the work tree adds is reported, also in the linked worktree,
+    // which finds the ignored target in the main checkout. The older line
+    // with the same target is not.
+    for d in [&m, &w] {
+        let a = std::fs::read_to_string(d.join("docs/a.md")).unwrap();
+        write(d, "docs/a.md", &format!("{a}[again](../data/big.csv)\n"));
+        let lines = ignored(&lab(d, &["archive", "check"]));
+        assert_eq!(lines.len(), 1, "{}: {lines:?}", d.display());
+        assert!(
+            lines[0].starts_with("warn ignored-link docs/a.md:8")
+                && lines[0].contains("`../data/big.csv`"),
+            "{}",
+            lines[0]
+        );
+        write(d, "docs/a.md", &a);
+    }
+
+    // A file the default branch holds, then renamed on the branch: its old
+    // link is still not new.
+    write(
+        &m,
+        "docs/c.md",
+        "# C\n\nOne line of text.\nAnother line of text.\n[data](../data/big.csv)\n",
+    );
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "c"]);
+    git(top, ceiling, &["switch", "-qc", "feat"]);
+    git(top, ceiling, &["mv", "proj/docs/c.md", "proj/docs/d.md"]);
+    // `data/forced.csv` matches the ignore pattern but is committed; `notes/`
+    // is an ignored directory that git tracks nothing in.
+    write(&m, "docs/a.md", "# A\n");
+    write(&m, "data/absent.json", "{}\n");
+    write(&m, "data/forced.csv", "a\n");
+    git(top, ceiling, &["add", "-f", "proj/data/forced.csv"]);
+    write(
+        &m,
+        "docs/b.md",
+        "# B\n\n[data](../data/big.csv)\n[forced](../data/forced.csv)\n[notes](../notes/)\n\
+         [tracked](tracked.md)\n",
+    );
+    git(top, ceiling, &["add", "-A"]);
+    git(top, ceiling, &["commit", "-qm", "links"]);
+
+    let out = lab(&m, &["archive", "check"]);
+    let lines = ignored(&out);
+    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert!(
+        lines[0].starts_with("warn ignored-link docs/b.md:3")
+            && lines[0].contains(
+                "`../data/big.csv`, which git ignores, so no commit holds it; add a `!` \
+                 re-include rule to .gitignore or link a tracked file, or accept a file that \
+                 must stay out of git with [[lab.archive.allow]]"
+            ),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with("warn ignored-link docs/b.md:5") && lines[1].contains("`../notes/`"),
+        "{}",
+        lines[1]
+    );
+    // A warning: the gate passes and names the fix.
+    let done = lab(&m, &["archive", "done"]);
+    assert_eq!(done.status.code(), Some(0), "{}", stdout(&done));
+    assert!(
+        stdout(&done).contains(
+            "keep a private file ignored and accept the link with an [[lab.archive.allow]]"
+        ),
+        "{}",
+        stdout(&done)
+    );
+
+    // `lab check --new-only` gates the warnings the change adds.
+    let new = lab(&m, &["check", "--new-only", "--only", "archive"]);
+    let text = stdout(&new);
+    assert_eq!(new.status.code(), Some(1), "{text}{}", stderr(&new));
+    assert!(
+        text.contains("docs/b.md:3 warn lab:ignored-link: links to `../data/big.csv`"),
+        "{text}"
+    );
+    assert!(!text.contains("forced.csv"), "{text}");
+
+    // A re-include rule makes the target committable, and then untracked.
+    write(
+        top,
+        ".gitignore",
+        ".research/\ndata/*\n!data/big.csv\nnotes/\nprivate/\n",
+    );
+    let out = lab(&m, &["archive", "check"]);
+    let lines = ignored(&out);
+    assert_eq!(lines.len(), 1, "{}", stdout(&out));
+    assert!(lines[0].contains("`../notes/`"), "{}", lines[0]);
+    assert!(
+        stdout(&out).contains("warn untracked-link docs/b.md:3"),
+        "{}",
+        stdout(&out)
+    );
+    git(top, ceiling, &["checkout", "--", ".gitignore"]);
+
+    // An allow entry accepts a link that must stay out of git. It still
+    // matches once the default branch holds the line, so it does not go stale.
+    let cfg = std::fs::read_to_string(m.join("research.toml")).unwrap();
+    write(
+        &m,
+        "research.toml",
+        &format!(
+            "{}\n[[lab.archive.allow]]\nrule = \"ignored-link\"\nsubject = \"docs/b.md\"\n\
+             target = \"../notes/\"\nreason = \"Private notes stay out of git.\"\n",
+            cfg.replace("[lab.archive]\n", "[lab.archive]\nmodel = 2\n")
+        ),
+    );
+    let out = lab(&m, &["archive", "check"]);
+    let lines = ignored(&out);
+    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert!(
+        lines[0].starts_with("warn ignored-link docs/b.md:3"),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with("info ignored-link docs/b.md:5")
+            && lines[1].contains("accepted by [[lab.archive.allow]]"),
+        "{}",
+        lines[1]
+    );
+    git(top, ceiling, &["commit", "-qam", "allow"]);
+    git(top, ceiling, &["switch", "-q", "main"]);
+    git(
+        top,
+        ceiling,
+        &["merge", "-q", "--no-ff", "-m", "merge", "feat"],
+    );
+    let out = lab(&m, &["archive", "check"]);
+    assert_eq!(ignored(&out), Vec::<String>::new(), "{}", stdout(&out));
+    assert!(!stdout(&out).contains("stale-allow"), "{}", stdout(&out));
+}
+
 const DIR_TEXTS: &str = r#"for f in "$1"/*.txt; do
 printf '{"schema":"rf.finding/1","tool":"dirtexts","rule":"text-read","severity":"warn","subject":"docs/a.md:1","message":"read","evidence":[{"path":"%s"}]}\n' "$f"
 done

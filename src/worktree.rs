@@ -216,7 +216,9 @@ impl Fallback {
 }
 
 /// The ones of `paths`, relative to `dir`, that git ignores there, from one
-/// `git check-ignore --stdin`.
+/// `git check-ignore --stdin`. Empty outside a git repository or without git.
+/// git stops at a path below a symbolic link or in a submodule, so callers
+/// pass only paths whose directories are plain ones of this repository.
 pub fn ignored<'a>(
     dir: &Path,
     paths: impl IntoIterator<Item = &'a str>,
@@ -229,7 +231,7 @@ pub fn ignored<'a>(
     if input.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let mut child = Command::new("git")
+    let mut child = match Command::new("git")
         .args(["check-ignore", "-z", "--stdin"])
         .current_dir(dir)
         .env("LC_ALL", "C")
@@ -237,17 +239,23 @@ pub fn ignored<'a>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("git check-ignore: {e}"))?;
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(format!("git check-ignore: {e}")),
+    };
     let mut stdin = child.stdin.take().expect("stdin is piped");
     // Written from another thread, so a full stdout pipe cannot block both sides.
     let writer = std::thread::spawn(move || stdin.write_all(&input));
     let out = child
         .wait_with_output()
         .map_err(|e| format!("git check-ignore: {e}"))?;
-    writer
-        .join()
-        .expect("the writer thread does not panic")
-        .map_err(|e| format!("git check-ignore: {e}"))?;
+    let written = writer.join().expect("the writer thread does not panic");
+    // git may stop before it reads all of stdin, so this comes first.
+    if String::from_utf8_lossy(&out.stderr).contains("not a git repository") {
+        return Ok(BTreeSet::new());
+    }
+    written.map_err(|e| format!("git check-ignore: {e}"))?;
     // 0: some paths are ignored, 1: none is.
     match out.status.code() {
         Some(0) => Ok(out

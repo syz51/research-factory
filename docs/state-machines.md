@@ -120,10 +120,13 @@ written ─► front matter valid ─► (manifest) sealed ─► search refresh
 
 It exits non-zero at the first stage with an error.
 
-Link target: `untracked-link` (`src/archive/rules.rs:762-783`) is a Warn for a link to an untracked file, or to a directory that holds untracked files and nothing tracked.
+Link target: `untracked-link` (`src/archive/rules.rs:814-835`) is a Warn for a link to an untracked file, or to a directory that holds untracked files and nothing tracked.
 An untracked target exists only in this checkout, so the link breaks in every other checkout.
 `lab archive done` prints the fix for this Warn and still exits 0 (`src/archive/done.rs:73-76`).
-Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
+Since lab 0.26.0 (research-factory-388), `ignored-link` (`src/archive/rules.rs:836-853`) is a Warn for a link to a file or directory that git ignores, on a line that the change adds.
+A line counts as added when it differs from the merge base of HEAD with the default branch (`src/archive/gitseal.rs:190`); without a default branch or a merge base, no line counts.
+The other ignored-link findings are dropped after `[[lab.archive.allow]]` has matched them, so an entry stays in use after its branch merges (`src/archive/rules.rs:187`).
+The worktree data seed (section 5.6) still carries ignored targets to a linked worktree.
 Git lists untracked files only at those link targets (`src/archive/gitseal.rs:141-166`). Fixed in research-factory-414: the scan went from 1.06-1.54 s to 0.08-0.11 s on masters.
 
 Gaps in `lab archive check`:

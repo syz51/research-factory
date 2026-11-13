@@ -168,6 +168,198 @@ pub(super) fn untracked(root: &Path, paths: &BTreeSet<String>) -> Result<BTreeSe
     Ok(found)
 }
 
+/// The lines that a change adds to its files: see [`added_lines`].
+pub(super) struct Added {
+    /// Files that git does not track: every line is new.
+    all: BTreeSet<String>,
+    lines: BTreeMap<String, BTreeSet<usize>>,
+}
+
+impl Added {
+    /// Whether the change adds line `line` (from 1) of `path`.
+    pub(super) fn contains(&self, path: &str, line: usize) -> bool {
+        self.all.contains(path) || self.lines.get(path).is_some_and(|l| l.contains(&line))
+    }
+}
+
+/// The lines of `files`, relative to `root`, that differ from the merge base
+/// of HEAD with the default branch: in commits since it, in the index or in
+/// the work tree. A file git does not track is new in every line; a renamed
+/// file is new only in the lines it changed. `None` outside a git work tree,
+/// or without a default branch or a merge base.
+pub(super) fn added_lines(root: &Path, files: &BTreeSet<&str>) -> Result<Option<Added>, String> {
+    if files.is_empty() || prefix(root).is_none() {
+        return Ok(None);
+    }
+    let Some(branch) = crate::worktree::default_branch(root)? else {
+        return Ok(None);
+    };
+    let Some(base) = crate::worktree::merge_base(root, &branch)? else {
+        return Ok(None);
+    };
+    let specs: Vec<String> = files.iter().map(|f| format!(":(literal){f}")).collect();
+    let mut tracked = BTreeSet::new();
+    for chunk in specs.chunks(1000) {
+        let mut args = vec!["-z", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        tracked.extend(listed(root, &args)?.unwrap_or_default());
+    }
+    // The diff finds a rename only when it sees the old path too.
+    let renames = output(
+        root,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "-M",
+            "--diff-filter=R",
+            "--relative",
+            &base,
+            "--",
+        ],
+        b"",
+    )?;
+    let mut fields = renames.split(|&b| b == 0).filter(|f| !f.is_empty());
+    let mut old: BTreeMap<String, String> = BTreeMap::new();
+    while let (Some(_status), Some(from), Some(to)) = (fields.next(), fields.next(), fields.next())
+    {
+        old.insert(
+            String::from_utf8_lossy(to).into_owned(),
+            String::from_utf8_lossy(from).into_owned(),
+        );
+    }
+    let mut lines: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let wanted: Vec<&str> = files
+        .iter()
+        .copied()
+        .filter(|f| tracked.contains(*f))
+        .collect();
+    // Bounded so that the arguments stay well below the system's limit; a
+    // file and its old path stay in the same call.
+    for chunk in wanted.chunks(500) {
+        let mut paths: Vec<String> = Vec::new();
+        for f in chunk {
+            paths.push(format!(":(literal){f}"));
+            if let Some(o) = old.get(*f) {
+                paths.push(format!(":(literal){o}"));
+            }
+        }
+        let mut args = vec![
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "-U0",
+            "-M",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--relative",
+            &base,
+            "--",
+        ];
+        args.extend(paths.iter().map(String::as_str));
+        diff_added(&output(root, &args, b"")?, &mut lines);
+    }
+    let all = files
+        .iter()
+        .filter(|f| !tracked.contains(**f))
+        .map(|f| f.to_string())
+        .collect();
+    Ok(Some(Added { all, lines }))
+}
+
+/// Adds the new-side line numbers of each hunk in `git diff -U0` output to
+/// `lines`, by the file's new path.
+fn diff_added(diff: &[u8], lines: &mut BTreeMap<String, BTreeSet<usize>>) {
+    let mut file: Option<String> = None;
+    // Lines left in the current hunk: old side, new side.
+    let (mut old, mut new) = (0usize, 0usize);
+    for line in diff.split(|&b| b == b'\n') {
+        if old + new > 0 {
+            match line.first() {
+                Some(b'-') => old = old.saturating_sub(1),
+                Some(b'+') => new = new.saturating_sub(1),
+                Some(b' ') => {
+                    old = old.saturating_sub(1);
+                    new = new.saturating_sub(1);
+                }
+                // `\ No newline at end of file`.
+                _ => {}
+            }
+            continue;
+        }
+        if line.starts_with(b"diff ") {
+            file = None;
+        } else if let Some(name) = line.strip_prefix(b"+++ ") {
+            // Git ends a name that holds a space with a tab.
+            let name = name.strip_suffix(b"\t").unwrap_or(name);
+            file = unquote(name)
+                .strip_prefix(b"b/")
+                .map(|n| String::from_utf8_lossy(n).into_owned());
+        } else if let Some(rest) = line.strip_prefix(b"@@ -") {
+            let rest = String::from_utf8_lossy(rest);
+            let mut sides = rest.split(' ');
+            let count = |s: &str| -> Option<(usize, usize)> {
+                let (start, n) = s.split_once(',').unwrap_or((s, "1"));
+                Some((start.parse().ok()?, n.parse().ok()?))
+            };
+            let (Some((_, o)), Some((start, n))) = (
+                sides.next().and_then(count),
+                sides
+                    .next()
+                    .and_then(|s| s.strip_prefix('+'))
+                    .and_then(count),
+            ) else {
+                continue;
+            };
+            (old, new) = (o, n);
+            if let Some(f) = &file {
+                lines.entry(f.clone()).or_default().extend(start..start + n);
+            }
+        }
+    }
+}
+
+/// A path as git writes it in a diff header: C-quoted when it holds a
+/// control character, a double quote or a backslash.
+fn unquote(name: &[u8]) -> Vec<u8> {
+    let Some(inner) = name.strip_prefix(b"\"").and_then(|n| n.strip_suffix(b"\"")) else {
+        return name.to_vec();
+    };
+    let mut out = Vec::with_capacity(inner.len());
+    let mut bytes = inner.iter().copied().peekable();
+    while let Some(b) = bytes.next() {
+        if b != b'\\' {
+            out.push(b);
+            continue;
+        }
+        match bytes.next() {
+            Some(d @ b'0'..=b'7') => {
+                let mut v = u32::from(d - b'0');
+                for _ in 0..2 {
+                    if let Some(&d @ b'0'..=b'7') = bytes.peek() {
+                        v = v * 8 + u32::from(d - b'0');
+                        bytes.next();
+                    }
+                }
+                out.push(v as u8);
+            }
+            Some(b'a') => out.push(7),
+            Some(b'b') => out.push(8),
+            Some(b't') => out.push(b'\t'),
+            Some(b'n') => out.push(b'\n'),
+            Some(b'v') => out.push(11),
+            Some(b'f') => out.push(12),
+            Some(b'r') => out.push(b'\r'),
+            Some(c) => out.push(c),
+            None => out.push(b'\\'),
+        }
+    }
+    out
+}
+
 /// The record ids in the tree of `rev`, derived as `Spec::records` derives
 /// the work tree's: one record per index that lists a file. Empty outside a
 /// git work tree; `None` when `rev` names no commit, such as a remote branch
@@ -847,6 +1039,32 @@ pub(super) fn history(root: &Path, path: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_added_lines_of_a_zero_context_diff() {
+        // An added line that looks like a header, a quoted name, a name with
+        // a space, a deletion and a hunk without a count.
+        let diff = b"diff --git a/a.md b/a.md\nindex 1..2 100644\n--- a/a.md\n+++ b/a.md\n\
+            @@ -2,0 +3,2 @@\n++++ b/x.md\n+two\n@@ -9 +10,0 @@\n-gone\n\
+            diff --git \"a/q\\\"\\303\\251.md\" \"b/q\\\"\\303\\251.md\"\nnew file mode 100644\n\
+            --- /dev/null\n+++ \"b/q\\\"\\303\\251.md\"\n@@ -0,0 +1 @@\n+one\n\\ No newline at end of file\n\
+            diff --git a/s p.md b/s p.md\n--- a/s p.md\t\n+++ b/s p.md\t\n@@ -4 +4 @@\n-old\n+new\n\
+            diff --git a/del.md b/del.md\ndeleted file mode 100644\n--- a/del.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+        let mut lines = BTreeMap::new();
+        diff_added(diff, &mut lines);
+        let got: Vec<(&str, Vec<usize>)> = lines
+            .iter()
+            .map(|(f, l)| (f.as_str(), l.iter().copied().collect()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.md", vec![3, 4]),
+                ("q\"é.md", vec![1]),
+                ("s p.md", vec![4])
+            ]
+        );
+    }
 
     #[test]
     fn parses_raw_changes_and_keeps_only_the_project() {

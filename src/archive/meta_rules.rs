@@ -16,13 +16,14 @@ use crate::config::{ArchiveConfig, CONFIG_FILE, Field, SealMode};
 use crate::finding::Severity;
 
 /// The rules an `[[lab.archive.allow]]` entry may name.
-pub(super) const ALLOWED: [&str; 8] = [
+pub(super) const ALLOWED: [&str; 9] = [
     "duplicate-id",
     "id-taken-on-default-branch",
     "missing-summary",
     "unindexed-file",
     "no-current-page",
     "historical-link",
+    "ignored-link",
     "task-without-record",
     "open-item",
 ];
@@ -195,8 +196,10 @@ pub(super) fn validate(cfg: &ArchiveConfig) -> Result<(), String> {
         if a.subject.trim().is_empty() {
             return err(format!("{what}: `subject` must not be empty"));
         }
-        if a.target.is_some() && a.rule != "historical-link" {
-            return err(format!("{what}: only `historical-link` takes a `target`"));
+        if a.target.is_some() && !["historical-link", "ignored-link"].contains(&a.rule.as_str()) {
+            return err(format!(
+                "{what}: only `historical-link` and `ignored-link` take a `target`"
+            ));
         }
         if a.reason.trim().is_empty() {
             return err(format!(

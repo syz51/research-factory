@@ -37,6 +37,7 @@ pub const RULES: &[Rule] = &[
     rule("front-matter-invalid", Error),
     rule("historical-link", Warn),
     rule("id-taken-on-default-branch", Warn),
+    rule("ignored-link", Warn),
     rule("inactive-without-reason", Error),
     rule("index-leftover", Warn),
     rule("index-missing", Error),

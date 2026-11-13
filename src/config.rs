@@ -371,7 +371,8 @@ pub struct AllowSpec {
     /// The finding's subject without a line number: a path, a duplicated id,
     /// or a page group's name.
     pub subject: String,
-    /// For `historical-link`: the link destination exactly as written.
+    /// For `historical-link` and `ignored-link`: the link destination exactly
+    /// as written.
     #[serde(default)]
     pub target: Option<String>,
     pub reason: String,
