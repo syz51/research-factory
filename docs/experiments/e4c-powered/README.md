@@ -182,3 +182,50 @@ The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue:
   - Leak check: it also scans tool results, not only tool inputs, for `qrels`, `topics.jsonl`, `extension-*/` key files and `archive-search-testset` paths.
   - K80 phrasing 2 is invalid. It runs again once in a filtered copy at a71b91b, and the new run replaces it in screening. The invalid transcript is kept and reported.
 - Batches 1 and 2 otherwise stand, screened in unfiltered copies. This is a limit: the screening copies differ from the comparison copies in git history only.
+
+### Amendment 3 (2026-11-13): a narrower leak-check pattern
+
+- Set before batch 3 screening (board note #5915 on research-factory-343, 07:58Z); recorded here with the results.
+- Amendment 2's pattern matched any `qrels` or `topics.jsonl` text. On batches 1 and 2 it flagged 14 of 65 sessions, mostly archive prose that mentions qrels. That is too broad for a pass or fail check.
+- New pattern, on tool inputs and tool results: test-set paths under `qrels`, `topics.jsonl` or `extension-<n>/`, lines of `qrels-records.txt`, and a `"seeds": [` field. On batches 1 and 2 it flags K80 phrasing 2 (the leak), K77 phrasing 2 and T30 phrasing 1, the three exposures that amendment 2 lists.
+- Each flagged session is read by hand. Batches 3 to 5 ran in filtered copies, and the check flagged none of their 85 sessions.
+
+## Results: screening, and the study is underpowered
+
+Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are selected, below the minimum of 32. By "Screening", the comparison does not run. research-factory-343 asks the user what to do.
+
+### Per batch
+
+| Batch | C_b | Admitted of 40 | Topics with a gate-passing phrasing | Sessions | Correct (key completed) | Selected before completion | Selected (key completed) | Key K |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 41d3057 | 33 | 28 | 37 | 30 | 9 | 7 | ae12511 |
+| 2 | a71b91b | 30 | 20 | 28 | 19 | 11 | 8 | ae12511 |
+| 3 | 81bad6d | 31 | 22 | 33 | 31 | 8 | 2 | 9e75b8d |
+| 4 | b1cf03e | 29 | 18 | 22 | 18 | 7 | 3 | 9349b6a |
+| 5 | 3da6935 | 30 | 22 | 30 | not completed | 10 | at most 10 | none |
+| All | | 153 | 110 | 150 | | 45 | 20 to 30 | |
+
+- Sessions: one `cli` session per gate-passing phrasing. All 150 ended in success. None needed a rerun. The invalid K80 phrasing 2 run (amendment 2) is left out.
+- Selected topics, batches 1 to 4 (topic and compared phrasing): [raw/selected-b1-b4.txt](raw/selected-b1-b4.txt). Batch 5 before completion: [raw/selected-b5-before-completion.txt](raw/selected-b5-before-completion.txt).
+- Rows: `raw/screen-b<b>.jsonl` with the completed key, and `raw/screen-b<b>-before-completion.jsonl` with the key at C_b (batches 1 and 2: at a71b91b). Start order: `raw/screen-b<b>-order.log`.
+- The selected count can only fall with key completion. So n is at most 20 + 10 = 30 whatever batch 5's completion finds. Batch 5's completion did not run, because it cannot change the outcome.
+
+### What the screening shows
+
+- **s is lower than planned.** The plan assumed s = 0.3 and needed s ≥ 0.16. Over batches 1 to 4, s = 20 / 160 = 0.125. With batch 5 at its maximum, s ≤ 30 / 200 = 0.15.
+- **`cli` answers most grep-hard prompts.** With the completed key, `cli` named a grade-2 file in 98 of 120 screened phrasings of batches 1 to 4 (82%). The gate keeps phrasings that grep and BM25 rank poorly, yet the agent still found a relevant record. 134 of the 150 sessions ran `lab search`.
+- **Key completion removed most failures.** Before completion, 35 topics of batches 1 to 4 were selected. With the completed key, 20 were. 20 sessions turned correct (batches 1–2: 7, batch 3: 8, batch 4: 5). Each named a file that the test set had not judged for its topic and that the blind judges graded 2. The pooled key misses relevant records that an agent finds.
+- **Kinds.** Of the 20 selected topics, 9 are paraphrase, 5 supersession, 3 table and 3 cross-record. All 3 cross-record topics come from batches 1 and 2. From batch 3 on, the cross-record grade check (judge-system.md: a record with part of the need is grade 1) admitted few of them: none in batch 3, T47 in batch 4 and T55 in batch 5.
+
+### Cost and usage
+
+- Notional cost of the 150 sessions: $39.06 (batch 1 $8.81, batch 2 $8.91, batch 3 $8.21, batch 4 $5.29, batch 5 $7.84). The subscription paid; no API credit was spent.
+- Weekly usage read 55% before batch 3, 67% before batch 4 and 69% before batch 5. Batches 1 and 2 ran under amendment 1.
+
+### Limits
+
+- Batches 1 and 2 were screened in unfiltered copies (amendment 2). K80 phrasing 2 saw its own key and was rerun. K77 phrasing 2 read figures and README lines through `git show`, but no K77 grade; both K77 phrasings were correct.
+- One `cli` session per phrasing decides selection. A topic can pass or fail by chance. E4b's fresh `cli` sessions on its selected topics were correct 6 of 30 times, so a single failure is a weak signal.
+- The key grades files, from the paths an answer names, as in E4 and E4b. Each new grade comes from one blind Opus judge per unit.
+- Batch 5's 10 topics before completion are an upper bound. Batches 3 and 4 kept 5 of 15 after completion.
+- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool at `research-factory/e4c-powered/` (`e4c-screening-b1-b2.tgz`, `e4c-screening-b3.tgz` to `e4c-screening-b5.tgz`).
