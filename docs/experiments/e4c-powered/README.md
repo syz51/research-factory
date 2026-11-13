@@ -168,6 +168,6 @@ The scripts were checked on E4b's regraded round 2, with E4b's `order.py` queue:
 ### Amendment 1 (2026-11-13): usage cap lifted by the user
 
 - 2026-11-12 ~16:30Z: paused before any session. Weekly usage read 95%.
-- 2026-11-13 03:35Z: resumed. The user reported a usage reset and lifted the 95% and 97% caps of "Stopping and usage rules" for now. The board's usage endpoint still read 97% at 03:29Z (resets_at 2026-11-15 01:00Z), so the reading may lag the reset.
+- 2026-11-13 03:30Z: resumed (amendment commit 03:30:45Z, first session 03:30:57Z). The user reported a usage reset and lifted the 95% and 97% caps of "Stopping and usage rules" for now. The board's usage endpoint still read 97% at 03:29Z (resets_at 2026-11-15 01:00Z), so the reading may lag the reset.
 - Effect: sessions launch without the usage check until the user restores the cap. Every other rule stays the same. Usage does not enter selection or the analysis, so no measure changes.
 - Pins, recorded before the first screening session: `lab` 0.22.0, `claude` CLI 2.1.323, model claude-opus-5-5, research-factory skill at 9961a5f (`git archive`).
