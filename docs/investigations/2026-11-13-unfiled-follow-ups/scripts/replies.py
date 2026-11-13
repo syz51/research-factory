@@ -5,6 +5,7 @@ D = sys.argv[1]
 ts = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))
 late = {r["task"]: r for r in json.load(open(f"{D}/late.json"))}
 txs = [json.loads(l) for l in open(f"{D}/tx.jsonl")]
+REFUSED = re.compile(r"error|refused|not found|cannot", re.I)  # as in classify.py
 def done_id(d):
     tid = d["input"].get("id") or ""
     if not tid:
@@ -13,7 +14,7 @@ def done_id(d):
 idx = collections.defaultdict(list)
 for fi, o in enumerate(txs):
     for i, (k, d, t) in enumerate(o["seq"]):
-        if k == "res-done" and done_id(d): idx[done_id(d)].append((fi, i, t))
+        if k == "res-done" and done_id(d) and not REFUSED.search(d["result"][:120]): idx[done_id(d)].append((fi, i, t))
 out = open(f"{D}/replies.jsonl", "w")
 n = 0
 for tid, r in late.items():
@@ -23,7 +24,7 @@ for tid, r in late.items():
     if not c: continue
     fi, i, t0 = min(c, key=lambda x: abs((ts(x[2]) - T).total_seconds()))
     seq = txs[fi]["seq"]
-    turn, phase, last = 0, "close", None
+    turn, last = 0, None
     replies = []
     for k, d, t in seq[i + 1:]:
         if k == "res-done" and done_id(d) != tid and turn > 0: break

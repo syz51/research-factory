@@ -26,14 +26,14 @@ for tid, r in late.items():
     row["late_ids"] = [h[1] for h in hits]
     if row["found"]:
         o = txs[best[0]]; seq = o["seq"]; row["file"] = o["file"]
-        # walk after done: track prompts, then find the filing that produced each late id
+        # walk after done: label each filing of a late id with the strongest prompt kind seen since the close
+        # (owner or parent prompt > Stop hook > compaction > none); the walk has no time or next-close limit
         trig = []
         prompts = []
         for k, d, t in seq[best[1] + 1:]:
             if k in ("user", "hook", "compact"):
                 prompts.append(k)
             if k in ("res-add", "res-ask"):
-                txt = json.dumps(d)
                 for lid in row["late_ids"]:
                     if re.search(rf"{re.escape(lid)}(?!\d)", d["result"]):
                         trig.append((lid, "user" if "user" in prompts else ("hook" if "hook" in prompts else ("compact" if "compact" in prompts else "same-turn"))))

@@ -53,9 +53,11 @@ for (b, p), c in sorted(tab.items()):
     w(f"| {b} | {p} | {c['n']} | {c['any']} | {c['chat']} | {c['close']} | {c['never']} |")
 for p in ("pre", "post", "P0", "P1", "P2"):
     c = tot[p]; n = c["n"]
+    if not n: continue
     w(f"| all | {p} | {n} | {c['any']} | {c['chat']} ({round(100*c["chat"]/n)}%, {wilson(c['chat'],n)}) | {c['close']} ({round(100*c["close"]/n)}%, {wilson(c['close'],n)}) | {c['never']} ({round(100*c["never"]/n)}%, {wilson(c['never'],n)}) |")
 # population weights
-pop = collections.Counter(per(t) for t in late if t in cls and cls[t].get("found") and t in {json.loads(l)["task"] for l in open(f"{S}/data/replies.jsonl")})
+with open(f"{S}/data/replies.jsonl") as fh: has_replies = {json.loads(l)["task"] for l in fh}
+pop = collections.Counter(per(t) for t in late if t in cls and cls[t].get("found") and t in has_replies)
 w(f"\npopulation with replies: {dict(pop)}")
 for x in ("chat", "close", "never"):
     r = sum(tot[p][x] / tot[p]["n"] * pop[p] for p in ("pre", "post")) / sum(pop.values())

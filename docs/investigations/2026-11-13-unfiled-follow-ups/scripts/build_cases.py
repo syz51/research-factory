@@ -16,6 +16,7 @@ for e in ev:
     if e["type"] in ("task_claimed", "task_taken"): claims[(e["task"], e["actor"])].append(e["at"])
     if e["type"] in ("task_created", "ask_created"): created_by[e["actor"]].append(e)
 txs = [json.loads(l) for l in open(f"{D}/tx.jsonl")]
+REFUSED = re.compile(r"error|refused|not found|cannot", re.I)  # as in classify.py
 def done_id(d):
     tid = d["input"].get("id") or ""
     if not tid:
@@ -24,7 +25,7 @@ def done_id(d):
 idx = collections.defaultdict(list)
 for fi, o in enumerate(txs):
     for i, (k, d, t) in enumerate(o["seq"]):
-        if k == "res-done" and done_id(d): idx[done_id(d)].append((fi, i, t))
+        if k == "res-done" and done_id(d) and not REFUSED.search(d["result"][:120]): idx[done_id(d)].append((fi, i, t))
 def ttl(tid):
     t = tasks.get(tid); return f'{tid} "{t["title"][:90]}" parent={t.get("parent")} proposal={t.get("proposal")}' if t else tid
 os.makedirs(f"{D}/cases", exist_ok=True)
@@ -87,7 +88,6 @@ for n, f in enumerate(sorted(flag) + unflag):
         if k in ("res-add", "res-ask", "res-note", "res-feedback"):
             m = re.findall(r"\b[a-z0-9]+(?:-[a-z0-9]+)*-\d+\b|ask #\d+", d["result"][:200]); last = (last or "") + f"\n[filed: {k[4:]} -> {', '.join(m[:2])}]"
         if k == "text" and d.strip(): last = (last or "") + "\n" + d
-    keep = [x for x in turns if det[f].get(x[0] - 1 if False else x[0])] or []
     flagged_turns = {t for t, u in det[f].items() if u}
     show = [x for x in turns if x[0] in flagged_turns or x[0] == turns[-1][0]] if turns else []
     for t, p, rep in show[-4:]:

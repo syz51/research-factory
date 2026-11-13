@@ -2,7 +2,6 @@
 import json, re, sys, os
 files = [l.strip() for l in open(sys.argv[1]) if l.strip()]
 root = os.path.expanduser("~/.claude/projects")
-ID = re.compile(r"\b([a-z0-9][a-z0-9-]*-\d+)\b")
 FILE_TOOLS = {"mcp__board__task_add": "add", "mcp__board__ask_user": "ask",
               "mcp__board__task_note": "note", "mcp__board__feedback": "feedback"}
 out = []
@@ -47,8 +46,7 @@ for rel in files:
                         cmd = inp.get("command", "")
                         m = re.search(r"\bboard (done|add|ask|note|feedback)\b", cmd)
                         if m and "--help" not in cmd:
-                            k = {"done": "done", "add": "add", "ask": "ask", "note": "note", "feedback": "feedback"}[m.group(1)]
-                            pending[b["id"]] = (k, {"command": cmd[:400]})
+                            pending[b["id"]] = (m.group(1), {"command": cmd[:400]})
                 elif b.get("type") == "text":
                     seq.append(("text", b.get("text", ""), ts))
     out.append({"file": rel, "seq": seq})

@@ -44,8 +44,8 @@ Cost:
 
 - **Closed task.** The first `task_done` event of a task.
 - **Mechanical late filing** ([scripts/late.py](scripts/late.py)). Within 3 days after the close, the same actor id creates a task whose parent is the closed task or whose title or body names it, or opens an ask on it. A note by the same actor on the closed task counts apart, as a late note. A close in the last 3 days has a shorter window.
-- **Trigger** ([scripts/classify.py](scripts/classify.py)). The prompt kind just before a late filing in the closing transcript: none (same turn), owner or parent prompt, Stop hook, or compaction.
-- **Turns** ([scripts/replies.py](scripts/replies.py)). The closing turn is the turn that holds `task_done` (turn 0). Later turns are up to five turns within 24 hours after it, up to another task's close.
+- **Trigger** ([scripts/classify.py](scripts/classify.py)). The strongest prompt kind seen in the closing transcript between the close and a late filing, in this order: owner or parent prompt, Stop hook, compaction, none (same turn). The walk has no time limit and does not stop at the next close. The judges set the prompt of each judged late filing again from the turns.
+- **Turns** ([scripts/replies.py](scripts/replies.py)). The closing turn is the turn that holds `task_done` (turn 0). Later turns are all turns within 24 hours after it, up to another task's close. The detector read all of them; the case files show the judges up to five.
 - **Open item.** Work that remains or was not done, run, read, verified or tested; a limit or caveat that needs work; a follow-up or suggested change; a step or decision that waits on the owner. The full rule is in [judge-brief.md](judge-brief.md).
 - **Left in chat.** An item that no task, ask or note held at the end of the turn in which it first appeared. Its status is `late-prompted` (filed after a later prompt), `late-hook` (filed after a Stop hook) or `never`.
 - **Never filed.** No task held the item on 2026-11-13, after up to two board searches per item.
@@ -59,7 +59,7 @@ The cut at 2026-11-12 03:09Z is the time the open-items Stop hook was installed 
 | P0 | 2026-11-06 | No filing rule. |
 | P1 | 2026-11-07 07:33 | CLAUDE.md: put everything still to do on the board (dotfiles 0e8f8b0, 06:44). Board MCP instructions and a Stop reminder after `task_done` (agent-board PR #31, 07:33). From 2026-11-11 14:24 the reminder went silent after any proposal or ask in the session (agent-board-151, PR #180). |
 | P2 | 2026-11-12 03:09 | Each open item in a report names its task or ask (dotfiles-427, 09f632d, 01:15). The reminder went silent only after a filing about the closed task (agent-board-455, PR #190, 01:26). Lab open-item rule for records with a `task` field, on in masters (research-factory-241, lab 0.13.0, about 02:35). open-items.js Stop hook installed (dotfiles-426, 03:09). |
-| P3 | 2026-11-13 05:33 | The reminder moved into the output of `task_done` and of a release; the board's Stop hook no longer blocks for them (agent-board-76, PR #196). Not measured: about 2 hours of data. |
+| P3 | 2026-11-13 05:33 | The reminder moved into the output of `task_done` and of a release; the board's Stop hook no longer blocks for them (agent-board-76, PR #196). Not measured apart: about 2 hours of data. Its 5 non-triage closes are counted in P2. One is in sample A (agent-board-316) and left no item. |
 
 Times are commit or merge times. A deploy can come later.
 
@@ -191,6 +191,7 @@ Subagents started with the Agent tool get no Stop hook. Their reports go to the 
 - The mechanical count links a filing to a close by actor id and a named id. It misses filings by another agent and filings that do not name the closed task, and it can include another task's filings by the same actor. No action: the judged samples measure the rate; the mechanical count only finds cases.
 - One judge per case. The judges' "heading" and "prose" labels were not checked against each other. No action: a second judge pass would cost about as much as the first, and the main result (most items after close) does not depend on the label.
 - The P2 sample covers about 28 hours, and P3 was not measured. research-factory-374 measures the next period.
+- The mechanical trigger takes the strongest prompt kind since the close, not the prompt just before the filing. It can label a hook-prompted filing as owner-prompted. No action: the judges set the prompt of each judged late filing again, and they found 1 hook-triggered filing.
 - The detector replay used the 2026-11-13 hook and config on all replies. It shows what today's hook would catch, not what the hook did at the time. No action: no other version was installed for long.
 - Judges found 185 items never filed, across the boards. They are filed for triage: agent-board-530 and -531, dotfiles-533 and -534, research-factory-372 and -373, vps-250, t3code-160, email-agent-71, 17lands-zh-3 and codex-commit-7. The research-factory list also holds items from the trading project, which has no board.
 
@@ -199,4 +200,30 @@ Subagents started with the Agent tool get no Stop hook. Their reports go to the 
 - [cases-judged.md](cases-judged.md): each judged case with its samples, period, `task_done` event, session id, item counts by status, and late filings with their kind and prompt.
 - [cases-mechanical.md](cases-mechanical.md): each close with a mechanical late filing, its `task_done` event, the late task or ask with minutes after the close, and the trigger.
 - [judge-brief.md](judge-brief.md): the brief the judges followed.
-- [scripts/](scripts/): the pipeline, in this order: `dump_log.sh`, `late.py`, `tx.py`, `classify.py`, `replies.py`, `notask.py`, `detect.ts`, `sample.py`, `build_cases.py`, then the judges, then `report.py` and `recall.py`. Each script takes the data directory as its first argument. The list of transcripts with a `task_done` came from a search of `~/.claude/projects` for the `task_done` tool name and `board done`.
+- [scripts/](scripts/): the pipeline, in this order: `dump_log.sh`, `late.py`, `tx.py`, `classify.py`, `replies.py`, `notask.py`, `detect.ts`, `sample.py`, `build_cases.py`, then the judges, then `report.py` and `recall.py`. To rerun, with `D` the data directory and `S` its parent:
+
+  ```sh
+  cd ~/.claude/projects
+  find . -name '*.jsonl' -newermt 2026-11-06 -not -path '*/subagents/*' > $S/all-files.txt
+  rg -l -F 'mcp__board__task_done' $(cat $S/all-files.txt) > $S/done-files.txt    # plus files with `board done `
+  rg -l -F '<board agent=' $(cat $S/all-files.txt) > $S/board-files.txt
+  rg --files-without-match -e 'mcp__board__task_claim' -e 'board claim ' -e 'board take ' $(cat $S/board-files.txt) > $S/notask-files.txt
+  cd -
+  zsh dump_log.sh $D                     # events.jsonl
+  python late.py $D                      # late.json
+  python tx.py $S/done-files.txt $D/tx.jsonl
+  python classify.py $D                  # classified.json
+  python replies.py $D                   # replies.jsonl
+  bun detect.ts $D                       # detect.jsonl
+  python sample.py $D                    # sample.json
+  # board show <id> --json for each sampled task, into $D/show/<id>.json
+  python build_cases.py $D               # cases/<id>.md
+  python report.py $S <out dir>          # tables.md and the case lists
+  python recall.py $S
+  # no-task sessions
+  python tx.py $S/notask-files.txt $D/tx-notask.jsonl
+  python notask.py $D                    # replies-notask.jsonl
+  bun detect.ts $D replies-notask.jsonl detect-notask.jsonl
+  ```
+
+  Run Python with `uv run --no-project python`.
