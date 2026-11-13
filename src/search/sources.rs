@@ -212,16 +212,42 @@ impl<'a> Resolver<'a> {
     }
 }
 
-/// The sources of `scope`.
-pub fn list(ctx: &Context, scope: Scope, resolver: &mut Resolver) -> Result<Listing, String> {
-    match scope {
-        Scope::Notes => notes(ctx, resolver),
-        Scope::Refs => refs::list_refs(ctx, resolver),
-        Scope::Texts => refs::list_texts(ctx, resolver),
-        Scope::Files => files(ctx, resolver).map(Listing::complete),
-        Scope::Sessions => chat::list_sessions(ctx, resolver),
-        Scope::Board => Ok(chat::list_board(ctx)),
+/// The sources of each scope the query searches, in its order. The `files`
+/// scope reads the `notes` listing, so a query of both walks the notes once.
+pub fn list(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<(Scope, Listing)>, String> {
+    let mut walked: Option<Listing> = None;
+    let mut notes_at = None;
+    let mut out = Vec::with_capacity(ctx.scopes.len());
+    for (i, &scope) in ctx.scopes.iter().enumerate() {
+        let listing = match scope {
+            // Filled in below, from the walk that `files` may need too.
+            Scope::Notes => {
+                notes_at = Some(i);
+                Listing::default()
+            }
+            Scope::Refs => refs::list_refs(ctx, resolver)?,
+            Scope::Texts => refs::list_texts(ctx, resolver)?,
+            Scope::Files => {
+                let listed = match walked.take() {
+                    Some(listed) => listed,
+                    None => notes(ctx, resolver)?,
+                };
+                let docs = files(ctx, &listed.docs)?;
+                walked = Some(listed);
+                Listing::complete(docs)
+            }
+            Scope::Sessions => chat::list_sessions(ctx, resolver)?,
+            Scope::Board => chat::list_board(ctx),
+        };
+        out.push((scope, listing));
     }
+    if let Some(i) = notes_at {
+        out[i].1 = match walked {
+            Some(listed) => listed,
+            None => notes(ctx, resolver)?,
+        };
+    }
+    Ok(out)
 }
 
 /// The files of the `notes` scope, without generated ones and without the
@@ -259,8 +285,8 @@ fn notes(ctx: &Context, resolver: &mut Resolver) -> Result<Listing, String> {
 }
 
 /// The files of the `files` scope: the configured globs, or else the files
-/// git tracks that are not Markdown.
-fn files(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
+/// git tracks that are not Markdown. `notes` are the sources of `notes`.
+fn files(ctx: &Context, notes: &[Doc]) -> Result<Vec<Doc>, String> {
     let root = &ctx.project.root;
     let paths: Vec<String> = match &ctx.files {
         Some(set) => crate::archive::files::walk(root, &[set])?
@@ -287,7 +313,7 @@ fn files(ctx: &Context, resolver: &mut Resolver) -> Result<Vec<Doc>, String> {
     // A file's unit names the record whose note lies in one of its
     // directories, so the stamps of those notes are part of its stamp.
     let mut notes_in: HashMap<String, Vec<String>> = HashMap::new();
-    for note in notes(ctx, resolver)?.docs {
+    for note in notes {
         let dir = note
             .key
             .rsplit_once('/')
@@ -487,6 +513,44 @@ fn size_text(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_listed_once_serve_both_scopes_in_any_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n\n[lab.search]\nfiles = [\"docs/**/*.csv\"]\n",
+        );
+        write("docs/run/README.md", "# Run\n\nThe lynx run.\n");
+        write("docs/run/out.csv", "a,b\n");
+        let project = crate::config::Project::discover(root, None).unwrap();
+        let summary = |scopes: Vec<Scope>| -> Vec<(Scope, Vec<(String, String)>)> {
+            let ctx = Context::new(&project, scopes).unwrap();
+            list(&ctx, &mut Resolver::new(root).unwrap())
+                .unwrap()
+                .into_iter()
+                .map(|(scope, l)| {
+                    let docs = l.docs.into_iter().map(|d| (d.key, d.stamp)).collect();
+                    (scope, docs)
+                })
+                .collect()
+        };
+        let notes = summary(vec![Scope::Notes]).pop().unwrap();
+        let files = summary(vec![Scope::Files]).pop().unwrap();
+        assert_eq!(notes.1.len(), 1);
+        assert_eq!(files.1.len(), 1);
+        assert_eq!(
+            summary(vec![Scope::Notes, Scope::Files]),
+            [notes.clone(), files.clone()]
+        );
+        assert_eq!(summary(vec![Scope::Files, Scope::Notes]), [files, notes]);
+    }
 
     #[test]
     fn writes_sizes_in_binary_units() {

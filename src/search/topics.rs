@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::config::Project;
 
-use super::{Args, Request, traced};
+use super::{Args, Request, refresh_batch, traced};
 
 /// Hits per topic unless `--limit` says otherwise.
 const DEFAULT_LIMIT: usize = 10;
@@ -118,7 +118,9 @@ pub fn run(project: &Project, args: &Args, file: &Path) -> Result<ExitCode, Stri
     let limit = args.limit.unwrap_or(DEFAULT_LIMIT);
     let mut out = String::new();
     let mut hits = 0;
-    let mut rebuild = args.rebuild;
+    // Build or refresh once: listing the sources for each topic took most of
+    // the run's time.
+    let listed = refresh_batch(project, &args.scopes, args.rebuild)?;
     for topic in &topics {
         let mut phrasings = vec![topic.query.clone()];
         if args.phrasings {
@@ -130,14 +132,13 @@ pub fn run(project: &Project, args: &Args, file: &Path) -> Result<ExitCode, Stri
             limit,
             records: args.records,
             statuses: &args.statuses,
-            rebuild,
+            rebuild: false,
             weigh: false,
             graph: &args.graph,
+            listed: Some(&listed),
         };
         let answer =
             traced(project, "run", &request).map_err(|e| format!("topic `{}`: {e}", topic.id))?;
-        // Build at most once.
-        rebuild = false;
         let ids = shown(
             answer.hits.iter().map(|hit| {
                 let also = hit.also_in.iter().map(|a| {
@@ -209,6 +210,61 @@ mod tests {
             ["a#L1-L2", "b#L1-L2", "c#L1-L2", "d#L1-L2", "e#L1-L2"]
         );
         assert_eq!(shown(hits, 2), ["a#L1-L2", "b#L1-L2"]);
+    }
+
+    #[test]
+    fn a_batch_lists_the_sources_once_and_carries_what_its_refresh_said() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "research.toml",
+            "[project]\nname = \"demo\"\n\n[papers]\nregistry = \"refs.jsonl\"\n\n[lab.archive]\nlinks = [\"docs/**/*.md\"]\n",
+        );
+        // A registry that cannot be read gives a notice in the notes listing.
+        std::fs::create_dir(root.join("refs.jsonl")).unwrap();
+        write("docs/a.md", "# Lynx\n\nThe lynx hunts.\n");
+        let project = Project::discover(root, None).unwrap();
+        let scopes = ["notes".to_string()];
+        let listed = refresh_batch(&project, &scopes, false).unwrap();
+        // A source that is new after the batch's refresh.
+        write("docs/b.md", "# Hare\n\nThe hare runs.\n");
+        let graph = super::super::GraphArgs::default();
+        let ask = |word: &str, listed| {
+            let phrasings = [word.to_string()];
+            super::super::execute(
+                &project,
+                &Request {
+                    phrasings: &phrasings,
+                    scopes: &scopes,
+                    limit: 5,
+                    records: false,
+                    statuses: &[],
+                    rebuild: false,
+                    weigh: false,
+                    graph: &graph,
+                    listed,
+                },
+            )
+            .unwrap()
+        };
+        let notice = |partial: &[String]| {
+            partial
+                .iter()
+                .any(|p| p.contains("the paper texts are not left out of notes"))
+        };
+        let batch = ask("lynx", Some(&listed));
+        assert_eq!(batch.hits.len(), 1);
+        assert!(notice(&batch.partial), "{:?}", batch.partial);
+        // A query of the batch does not list the sources: it misses the new one.
+        assert!(ask("hare", Some(&listed)).hits.is_empty());
+        let alone = ask("hare", None);
+        assert_eq!(alone.hits.len(), 1);
+        assert!(notice(&alone.partial), "{:?}", alone.partial);
     }
 
     #[test]

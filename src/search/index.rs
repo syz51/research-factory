@@ -140,6 +140,40 @@ pub struct Opened {
     pub info: Vec<String>,
 }
 
+/// What one refresh said, for the later queries of a batch: `Opened`
+/// without its connection.
+pub struct Listed {
+    stale: Option<String>,
+    notices: Vec<String>,
+    info: Vec<String>,
+}
+
+impl From<Opened> for Listed {
+    fn from(opened: Opened) -> Self {
+        Self {
+            stale: opened.stale,
+            notices: opened.notices,
+            info: opened.info,
+        }
+    }
+}
+
+/// Opens the index as an earlier refresh of the batch left it, without
+/// listing the sources again, and says what that refresh said. An index that
+/// another process has since removed or rebuilt for another configuration is
+/// opened as `open` does.
+pub fn open_listed(ctx: &Context, listed: &Listed) -> Result<Opened, String> {
+    match open_current(ctx)? {
+        Some(conn) => Ok(Opened {
+            conn,
+            stale: listed.stale.clone(),
+            notices: listed.notices.clone(),
+            info: listed.info.clone(),
+        }),
+        None => open(ctx, false),
+    }
+}
+
 /// The session messages left out of the `sessions` scope, by rule.
 pub fn left_out(conn: &Connection) -> Result<BTreeMap<String, u64>, Fault> {
     let mut stmt =
@@ -368,8 +402,7 @@ fn write_new(ctx: &Context, tmp: &Path) -> Result<Said, String> {
         let mut resolver = Resolver::new(&ctx.project.root)?;
         let mut loader = Loader::new(ctx);
         let mut said = Said::default();
-        for &scope in &ctx.scopes {
-            let listing = sources::list(ctx, scope, &mut resolver)?;
+        for (_, listing) in sources::list(ctx, &mut resolver)? {
             for doc in &listing.docs {
                 index_doc(ctx, &tx, &mut loader, doc, None)?;
             }
@@ -409,12 +442,10 @@ struct Change<'d> {
 fn refresh(ctx: &Context, conn: &mut Connection) -> Result<(Option<String>, Said), Fault> {
     let have = built(conn)?;
     let mut resolver = Resolver::new(&ctx.project.root)?;
-    let mut listings = Vec::new();
+    let listings = sources::list(ctx, &mut resolver)?;
     let mut said = Said::default();
-    for &scope in &ctx.scopes {
-        let listing = sources::list(ctx, scope, &mut resolver)?;
-        said.add(&listing);
-        listings.push((scope, listing));
+    for (_, listing) in &listings {
+        said.add(listing);
     }
     let mut changed: Vec<Change> = Vec::new();
     let mut gone: Vec<i64> = Vec::new();
@@ -732,7 +763,10 @@ mod tests {
         let (a, b) = (id(&tx, "docs/a.md"), id(&tx, "docs/b.md"));
         remove_file(&tx, a).unwrap();
         remove_file(&tx, b).unwrap();
-        let listed = sources::list(&ctx, Scope::Notes, &mut Resolver::new(root).unwrap()).unwrap();
+        let (_, listed) = sources::list(&ctx, &mut Resolver::new(root).unwrap())
+            .unwrap()
+            .pop()
+            .unwrap();
         let doc = listed.docs.iter().find(|d| d.key == "docs/a.md").unwrap();
         index_doc(&ctx, &tx, &mut Loader::new(&ctx), doc, None).unwrap();
         graph::drop_orphan_anchors(&tx).unwrap();

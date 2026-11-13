@@ -177,6 +177,7 @@ fn call(project: &Project, name: &str, input: &Input) -> Result<String, String> 
                 rebuild: false,
                 weigh: false,
                 graph: &graph,
+                listed: None,
             };
             let mut found = traced(project, "mcp", &request)?;
             for hit in &mut found.hits {

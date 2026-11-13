@@ -538,6 +538,9 @@ pub(crate) struct Request<'a> {
     pub weigh: bool,
     /// The graph filters (`--cites`, `--links-to`, dates) and folding.
     pub graph: &'a GraphArgs,
+    /// What a refresh earlier in this batch of queries said. The query then
+    /// uses the index as it is and does not list the sources again.
+    pub listed: Option<&'a index::Listed>,
 }
 
 /// The answer to one query.
@@ -718,6 +721,7 @@ pub fn run(project: &Project, args: &Args) -> Result<ExitCode, String> {
         rebuild: args.rebuild,
         weigh: false,
         graph: &args.graph,
+        listed: None,
     };
     let mut answer = match traced(project, "cli", &request) {
         Ok(answer) => answer,
@@ -788,6 +792,25 @@ pub fn refresh(project: &Project) -> Result<(i64, i64), String> {
         return Err(format!("the search index is stale: {why}"));
     }
     index::counts(&opened.conn).map_err(String::from)
+}
+
+/// Builds the index of `scopes`, or brings it up to date with their sources,
+/// for a batch of queries, and gives what the refresh said. The queries pass
+/// it as `Request::listed`, so the batch lists the sources once. The refresh
+/// is not held to a query's budget: the batch answers from a complete index.
+pub(crate) fn refresh_batch(
+    project: &Project,
+    scopes: &[String],
+    rebuild: bool,
+) -> Result<index::Listed, String> {
+    let ctx = Context {
+        budgeted: false,
+        ..Context::new(
+            project,
+            requested(scopes, &project.lab.search.default_scopes)?,
+        )?
+    };
+    Ok(index::open(&ctx, rebuild)?.into())
 }
 
 fn stages() -> BTreeMap<&'static str, &'static str> {
@@ -894,7 +917,10 @@ fn execute(project: &Project, req: &Request) -> Result<Answer, String> {
     }
     let mut rebuild = req.rebuild;
     let (outcome, stale, notices, info, weights) = loop {
-        let opened = index::open(&ctx, rebuild)?;
+        let opened = match req.listed {
+            Some(listed) if !rebuild => index::open_listed(&ctx, listed)?,
+            _ => index::open(&ctx, rebuild)?,
+        };
         let filter = filters.units_sql(&opened.conn)?;
         let opts = query::Options {
             limit: req.limit,
