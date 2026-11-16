@@ -139,6 +139,9 @@ fn listed(root: &Path, args: &[&str]) -> Result<Option<BTreeSet<String>>, String
 /// paths, so a large ignored tree costs nothing. Empty outside a git work
 /// tree or without git.
 pub(super) fn untracked(root: &Path, paths: &BTreeSet<String>) -> Result<BTreeSet<String>, String> {
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
+    }
     let Some(tracked) = listed(root, &["-z"])? else {
         return Ok(BTreeSet::new());
     };

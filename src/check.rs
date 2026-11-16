@@ -794,27 +794,28 @@ pub fn run(project: &Project, only: &[String]) -> Result<Report, String> {
     let specs = select(project, only)?;
     let baseline = Baseline::load(project)?;
     let at = finding::now();
-    // `git status` reads the whole work tree, which can take as long as a
-    // check, so it runs while the checks do.
-    let (state, fallback, ran) = std::thread::scope(|s| {
+    // `dirty` is the work tree's state when the run starts, so `git status`
+    // ends before any check can write a file. It overlaps only the main
+    // checkout lookup.
+    let (state, fallback) = std::thread::scope(|s| {
         let state = s.spawn(|| git_state(project));
         // A linked git worktree lacks the main checkout's ignored files, such as downloads.
         let fallback = crate::worktree::Fallback::find(&project.root).unwrap_or_else(|e| {
             eprintln!("lab: ignored files are not looked up in a main checkout: {e}");
             None
         });
-        let ran = run_checks(
-            project,
-            &project.root,
-            &specs,
-            &BTreeMap::new(),
-            fallback.as_ref(),
-        );
         let state = state
             .join()
             .unwrap_or_else(|p| std::panic::resume_unwind(p));
-        (state, fallback, ran)
+        (state, fallback)
     });
+    let ran = run_checks(
+        project,
+        &project.root,
+        &specs,
+        &BTreeMap::new(),
+        fallback.as_ref(),
+    );
     let (commit, dirty) = state.unwrap_or_else(|e| {
         eprintln!("lab: the run records no commit: {e}");
         (None, None)
@@ -1452,7 +1453,13 @@ mod tests {
         };
         let p = project(
             dir.path(),
-            &[check("slow", "1"), check("mid", "0.5"), check("fast", "0")].concat(),
+            &[
+                check("slow", "1"),
+                check("mid", "0.5"),
+                check("also", "1"),
+                check("fast", "0"),
+            ]
+            .concat(),
         );
         let started = Instant::now();
         let report = run(&p, &[]).unwrap();
@@ -1469,12 +1476,14 @@ mod tests {
             [
                 ("slow", Some("slow")),
                 ("mid", Some("mid")),
+                ("also", Some("also")),
                 ("fast", Some("fast"))
             ]
         );
-        // One after another they take 3 s.
-        if std::thread::available_parallelism().map_or(1, std::num::NonZero::get) >= 3 {
-            assert!(elapsed.as_secs_f64() < 2.5, "{elapsed:?}");
+        // At once they take 2 s; one after another they take 5 s. The bound
+        // leaves room for a loaded machine.
+        if std::thread::available_parallelism().map_or(1, std::num::NonZero::get) >= 4 {
+            assert!(elapsed.as_secs_f64() < 4.0, "{elapsed:?}");
         }
     }
 

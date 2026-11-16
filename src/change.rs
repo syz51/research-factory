@@ -80,8 +80,9 @@ enum BaseRun {
         branch: String,
         base: String,
         changed: BTreeSet<String>,
-        /// `None` when the merge base has no project root.
-        ran: Option<crate::check::Ran>,
+        /// `None` when the merge base has no project root. Its error is
+        /// reported only when a check of the work tree ran to completion.
+        ran: Result<Option<crate::check::Ran>, String>,
     },
 }
 
@@ -116,7 +117,7 @@ fn base_run(project: &Project, only: &[String]) -> Result<BaseRun, String> {
         return Ok(BaseRun::Unchanged { branch, base });
     }
     let specs = crate::check::select(project, only)?;
-    let ran = crate::replay::run_base(project, &specs, &base)?;
+    let ran = crate::replay::run_base(project, &specs, &base);
     Ok(BaseRun::Ran {
         branch,
         base,
@@ -165,7 +166,7 @@ pub fn compare<'r>(
     if specs.is_empty() {
         return Ok(Outcome::Skipped("no check ran to completion".into()));
     }
-    let Some(at_base) = at_base else {
+    let Some(at_base) = at_base? else {
         return Ok(Outcome::Skipped(format!(
             "the merge base {} has no project root",
             short(&base)
