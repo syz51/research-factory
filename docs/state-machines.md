@@ -2,7 +2,8 @@
 
 This document models the research pipeline as state machines.
 It names each machine, its states, its transitions and the place that enforces each transition.
-It covers the tools as they are (lab 0.22.0, papers 0.12.1, claimcheck 0.12.0, prov 0.1.3, agentprof 0.4.0, the work board; a section names the version that changed a machine) and the machines that [archive-design.md](archive-design.md) adds.
+It covers the tools as they are: lab 0.25.2, papers 0.15.0 (6851b18), claimcheck 0.13.1 (0eae562), prov 0.1.5 (8743e9d), agentprof 0.5.0 (6a72921), ireval 0.3.0 (fb47fb2), trading (911e485) and the work board.
+A section names the version that changed a machine. The document also covers the machines that [archive-design.md](archive-design.md) adds.
 
 An **explicit** machine has its states in code or in a config list.
 An **implicit** machine has states that exist only as a combination of files, fields or habits.
@@ -15,7 +16,19 @@ Each defect has one of three outcomes:
 - **Proposed** as a task outside the redesign.
 - **Accepted**: the document gives the reason.
 
-Counts for the masters project are from commit `c0c1783` (12 November 2026).
+The audit research-factory-414 (13 to 16 November 2026) read the code of each tool at the versions above.
+It gives each gap one verdict:
+
+- **Confirmed**: a probe or the code shows the gap. The board task that holds the fix is named (research-factory-NNN).
+- **By design**: the behaviour is intended. A test, a code comment or a document says so.
+- **Refuted**: a probe or a test shows that the gap does not exist.
+- **Fixed in research-factory-414**: the audit changed the code.
+
+File references are to the versions above.
+A reference to another tool starts with its repository name, such as `papers src/http.rs:531`.
+A reference without a repository name is to lab, in this repository.
+
+Counts for the masters project are from commit `c0c1783` (12 November 2026), unless a section names another date.
 
 ## 1. The pipeline as one machine
 
@@ -41,70 +54,54 @@ Three rules hold across all machines:
 
 ### 2.1 Record status
 
-States are strings from `[lab.archive] statuses`. `inactive_statuses` is the subset that means "no longer in force" (`src/config.rs:161`).
-The masters project uses `proposed`, `accepted`, `superseded` for decisions (2, 36, 4 records).
+States are strings from `[lab.archive] statuses` (`src/config.rs:224`).
+`inactive_statuses` means "no longer in force" (`src/config.rs:227`; default superseded, rejected, withdrawn, historical).
+`terminal_statuses` defaults to superseded and withdrawn (`src/config.rs:257-260`).
 
-Current enforcement (`src/archive/rules.rs`):
-
-| Transition or invariant | Enforced | Defect |
+| Transition or invariant | Enforced | Gap and verdict |
 |---|---|---|
-| Status is one of `statuses` | `lab archive check` | A missing status passes when the index does not require the field |
-| A record with `superseded_by` has an inactive status | checked | The reverse is not checked: an inactive record may name no successor |
-| `supersedes` and `superseded_by` agree | checked (0 errors in masters) | None |
-| Any status may follow any status | not enforced | A record can go from `superseded` back to `accepted` |
+| Status is one of `statuses` | `front-matter-invalid` | None |
+| A required status is present | `missing-field` (`src/archive/rules.rs:207`) | None |
+| An inactive status names `superseded_by` or `withdrawn_reason` | `inactive-without-reason` (`src/archive/meta_rules.rs:275`) | By design: a superseded record that names no successor is caught only through `reason_statuses`. |
+| `supersedes` and `superseded_by` agree | `supersession-mismatch`, `superseded-but-active` (`src/archive/rules.rs:268-298`) | None |
+| A terminal status never changes | `status-reversed`, git seal only (`src/archive/gitseal.rs:537`) | None |
+| Any other move | not enforced | Confirmed (probe): `accepted` to `proposed` and `rejected` to `accepted` pass. Masters seals `rejected` but does not make it terminal. The lab guard is research-factory-434. Whether `rejected` is terminal in masters is the owner's decision, research-factory-501 (ask open). |
 
-Model v2 (task research-factory-207) makes the machine explicit:
-
-```text
-draft ──► final ──► appended ──► superseded (names successor)
-  │         │           │    └─► withdrawn  (names reason)
-  └─────────┴───────────┴──► amended (stays in force; names the amending record)
-```
-
-- `draft`: the file exists and is not committed in a sealed state. Free to edit.
-- `final`: committed. The body is sealed (section 2.3).
-- `appended`: later text was added after the sealed body.
-- `superseded` and `withdrawn` are terminal. `lab archive check` refuses a move out of them.
-- `amended` is not terminal. It is the partial supersession that DR042 applies to DR007 and DR039: both stay accepted and gain a line that names DR042. The front matter key is `amended_by`, with `amends` on the other record. Fixed by research-factory-207 (rule) and research-factory-200 (graph edge).
-
-Guards added by research-factory-207: an inactive status requires `superseded_by` or `withdrawn_reason`; a record that requires a status and has none is an error; a status outside the allowed moves is an error.
+The draft, final and appended states of model 2 belong to the seal (2.3), not to `status`.
+`amends` and `amended_by` are a relation (`amendment-mismatch`, `src/archive/meta_rules.rs:322`), not a state. research-factory-207 added the rule and research-factory-200 the graph edge.
 
 ### 2.2 Record identity
 
-| Machine | States | Defect | Outcome |
+| Machine | States | Enforcement | Gap and verdict |
 |---|---|---|---|
-| Numbered id (DR, H) **(implicit)** | free, taken | `src/archive/index.rs:232-259` takes the highest number plus one with no reservation. Two worktrees can take the same number. Masters has H147 and H89 twice. | Fixed by 207: decision numbers are reserved in the main checkout's `.research` directory. Results use a folder slug with a date and need no number. |
-| Id on another branch **(implicit)** | free, reserved, taken here, taken on the default branch, taken in another worktree | A reservation counted only this checkout's ids and the numbers given out. A branch from an older main, or a record in another worktree, could still take a number (masters DR042 twice, research-factory-203). | Fixed by 227 (lab 0.21.3): `lab archive next` counts the ids on the default branch and in every other worktree (`src/archive/reserve.rs:1-8`). Fixed by 337 (lab 0.21.4): `lab archive check` warns `id-taken-on-default-branch` when the default branch added a record with the same id at another path since the merge base (`src/archive/gitseal.rs:152-157`). |
-| Id change | id, renumbered | Repair was by hand: rename the file, the `id:`, the heading and each link. | Fixed by 336 (lab 0.21.6): `lab archive renumber OLD NEW`. It refuses a `NEW` taken here, on the default branch or in another worktree (`src/archive/renumber.rs:264-275`), and a sealed record, since a new name would break its seal (`src/archive/renumber.rs:287-296`). It renames first, then rewrites links, and lists links in sealed text and plain mentions for a person. |
-| Follow-up folder **(implicit)** | folder without front matter, with front matter, with date | 198 folders in masters; 32 have front matter | Fixed by 193 (repair) and 189 (rule) |
+| Numbered id | free, reserved, taken | `lab archive next --reserve` counts this checkout, the default branch and other worktrees (`src/archive/reserve.rs:51-86`). It writes the number under a lock in the main checkout's `.research` (`src/archive/reserve.rs:89-157`). | Confirmed (probe): the lock waits with no time limit (`reserve.rs:99`), research-factory-430. Confirmed (probe): a reserved-ids file that does not parse is reset silently (`reserve.rs:132-140`), so a number is given out twice, research-factory-431. |
+| Id on the default branch | free, taken here, taken there | `id-taken-on-default-branch` (`src/archive/gitseal.rs:219-286`) | None |
+| Id change | id, renumbered | `lab archive renumber` refuses a taken id (`src/archive/renumber.rs:266-276`) and a sealed record (`renumber.rs:283-297`). | Confirmed (probe): it renames first (`renumber.rs:652`), then writes (`renumber.rs:654-661`). A failed write leaves the rename and broken links, with no rollback. It prints "changed" before the write. research-factory-429. |
+| Follow-up folder | without front matter, with front matter, with date | Fixed by 189 and 193 | None |
 
 ### 2.3 Seal
 
-Current states (`src/archive/seal.rs:40-48`): `New`, `Unchanged`, `Appended`, `Edited`, compared with a committed manifest file.
+Manifest seal (`src/archive/seal.rs:40-48`): `New`, `Unchanged`, `Appended`, `Edited`, and missing.
 
-| Transition | Enforced | Defect |
+| Transition | Enforced | Gap and verdict |
 |---|---|---|
-| New → Unchanged | `lab archive seal` | A missing manifest makes every file `New`. The check passes. |
-| Unchanged → Appended | allowed | None |
-| Unchanged → Edited | `lab archive check` error | None |
-| Entry removed | no command | An entry never leaves the manifest. A deleted file stays listed. |
-| File not sealed | finding `unsealed`, severity Warn | A Warn never fails a gate |
-| `lab archive update` | `src/archive/mod.rs:499-507` | It seals even when the index write was refused. The seal then covers a state the index does not show. |
+| New → Unchanged | `lab archive seal`, `update` (`src/archive/mod.rs:407-463`) | Confirmed (probe): with `model = 2` and `write_indexes = false`, `update` seals a record with invalid front matter (`mod.rs:594-611`). `done` refuses it (`src/archive/done.rs:235-251`). research-factory-426. |
+| Unchanged → Edited | `sealed-edited` (`src/archive/rules.rs:886-893`) | None |
+| Edited → Unchanged | `lab archive seal --accept` (`mod.rs:526-570`) | None |
+| any → missing | `sealed-missing` (`rules.rs:898-909`) | Confirmed (probe): there is no exit. `--accept` fails on a deleted file, and the entry stays. research-factory-425. |
 
-Model v2 replaces the manifest with git (research-factory-207):
+Git seal (`seal = "git"`, `src/archive/gitseal.rs`):
 
 ```text
-untracked ─► committed draft ─► sealed ─► appended ─► appended ...
-                                  │
-                                  └─► edited ─► error, unless [[lab.archive.accepted_edit]] names path, commit and reason
+untracked ─► committed ─► sealed ─► appended ─► appended ...
+                             └─► edited ─► error, unless [[lab.archive.accepted_edit]] names path, commit and reason
 ```
 
-- A file is `sealed` from the first commit in which its status is a sealed status.
-- From then on, each later version must start with the sealed body. Front matter may change.
-- `lab archive log` shows the history of one record from git. `lab archive check` caches the last verified commit, so the check reads only newer commits.
-- An accepted edit is a config entry with a reason. It is the only way out of `edited`.
-- `lab archive update` stops before the seal step when the index step fails.
-- Since lab 0.21.2 (research-factory-252), a kept link and `lab check --new-only` treat text as sealed when an earlier commit gave the record a sealed status, even if a later commit changed the status (`src/archive/gitseal.rs:662-716`, `status_sealed_by`). A baseline counts only when it is an ancestor of the commit checked.
+- A file is sealed from the first commit where it matches `sealed` or has a status in `sealed_statuses`. Each later version must start with the sealed body (`gitseal.rs:506-547`).
+- The check stores the last clean commit in `<state_dir>/lab/archive-git-seal.json` (`gitseal.rs:666-675`). So `lab archive check` writes state, although its doc comment says read-only (`src/archive/mod.rs:633`). Confirmed (probe). The decision is to keep the write and fix the comment: research-factory-427.
+- Kept links and `lab check --new-only` read sealed text through one reader per commit (`AtRev`, `gitseal.rs:695-825`). Fixed in research-factory-414: the kept-link check went from 17 git calls to 3, and the `--new-only` seal lookup from 20 to 2.
+- The reader treats a record as sealed when an earlier version had a sealed status (`status_sealed_by`, `gitseal.rs:770`). A baseline counts only when the commit contains it (`gitseal.rs:803`).
+- Confirmed (probe): front matter that stops being a YAML mapping makes the whole file the sealed text (`src/archive/front.rs:100-108`). The check then reports `sealed-edited`, though the body did not change. research-factory-428.
 
 ### 2.4 Generated index
 
@@ -115,19 +112,24 @@ The state `stale` then cannot occur in git. Fixed by 207; masters removes the co
 
 ### 2.5 Record completion
 
-`lab archive done` (research-factory-207) is the one gate for "this record is complete":
+`lab archive done` (`src/archive/done.rs:254-302`) is the one gate:
 
 ```text
-written ─► links resolve ─► task named and known ─► sources cited ─► sealed ─► done
+written ─► front matter valid ─► (manifest) sealed ─► search refreshed ─► links ─► task ─► sources ─► sealed (git)
 ```
 
-It runs the index print, the checks for changed records, and the seal check, and it exits non-zero at the first state it cannot leave.
-It replaces the instruction "run `lab archive update`, then `lab check --new-only`".
+It exits non-zero at the first stage with an error.
 
-Link target **(implicit)**: a link resolves in this checkout, but its target can be `tracked`, `ignored` or `untracked` by git.
-An untracked target exists only in this checkout, so the link breaks in every other one.
-Since lab 0.20.0 (research-factory-228), `lab archive check` warns `untracked-link` for a link to an untracked file, or to a directory that holds untracked files when git tracks nothing in it (`src/archive/rules.rs:740-766`).
-It is a Warn: `lab archive done` prints the fix and still exits 0. Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
+Link target: `untracked-link` (`src/archive/rules.rs:762-783`) is a Warn for a link to an untracked file, or to a directory that holds untracked files and nothing tracked.
+An untracked target exists only in this checkout, so the link breaks in every other checkout.
+`lab archive done` prints the fix for this Warn and still exits 0 (`src/archive/done.rs:73-76`).
+Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
+Git lists untracked files only at those link targets (`src/archive/gitseal.rs:141-166`). Fixed in research-factory-414: the scan went from 1.06-1.54 s to 0.08-0.11 s on masters.
+
+Gaps in `lab archive check`:
+
+- The duplicate-record check treats a git error as "no new files" (`src/search/similar.rs:160-176`). Confirmed: research-factory-493.
+- Errors of the stale-derivative check go only to stderr (`src/archive/mod.rs:617-620`). Confirmed: research-factory-494.
 
 ### 2.6 Topic pages and the entry page **(implicit)**
 
@@ -138,40 +140,49 @@ It is a Warn: `lab archive done` prints the fix and still exits 0. Ignored targe
 | Open question | open, closed | OQ01–OQ12 have ids. 8 closed bullets have none. | Fixed by 193. Under model v2 an open question is a board task; the archive keeps only the answer. |
 | Month log | entry added | The November note says 155 entries; the file has 168. | Removed by model v2: git and the board hold the sequence of work. |
 
-## 3. Search machines (lab, new)
+## 3. Search machines (lab)
 
 ### 3.1 Search index
 
-One index per checkout, in the ignored `.research` directory. Owner: research-factory-187.
+One index per checkout, at `<state_dir>/lab/search/index.db`, with the write lock `lock` beside it. Owner: research-factory-187. Code: `src/search/index.rs`.
 
 ```text
 absent ─► building ─► fresh ─► stale ─► refreshing ─► fresh
-             │                             │
-             └──────────► failed ◄─────────┘
-schema mismatch ─► rebuilding ─► fresh        corrupt ─► rebuilding ─► fresh
-locked: another process holds the write lock; readers continue on the last committed state
+schema or fingerprint mismatch, unreadable meta ─► building
+SQLite reports corrupt or not a database ─► building (forced)
+locked: another process holds the write lock; the query answers from the last committed state, marked stale
 ```
 
-| Transition | Trigger | Guard |
-|---|---|---|
-| absent → building | first `lab search` or `lab search index` | write lock |
-| fresh → stale | a source file's size, mtime or hash differs from the stored value | detected at each query |
-| stale → refreshing | the query itself (incremental) | only changed files are read; a refresh over the time budget returns results marked `stale` |
-| any → rebuilding | stored schema version differs, or the integrity check fails | the old file is replaced by rename, never edited in place |
-| building → failed | error | the partial file is removed; the next query starts again |
+| Transition | Trigger | Guard | Enforced by |
+|---|---|---|---|
+| absent → building | first `lab search`, `lab search index` or a scope set never built | the write lock; the wait stops at `lock_timeout_ms` (30 s) with exit 2 | `build` `src/search/index.rs:314-330` |
+| building → fresh | the build writes `index.db.tmp-<pid>` and renames it over the index | the old file is never edited in place | `index.rs:333` |
+| fresh → stale | a source's stamp differs from the stored one | checked at each query | `refresh` `index.rs:442` |
+| stale → refreshing | the query itself (incremental) | only changed sources are read; the write lock must be free, or the query answers stale (`index.rs:491`) | `refresh` |
+| refreshing → fresh, or stale with notice | the refresh ends, or reaches `refresh_budget_ms` (5 s) | `lab search index` and `refresh` have no budget (`src/search/mod.rs:787`) | `index.rs:513`, `:544` |
+| any → building | stored schema version (`6`, `index.rs:24`) or fingerprint differs; the meta table does not read | any other open error than busy also rebuilds (`index.rs:291`) | `open_current` `index.rs:263-293` |
+| any → building (forced) | SQLite returns `DatabaseCorrupt` or `NotADatabase` | there is no `PRAGMA integrity_check` | `open` `index.rs:107`, `:236` |
 
-Sub-machine **stages**: `lexical`, `dense`, `rerank`, `graph`. Each is `ready`, `missing` or `failed`.
-A query that runs without a stage is in **degraded mode**. The output and the trace name the missing stages (rule 3).
-Vectors are keyed by the content hash of the unit, so an unchanged unit is never embedded twice.
+A batch of queries (`lab search --run`) refreshes once and reuses that refresh's stale flag and notices for each query (`refresh_batch` `src/search/mod.rs:801`, `open_listed` `index.rs:165`). Fixed in research-factory-414: 20 topics took 1.2-4.1 s instead of 10-26 s, with byte-identical output.
+
+Stages: `lexical`, `dense`, `rerank`, `graph`. `lexical` and `graph` are `ready`; `dense` and `rerank` are `missing` (`src/search/mod.rs:266-269`).
+No stage is ever `failed`. A query with a configured missing stage is `partial`, and the output and the trace name the stage (`mod.rs:969`).
+
+Gaps:
+
+- A killed build leaves `index.db.tmp-<pid>` (up to about 118 MB on masters). The next query does not remove it. An error in the build does remove it. Confirmed: research-factory-416.
+- The graph stage is `ready` even when it finds no paper edges (3.7). Confirmed: research-factory-423.
+- No test covers the stop at the refresh budget (`index.rs:544`): research-factory-417.
+- An open error other than busy rebuilds the index silently. Refuted (probe): a bad `index.db` is rebuilt, the query exits 0, and stderr names the cause.
 
 ### 3.2 Unit
 
 A unit is one searchable passage with an anchor (`path#Lstart-Lend` or `ref:<key>`).
 
 ```text
-discovered ─► parsed ─► indexed (lexical) ─► embedded ─► live
-                                                           │
-                                source changed ─► replaced │ source deleted ─► removed
+discovered ─► parsed ─► indexed (lexical) ─► live
+                                              │
+                   source changed ─► replaced │ source deleted ─► removed
 ```
 
 A unit of a superseded or withdrawn record stays `live` and carries that status. Ranking lowers it and the output labels it.
@@ -198,6 +209,15 @@ Since lab 0.19.0 (research-factory-295, masters DR045): `parsed` keeps the first
 Scopes share one scale and one set of statistics (research-factory-355, decided 13 November 2026). `retrieve` (`src/search/query.rs`) takes each phrasing's top 100 candidates over all searched scopes at once, and `normalised` scales them by the lowest and highest `score` of that list. A unit of an added scope can set either end, or push other units out of the top 100. Their shares then change. Two units with different priors can swap within one phrasing, because each share is `prior * (score - low) / (high - low)`, and the sum over the phrasings can reorder any units. This happens even when the added unit itself is not in the top 10. FTS5 takes BM25's statistics (term frequencies across units, mean length) from the whole index, which holds every scope ever searched in this checkout, not only the scopes of the query. On masters, adding the `board` scope reordered the non-board units of 10 of the 82 base topics; nDCG@10 moved +0.0049, not significant (research-factory-354). The decision is to keep this: masters DR045 fuses one candidate list per phrasing over the searched scope, and a scale per scope would give each scope's best unit share 1, which E1 did not test. To compare scope sets, run them on one index, or rebuild with `--rebuild --in` for each. Reverse by normalising per scope in `search`, measured on the masters test set and approved by the owner, because it changes DR045's configuration.
 `zero` and `partial` are not errors, so a script can tell "nothing found" from "search broken".
 
+Since lab 0.25.1 (research-factory-311), `lab search` prints one info line when paper texts come from the main checkout. The line is not a partial notice.
+A query of `notes` and `files` walks the notes once; `files` reuses the notes listing (`sources::list`, `src/search/sources.rs:217`). Fixed in research-factory-414.
+
+Gaps:
+
+- The MCP tools `archive_open` and `archive_related` report only a stale index. They drop the other notices (`src/search/mcp.rs:204-217`). Confirmed: research-factory-418.
+- The notes walk goes through about 69,000 entries in ignored data folders. It costs 0.3-1.5 s of each query and each `lab mcp` call (`default_notes`, `mod.rs:316`). Confirmed: research-factory-424 lists notes from git instead.
+- The `files` scope drops the notices of the notes listing (`sources.rs:289`). Refuted (probe): the notice reaches a query with `--in files`.
+
 ### 3.4 Missed query and thesaurus entry
 
 ```text
@@ -208,6 +228,10 @@ thesaurus entry: active ─► retired (no query used it in the review window)
 
 `lab retro` proposes; a person or an agent accepts with `lab retro accept` (research-factory-205).
 Rejections are stored. Without that state, the same alias returns at each retro. This is the main implicit machine of the learning loop.
+Decisions persist in `<state_dir>/lab/retro.json` (`src/search/learn.rs:27`).
+
+Gap, confirmed: `load` (`learn.rs:81`) and `save` (`learn.rs:106`) take no lock. 20 parallel `lab retro dismiss` calls stored 11 decisions; the others were lost.
+`thesaurus::append` and `retire` (`src/search/thesaurus.rs:100`, `:123`) use the same pattern, and they race too. research-factory-419 holds both.
 
 ### 3.5 Model loading in `lab mcp` (retired)
 
@@ -217,9 +241,9 @@ Since lab 0.19.0 the machine is removed and each `archive_search` result says `m
 
 ### 3.6 Board export cache
 
-The cached output of the board export that feeds the `board` scope, one for each checkout, in `<state_dir>/lab/search/` (lab 0.22.0, research-factory-345).
+The cached output of the board export that feeds the `board` scope, one for each checkout, in `<state_dir>/lab/search/` (research-factory-345).
 Before, each query ran the export with a limit of 15 seconds, so an export with notes (about 14 s) made every query with the board slow (research-factory-273).
-Code: `src/search/board.rs`; the query side is `list_board` in `src/search/chat.rs`.
+Code: `src/search/board.rs` (`board::read` `:82`, `board::start` `:137`, `board::refresh` `:197`); the query side is `list_board` (`src/search/chat.rs:224`).
 
 ```text
 absent ──query──► absent + refreshing ──ok──► fresh
@@ -233,7 +257,7 @@ another command configured: the cache counts as absent
 | absent → refreshing | a query of the `board` scope | the lock on `board.lock` is free and no refresh failed in the last 60 s; the query answers without the scope, `partial` | `list_board`, `board::start` |
 | fresh → stale | the cache file's mtime is `board_max_age` minutes old or older | checked at each query; a fresh cache answers in full | `board::read`, `list_board` |
 | stale → refreshing | a query of the `board` scope | the lock is free and no refresh failed in the last 60 s; the query answers from the stale copy, `partial`, with its age | `list_board`, `board::start` |
-| refreshing → fresh | the export prints a task array within 120 s | the cache is written to a temporary file and renamed; `board.error` is removed | `board::refresh` |
+| refreshing → fresh | the export prints a task array within 120 s (`board.rs:29`) | the cache is written to a temporary file and renamed; `board.error` is removed | `board::refresh` |
 | refreshing → old state | the export fails, prints no task array or runs past 120 s | the old cache stays; `board.error` holds the reason, which the next stale query names; its mtime holds the next detached refresh back for 60 s | `board::refresh`, `board::start` |
 | any → refreshing (foreground) | `lab search --refresh-board` | waits for the lock, then runs the export; a failure exits 2 | `board::refresh` |
 
@@ -242,11 +266,30 @@ A second query that finds the lock held starts none and says that a refresh is r
 The detached refresh checks the cache again before it runs the export, so a query that looked just before the last refresh ended starts no export.
 The refresh runs in its own process group with its output in `board.log`; the export runs in a group of its own, which a timeout kills whole.
 
+Gaps:
+
+- `lab search --refresh-board` waits for `board.lock` with no time limit (`board.rs:218`). A held lock kept it waiting until it was killed. Confirmed: research-factory-420.
+- A `board.json` that does not parse counts as absent, and the query says "no board export is cached yet" (`board.rs:82-93`). The next refresh replaces it. Confirmed: research-factory-421.
+- No test covers the 120 s export timeout: research-factory-417.
+
+### 3.7 Paper texts in a linked worktree
+
+Search reads ignored paper texts from the main checkout (research-factory-311). Two readers do not:
+
+- `graph::paper_texts` and `read_papers` (`src/search/graph.rs:359-420`) read sidecars under the worktree only. `lab related` loses "cited by papers" without a notice. Confirmed: research-factory-422.
+- `lab open` (`src/search/open.rs:218`) exits 2 for a text that search returned. Confirmed: research-factory-422.
+
+Other gaps of the paper graph:
+
+- `graph::registry_path` (`graph.rs:329`) reads only `[papers] registry`. Without that table, refs are indexed from the default registry, but the graph has no paper edges. Confirmed: research-factory-423, which also makes the graph stage `partial` in that case.
+- `read_papers` skips a sidecar that does not read, with no notice. Confirmed: research-factory-491.
+- `entry["key"].as_str()` skips a numeric registry key, so its paper gets no edges (`graph.rs:374`). Confirmed: research-factory-492.
+
 ## 4. Paper machines (papers, claimcheck)
 
 ### 4.1 Paper lifecycle
 
-Most of this machine is implicit today: the state is the set of fields and files that exist for a key.
+Most of this machine is implicit. The state is the set of fields and files that exist for a key.
 
 ```text
 candidate ─► registered ─► abstract ─► fetched ─► text ─► structure ─► card ─► indexed ─► cited ─► quote-checked
@@ -257,21 +300,21 @@ candidate ─► registered ─► abstract ─► fetched ─► text ─► st
 
 | State | Stored as | Set by | Task |
 |---|---|---|---|
-| candidate | a search result, not stored | `papers search` | research-factory-188 reports registered papers first |
-| registered | registry entry `rf.reference/1` | `papers add` | exists |
-| abstract | `abstract` field | `papers` metadata fetch | research-factory-198 |
-| fetched | PDF in the ignored store | `papers fetch` | exists |
-| text | `.txt` and sidecar with sha256 | `papers text` | exists; extractor choice by research-factory-202 |
-| structure | `rf.paper-structure/1` sidecar | `papers structure` | research-factory-198 |
-| card | `rf.paper-card/1` | `papers card` | research-factory-213, after DR043 |
+| candidate | a search result, not stored | `papers search` | research-factory-188 |
+| registered | registry entry `rf.reference/1` | `papers registry build` | exists |
+| abstract | `abstract` field | `papers registry abstracts` | research-factory-198 |
+| fetched | PDF in the ignored store | `papers fetch`, `papers read` | exists |
+| text | `.txt` or `.docling.md`, with manifest and sha256 | `papers read`, `papers registry record-pdfs` | exists |
+| structure | `rf.paper-structure/1` sidecar | `papers structure` | exists |
+| card | `rf.paper-card/1` | `papers card` (calls a model) | research-factory-213 |
 | indexed | units in the search index | `lab search` | research-factory-191 |
 | cited | a note cites `ref:<key>` | author | checked by claimcheck |
 | quote-checked | verdict per quote | `claimcheck` | exists |
 
-Guards the redesign adds:
+Guards:
 
 - **Stale derivative.** A structure sidecar or a card records the sha256 of the text it was made from. When the text's sha256 differs, the derivative is `stale`. The index ignores a stale card. It still cuts a text's passages within a stale sidecar's sections, found again in the changed text by their heading lines (since lab 0.21.5, research-factory-334). `papers registry check` reports both.
-- **Write order.** A derivative is written to a temporary file and renamed after its record.
+- **Write order.** A derivative is written to a temporary file, recorded, then renamed.
 
 Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
 
@@ -280,53 +323,83 @@ Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
   - a bad `at` date is `malformed-date`;
   - a recorded `mismatch` or `not-found` is `verified-mismatch` (warn).
 - `duplicate_of` links are checked. A cycle is `duplicate-cycle` (error, once per cycle). A chain longer than one link is `duplicate-chain` (warn), which names the key it ends at.
-- `papers read` stages a plain or layout text as `<name>.txt.tmp`, records it, writes its manifest, then renames it. A failed step undoes the earlier ones. A Docling text already worked this way.
-- A catalogue entry with no depth is `depth-missing` (warn), as section 4.2 says. The 17 masters entries that had a null depth now state `unknown` with a reason.
+- `papers read` stages a plain or layout text as `<name>.txt.tmp`, records it, writes its manifest, then renames it. A failed step undoes the text; the saved PDF stays (see the gaps below). A Docling text already worked this way.
+- A catalogue entry with no depth is `depth-missing` (warn), as section 4.2 says. The 17 masters entries that had a null depth now state `unknown` with a reason. research-factory-414 checked this: the 17 null-depth registry entries match 17 `Inspection depth: unknown` lines, and `papers registry check` gives 0 depth findings.
 
 Withdrawn or retracted paper: accepted as a notice, not a registry state. Since papers 0.8.0 (research-factory-282), `papers verify` reports `verify-withdrawn` (warn) from arXiv's OAI-PMH version history, `verify-retracted` and `verify-notice` (warn) from Crossref `updated-by` and `update-to`, and `verify-updated` (info) for corrections, on every run. `verified.status` stays `match`, since these are notices, not metadata errors. No `withdrawn{at, source}` registry field was added, because nothing reads it. On masters key 435, `papers verify` reports `verify-withdrawn 435: arXiv v2 withdrawn 2025-11-12; ours pins v1` (research-factory-291, papers 0.10.0). Since papers 0.10.0, an export API 429 falls back to OAI-PMH.
 
+Gaps at papers 0.15.0, each confirmed by a probe unless it says otherwise:
+
+- `papers read` keeps the PDF after a failed step; it undoes the text (`papers src/main.rs:3223-3284`). `save_pdf` writes in place. research-factory-468.
+- `sha256_file` drops read errors (`papers src/main.rs:2687-2689`). A recorded text that cannot be read counts as missing, and `papers read` downloads and replaces it with no notice. research-factory-469.
+- `papers registry record-pdfs` writes the manifest before the registry (`papers src/main.rs:758-993`). A failed registry save leaves a `pdf_sha256` only in the manifest, after a false success line. A rerun does not repair it. research-factory-470.
+- `papers verify --record` writes once at the end (`papers src/main.rs:3920-3960`). An interrupted run records nothing. research-factory-473.
+- `papers card` calls the model again when a stored card cannot be read (`papers src/card.rs:695-708`). It does not reuse the kept reply. research-factory-474.
+- `papers registry check` does not flag a recorded text that is missing on disk. research-factory-475.
+- `papers fetch` exits 1 on input that is not a DOI or URL, and `papers seen` exits 2. research-factory-467.
+- `derivative::check` skips unreadable inputs without a finding (`papers src/derivative.rs:52-62`). Code reading only; held by research-factory-495.
+
 ### 4.2 Reading depth
 
-States are the values of `depth` in the registry, from "listed" to "read in full", plus `unknown`. The tool accepts any listed value in any order.
+States are the values of `depth` in the registry. The code accepts these values: metadata, abstract, method, full, artifact, reproduced, plus `unknown` (`papers src/registry.rs:16-23`).
+This document follows the code's list (research-factory-414, decision E1).
+The tool accepts any listed value in any order.
 Accepted: depth describes how far a person or an agent read, and a re-read at a lower depth does not happen in practice.
 
-- `unknown` is valid only as `Inspection depth: unknown. Reason: …`, with text after the word `Reason` (papers 0.10.1). The label may carry a note in parentheses, such as `Reason (12 November 2026): …`.
-- Other text after `unknown`, such as `unknown; abstract only`, gives `depth-unparsed` (warn) and no level (papers 0.11.1, research-factory-299).
-- An entry with no depth gives `depth-missing` (warn) (papers 0.7.0, research-factory-219). So do a bare `Inspection depth: unknown` and a `Reason` with no word after it, such as `Reason:` or a copied `Reason: …` (papers 0.11.1).
-- An entry that is a duplicate of another entry gives no `depth-missing` (papers 0.10.1).
+- `unknown` is valid only as `Inspection depth: unknown. Reason: …`, with text after the word `Reason` (papers 0.10.1).
+- Other text after `unknown` gives `depth-unparsed` (Warn) and no level (papers 0.11.1).
+- An entry with no depth gives `depth-missing` (Warn), `papers src/catalogue.rs:1008`.
+- A duplicate entry gives no `depth-missing` (papers 0.10.1).
 
 ### 4.3 Network machines of papers
 
 | Machine | States | Note |
 |---|---|---|
-| HTTP attempt | try 1–5, then failed | explicit, with backoff |
+| HTTP attempt | API calls: up to 5 tries; waits 5, 10, 20, 40 s, or `Retry-After` (max 300 s). PDF and `read` downloads: 2 tries, one 5 s wait. | explicit, `papers src/http.rs:196-262`. The first wait was measured. The later API waits are from the code, because no test host can stand in for an API host: research-factory-479. |
+| HTTP cooldown | per host, after a 429 on an API call; kept in the lock folder | explicit. An unreadable cooldown file counts as none, with no notice (`papers src/http.rs:531-536`). Confirmed: research-factory-472. |
 | HTTP cache entry | fresh for 7 days, then expired | explicit |
-| Host throttle | free, waiting | explicit |
-| Browser page | closed, opening, loaded, blocked | explicit |
-| Registry lock | free, held | explicit file lock |
-| Seen index | built from notes | **(implicit)**: it skips invalid notes without a finding. Fixed by 188, which makes the registered set the first answer. |
-| Graph source | primary, fallback | explicit fallback order; research-factory-178 proposes a fast failure on rate limits |
+| Host throttle | free, waiting, request, done; one request per host each 1 s (arXiv 3 s), counted from the end of the last request | explicit, `papers src/http.rs:22-25`, `:698-712`. A waiter has no time limit and prints nothing. Confirmed (probe: a 12 s silent wait): research-factory-471. |
+| Browser page | closed, opening, loading, ready, challenge, blocked, loaded; 45 s limit | explicit, `papers src/browser.rs:24-28`, `:99-132` |
+| Browser link queue | first list capped at 8; links from loaded pages not capped | `papers src/main.rs:3554`. Open: not probed, because no Chromium is installed. research-factory-480. |
+| PDF reader | running, exited, output joined | The join after the reader exits has no time limit (`papers src/pdf.rs:330-335`). A grandchild that holds stdout blocks `papers read`. Confirmed (probe: 45.95 s): research-factory-476. |
+| Registry lock | free, held | explicit file lock, `papers src/registry.rs:319-337`. A waiter has no time limit and prints nothing. Confirmed (probe: a 12 s silent wait): research-factory-471. |
+| Seen index | built from the registry, then notes | An invalid note is skipped with a stderr line and no finding (`papers src/seen.rs:69-71`). A DOI held only by that note gives "not seen", exit 1. Confirmed: research-factory-466. |
+| Graph source | primary, then fallback | S2 paging is bounded (`papers src/graph.rs:215-232`). The fallback order was not re-checked at 0.15.0; research-factory-495 holds that check. research-factory-178 proposes a fast failure on rate limits. |
+
+Speed, measured by research-factory-414:
+
+- A Docling read starts Python twice: once for `--version`, once to convert (`papers src/main.rs:3172`, `:3739`). research-factory-477.
+- `papers cited-by` asks OpenAlex for 100 results per page. 200 saves one request per run (`papers src/openalex.rs:390`). research-factory-478.
+- A parallel Crossref and OpenAlex fetch gave no gain (3.93 s against 3.95 s). The 1 s spacing per host sets the floor. No task.
 
 ### 4.4 Claim and quote verdicts (claimcheck)
 
 | Machine | States | Defect |
 |---|---|---|
 | Finding | reported; severity Error or Warn | No baseline or allow state. `lab check --new-only` supplies the baseline from outside, and since lab 0.21.0 the merge base with the default branch, so a finding the change adds to the files it touches is gated. Accepted. |
-| Quote verdict | verified (score ≥ 0.8), weak, not found | None |
-| Number verdict | found, not found | None |
-| Source text load | loaded, hash mismatch, missing | Fixed by research-factory-220 (claimcheck 0.11.0). A quote or number matched only in a text whose sha256 differs from the registry gets `source-text-changed` (warn) on its line and does not count as supported. |
+| Quote verdict | exact match (no finding); near match, similarity 0.8 or more (`quote-not-found`, Warn); not verbatim, similarity below 0.8 (`quote-not-found`, Error); kept (Info) | Threshold: `quotes.error_below`, default 0.8 (`claimcheck src/config.rs:41`). The Warn or Error split is at `claimcheck src/check.rs:921-936`. Gap: an unclosed quotation gets no finding (`claimcheck src/doc.rs:643`). Confirmed (probe): research-factory-450. |
+| Number verdict | found; near (context or rounded); not found (`number-not-in-source`, Warn); changed text only (`source-text-changed`, Warn) | Gap: a number not found is searched twice in each text (`claimcheck src/check.rs:1078`, `:1156`). Speed only: research-factory-453. |
+| Source text load | loaded; hash mismatch (`source-text-changed`, Warn; matches do not count as supported); missing (`source-text-missing`, Warn) | Fixed by research-factory-220 (claimcheck 0.11.0, commit bc7c914). Gap: a text path shared by two references uses the first sha256 only (`claimcheck src/check.rs:40`). Confirmed (probe): research-factory-451, which also checks whether masters has such a path. |
+| Checked file read | read; unreadable | Gap: a checked file that is not valid UTF-8 aborts the whole run, with exit 2 and no output (`claimcheck src/lib.rs:178`). Confirmed (probe): research-factory-452. |
+| Kept quotation | kept (Info); stale (`stale-kept-quote`, Warn); dropped (`off`) | By design. Each state has a test (`claimcheck tests/rules.rs:2011`, `:2058`, `:2087`, `:2147`). |
+| Text index **(implicit)** | not built; built once per text and run (`OnceLock`, `claimcheck src/source.rs:42`) | The first use builds every field. A lazy build cut instructions by 29% in a prototype: research-factory-454. Registry lines are parsed twice, as a JSON value and then as the typed struct: research-factory-455. |
 
 ### 4.5 Provenance (prov)
 
 | Machine | States | Note |
 |---|---|---|
-| Manifest | incomplete, `complete` | explicit flag |
-| Run record | `incomplete` (placeholder), `complete` | explicit through `status`; a filled record says `complete` since prov 0.1.2, and a record without the field reads as complete |
+| Manifest | complete (summary required, `prov src/manifest.rs:317-327`); incomplete (imported, `prov src/import.rs:488`) | Explicit flag `header.complete` (`prov src/manifest.rs:39-40`, `:61`). Writes go through `.partial` (`prov src/manifest.rs:397-420`). There is no fsync before the rename: research-factory-449 decides whether one is needed. |
+| Run record | `incomplete` (placeholder, `prov src/run.rs:906-916`); `complete` (`prov src/run.rs:1379`) | Explicit through `status`. The placeholder is explicit since prov 0.1.0 (46dbf44). The filled `complete` state is there since prov 0.1.2 (a8f3c59). A record without the field reads as complete (`prov src/run.rs:351`), by design (test `run_record_names_its_status_and_old_records_still_load`). Gaps: no command removes or finishes an incomplete record, and `verify` and `rerun` refuse it (`prov src/run.rs:1441-1446`): research-factory-445. A kill between create and write leaves a 0-byte file (`prov src/run.rs:1179-1190`): research-factory-444. |
+| Run interrupt guard | not installed; installed; restored; signal pending | Explicit type `CatchInterrupts` (`prov src/run.rs:943`). It is installed before the placeholder (`prov src/run.rs:1176`). Ctrl-C before the start leaves no record (`prov tests/cli.rs:1749`). A kill during the run leaves the placeholder (`prov tests/cli.rs:1834`). By design, SIGTERM and SIGHUP are not caught. |
+| Command output drain **(implicit)** | spawned; waiting for exit; draining stdout and stderr; finished | `child.wait()` at `prov src/run.rs:1255`, then the stream joins at `:1259` and `:1264`. Gap: the drain waits for end of file with no time limit, so a background grandchild holds `prov run` (probe: 5.10 s against 0.40 s). Confirmed: research-factory-446. |
+| Preflight tool probes **(implicit)** | not run; run | `git_state` (`prov src/run.rs:687-704`) and the tool versions (`prov src/run.rs:1141-1152`) spawn 7 processes one after another, 8 with `--python`. `git --version` runs twice. Confirmed: research-factory-447. |
 | Run outcome | ok, failed | explicit |
 | Rerun output | snapshot taken, compared | explicit |
-| Import pairing | paired, unpaired | explicit: an unpaired entry yields `hash-without-path` or `record-without-path` |
+| Import pairing | paired; unpaired: a hash without a path (`hash-without-path`, Info), or an object with a hash and no path (`record-without-path`, Info) | Gap: a path without a string hash gives no finding (`prov src/import.rs:90-92`). Confirmed (probe): research-factory-448. |
 
 No defect was found that affects the redesign. research-factory-231 found that the placeholder already said `"status": "incomplete"` and readers refused it, and named the filled state (prov PR #4, a8f3c596). prov pairs a path field with a hash field inside one JSON object; it has no pairing between a run and an imported output.
+The open prov gaps do not change the state set.
+`prov lineage` exits 0 when it skips records; by design (`prov tests/cli.rs:1856-1862`).
 
 ### 4.6 Citation
 
@@ -334,57 +407,76 @@ A citation in a note is `uncited claim ─► cited ─► resolved (key exists)
 `claimcheck` enforces each step for changed notes through `lab check --new-only`.
 DR042 added 8 uncited-claim warnings; they are Warn findings and stay visible in research-factory-193.
 Since lab 0.21.0, `lab check --new-only` fails on such a warning when a change adds it to a note it touches.
+The research-factory-414 audit did not re-check these claims; research-factory-497 holds that check.
 
 ## 5. Loop machines (lab)
 
 ### 5.1 Lesson
 
-States (`src/lessons.rs:27`): `observed`, `proposed`, `adopted`, `verified`, `retired`. Masters has 11 observed, 5 adopted, 3 verified.
+States (`src/lessons.rs:27`): `observed`, `proposed`, `adopted`, `verified`, `retired`. Masters has 17 observed, 5 adopted, 3 verified (`lab lesson list`, 14 November 2026).
 
-Status moves forward (`src/lessons.rs`, `transition`). Since lab 0.17.0 two moves back are allowed and every other one is refused: `verified → adopted`, when later evidence no longer shows the lesson helps, and a retired lesson reopening at any status. Masters' lesson histories hold only forward moves. A retired lesson keeps its `adopted` and `reviewed` dates as history; no reader uses them outside the active states, and re-adoption resets both. Fixed by research-factory-217.
+`transition` (`src/lessons.rs:199`) moves status forward. Two moves back are allowed (`:214`): `verified → adopted`, and a retired lesson reopening at any status. `verified` needs an active status (`:208`). Re-adoption resets `adopted` and `reviewed`. Fixed by research-factory-217.
+
+Gaps:
+
+- Two `lab lesson set` runs on one lesson race: `save` uses the fixed temporary name `<id>.md.tmp` and no lock (`:365`). In 40 concurrent rounds, 5 lost a History line and 25 had one command fail. Confirmed: research-factory-437.
+- A hand edit can move a lesson from observed to verified without a History line; `load` checks field shape only. Confirmed by probe. By design: git history records the edit. No task.
 
 ### 5.2 Loop run
 
 ```text
-hook fires ─► skip (disabled, background session) | too recent | lock held ─► measure ─► notify ─► record last.json
+hook fires ─► checkout: main checkout redirect, or skip (bare, no config in the main checkout, not `[lab.loop] home`)
+           ─► lock held: stop ─► too recent (`--if-older`, under the lock): stop
+           ─► measure (600 s limit each) ─► evaluate ─► plan ─► notify each due signal (60 s limit each)
+           ─► save signals.json ─► save last.json
 ```
 
-Explicit, with a file lock. An unreadable `last.json` cannot show a recent loop, so the loop runs. Since lab 0.17.0 it says so in `loop.log`, its output, the new record's `errors` and the brief. Fixed by 217.
+Explicit, with a file lock (`src/lesson_loop.rs:456`); `checkout` is at `:392`, `home` at `:426`. An unreadable `last.json` cannot show a recent loop, so the loop runs and replaces it (lab 0.17.0, 217).
+
+Gaps:
+
+- `signals.json` is saved once, after all sends (`:653`). A loop killed after a successful notify, or a notify that files a task and then times out, sends the signal again. `board-notify.sh` then files a second task. Confirmed (probe: 2 notify calls, first ref lost): research-factory-435.
+- An unreadable `signals.json` fails every loop (exit 2, no sends); the error is in `last.json`. Confirmed by probe. research-factory-440 names the fix in the error.
+- `--background` rotates `loop.log` outside the lock (`:136`). Two starts at once lose the old generation (94 of 100 concurrent rounds, 0 of 100 single). Confirmed: research-factory-438.
+- The masters Stop hook runs `lab loop --background` with its output discarded, so a failed start is never seen. Confirmed: research-factory-443.
 
 ### 5.3 Signal
 
 | Machine | States | Defect |
 |---|---|---|
 | Signal kind | fixed list | None |
-| Send state | pending (`new`, `repeat`, `reopened`), sent, resolved | A notice still pending when its signal resolves is dropped, since the condition is gone. Since lab 0.17.0 the drop is reported (`unsent` in the loop record, the brief), and a signal never sent that comes back is `new`, not `reopened`. Fixed by 217. |
-| Board task for a signal | none, filed, repeated | explicit: `signals.json` keeps the task id that `board-notify.sh` returns as `ref`, and repeats go to that task. Since lab 0.17.0 the loop record carries the `ref` of each signal and of each resolved one, and `lab brief` names them. The task's own status stays on the board (rule 1). Fixed by 217. |
+| Send state (`src/signals.rs:475`, `plan` `:565`) | pending (`new`, `repeat`, `reopened`), sent, resolved | A notice still pending when its signal resolves is dropped and reported (`unsent`). A signal never sent that comes back is `new`. Fixed by 217. A signal whose detail does not change is never sent again, even when its task was closed while the condition stays. Confirmed (probe; test `dedupe_sends_new_changed_and_reopened_signals_once`): research-factory-439. |
+| Board task for a signal | none, filed, repeated | `signals.json` keeps the task id that `board-notify.sh` returns as `ref`; repeats go to that task while it is open. Fixed by 217. `board-notify.sh` does not look up an open task by signal id before `board add`, so a resend after a crash or timeout files a duplicate (5.2, research-factory-435). |
 
 ### 5.4 Evaluation
 
-`Verdict` (`src/evaluate.rs:38`): `Collecting`, `Improved`, `Worse`, `Inconclusive`, `Unmeasurable`. Explicit. A lesson moves to `verified` only from an active status (`src/lessons.rs:207`); the verdict informs that move and does not force it.
+`Verdict` (`src/evaluate.rs:38`): `Collecting`, `Improved`, `Worse`, `Inconclusive`, `Unmeasurable`. Explicit. A lesson moves to `verified` only from an active status (`src/lessons.rs:208`); the verdict informs that move and does not force it.
+
+`lab brief` and `lab evaluate` load runs in parallel, and `lab brief` reads run history without the measure lines. Fixed in research-factory-414: `lab brief` on masters went from 0.54-0.78 s to 0.18-0.20 s.
+`check_runs` rebuilds each run's measured key sets for every lesson, about half of the `lab evaluate` samples. Confirmed: research-factory-441.
 
 ### 5.5 Check run
 
 | Machine | States | Defect |
 |---|---|---|
-| Check run status | ok, findings, failed | `ok` means the checker ran to completion. An exit that disagrees with the findings adds a `check-exit-mismatch` warning: exit 1 without an error finding, and since lab 0.17.0 exit 0 with one. clap refuses `--new-only` with `--at`. Fixed by 217. |
+| Check status | failed (default, `src/check.rs:400`), ok (exit 0 or 1 with every line parsed, `:462`) | A disagreeing exit adds `check-exit-mismatch`: exit 1 without an error finding, and exit 0 with one. clap refuses `--new-only` with `--at`. Fixed by 217. Since research-factory-414 the checks of one run run at the same time, each after its version command (`run_checks`, `:639`). The run keeps the configured order, and `duration_ms` per check overlaps. Gap: a check has no time limit and waits for its stdout to close (`:391`). A checker that leaves a child running holds `lab check` (probe: 20 s for a checker that exits at once). Confirmed: research-factory-436. |
 | Baseline | none, recorded | explicit |
 | Finding severity | Error, Warn, Info | Each rule's default is in docs/interfaces.md "Rule table". A Warn fails no gate, except, since lab 0.21.0, a Warn that `lab check --new-only` finds new against the merge base in a file the change touches (research-factory-226). Accepted as the meaning of Warn; each rule this document depends on is an Error. |
-| Stored check run **(implicit)** | stored, committed, superseded and committed; not stored when it repeats the newest stored run | A stored run in `.research/lab/checks/` is evidence, but an agent could delete or edit it, and a superseded run was often left uncommitted. Fixed by 228 (lab 0.20.0): the skill says to commit every run of a session, superseded runs included, with the text it checked. The opt-in PreToolUse hook `skill/research-factory/scripts/guard-check-runs.sh` refuses a tool call that deletes or edits a stored run; masters wires it in `.claude/settings.json`. It guards against mistakes, not intent, and fails open without jq. A check of a head whose run was committed, as after a merge, stored one more run that nobody committed (5 such files in the masters main checkout on 14 November 2026). Fixed by 391 (lab 0.23.0): `lab check` and `lab archive done` store no run that repeats the newest stored run for the same text (both clean, on the same day, commits equal outside the state directory, equal checks, exits, statuses, versions, measures, errors and warnings; info findings may differ) and print `not stored`; see docs/interfaces.md section 7. Since 392 (lab 0.24.0), a linked worktree stores no run whose findings name git-ignored files that the main checkout has and the worktree lacks (row Worktree data). |
+| Stored check run **(implicit)** | stored, committed, superseded and committed; not stored when it repeats the newest stored run (`repeats`, `:976`); stored with a suffix on a name clash (`store`, `:1180`) | A stored run in `.research/lab/checks/` is evidence, but an agent could delete or edit it, and a superseded run was often left uncommitted. Fixed by 228 (lab 0.20.0): the skill says to commit every run of a session, superseded runs included, with the text it checked. The opt-in PreToolUse hook `skill/research-factory/scripts/guard-check-runs.sh` refuses a tool call that deletes or edits a stored run; masters wires it in `.claude/settings.json`. It guards against mistakes, not intent, and fails open without jq. Since research-factory-414 it runs one jq call and exits early when a command has no deleting or writing word. A check of a head whose run was committed, as after a merge, stored one more run that nobody committed (5 such files in the masters main checkout on 14 November 2026). Fixed by 391 (lab 0.23.0): `lab check` and `lab archive done` store no run that repeats the newest stored run for the same text (both clean, on the same day, commits equal outside the state directory, equal checks, exits, statuses, versions, measures, errors and warnings; info findings may differ) and print `not stored`; see docs/interfaces.md section 7. Since 392 (lab 0.24.0), a linked worktree stores no run whose findings name git-ignored files that the main checkout has and the worktree lacks (row Worktree data). |
 
 ### 5.6 Replay and worktree
 
 | Machine | States | Note |
 |---|---|---|
-| Replay worktree | created, checked, removed | explicit; removed on each exit path |
+| Replay worktree | created, checked, removed | `Drop` guard (`src/replay.rs:250`) on each exit path. A run killed by a signal leaves the worktree, and the next replay removes worktrees of dead pids (`remove_leftovers`, `:198`). By design; a reused pid keeps a leftover. Since research-factory-414 the `--new-only` merge-base run runs while the work tree's run does (`src/main.rs:849`). The base run still spends about 6.7 s in `git worktree remove` and 2.4 s linking 25,614 ignored files: research-factory-442. |
 | Worktree `Location` (`src/worktree.rs:17`) | NotLinked, Bare, Linked | explicit |
-| Ignored-file fallback | own checkout, main checkout | explicit since lab 0.9.10; the search index does **not** fall back: each checkout has its own index (section 3.1), but it reads the paper texts that a linked worktree lacks from the main checkout and, since lab 0.25.1 (research-factory-311), says so on stderr |
+| Ignored-file fallback | own checkout, main checkout | explicit since lab 0.9.10; the search index does **not** fall back: each checkout has its own index (section 3.1), but it reads the paper texts that a linked worktree lacks from the main checkout and, since lab 0.25.1 (research-factory-311), says so on stderr. `lab related` and `lab open` do not fall back (3.7). |
 | Worktree data (masters) **(implicit)** | empty, seeded, pushed back | A new worktree had none of the main checkout's ~54,000 git-ignored files (research-factory-312). masters' `.claude/hooks/worktree-data.py` clones them (APFS copy-on-write) on SessionStart and after EnterWorktree, and pushes files made in the worktree back to the main checkout on Stop. It never copies `private/` or secrets; `.env` templates and files a provenance manifest lists are copied (research-factory-316). The hook's context line `worktree-data: cloned N ...` reaches the agent (verified live by research-factory-325). A worktree that no masters session started in stayed empty: 9 of 21 were on branches older than the hook (masters 69393fa8), whose own `.claude/settings.json` lacks it, and one was made by `git worktree add` from a research-factory session. Its `lab check` stored a run with 162 `source-text-missing` warnings and no `quote-not-found` errors, while main's run of the same text had 2 errors. Fixed in lab by 392 (lab 0.24.0): in a linked worktree, `lab check` stores no run whose findings name git-ignored files that the main checkout has and the worktree lacks, prints why, and exits 2; see docs/interfaces.md section 7. |
 
 ### 5.7 Retro candidate
 
-`found ─► shown ─► filed or dismissed`. Today only `found` and `shown` exist; a dismissed candidate returns at the next retro.
-Fixed by research-factory-205 together with section 3.4 (stored rejections).
+`found ─► shown ─► filed (a lesson's metric covers the rule) or dismissed`.
+Explicit: `lab retro dismiss` stores the decision, and a dismissed candidate does not return (`src/main.rs:1315`, `src/search/learn.rs:114`; test `a_dismissed_candidate_does_not_return`). Fixed by 205.
 
 ### 5.8 Rule lifecycle **(implicit)**
 
@@ -402,6 +494,7 @@ started ─► brief shown ─► working ─► record written ─► lab archi
 **(implicit)** today: the Stop gate `.claude/hooks/archive-gate.sh` in masters covers only `docs/research` and `AGENTS.md`.
 Under model v2 the order is enforced in two places: `lab archive done` (section 2.5) and the board's `task_done` evidence, which names that command.
 Sessions as a search scope (transcripts) are indexed from agentprof's session list; agentprof 0.3.0 counts archive searches, greps and reads per session (research-factory-212).
+agentprof's own machines are in section 9.1.
 
 ## 6. Board machines (agent-board)
 
@@ -435,8 +528,8 @@ task open ─► doing ─► record drafted (front matter: task, kind) ─► r
 | Guard | Place | Task |
 |---|---|---|
 | A new record names a `task` and a `kind` | `lab archive check` | 189 |
-| The `task` exists on the board | `lab archive done`, through a configured board export command | 207 |
-| Board unreachable | state `skipped`, reported; not an error and not a pass | 207 |
+| The `task` exists on the board | `lab archive done` and `lab archive check`, through a configured board export command | 207 |
+| Board unreachable | `task-link-skipped`, an Info note (`src/archive/meta_rules.rs:530-540`). `lab archive check` exits 0, so it is a pass. Confirmed (probe): the export's error output is dropped (`meta_rules.rs:401`). A background process the export starts holds lab for 30 s (`meta_rules.rs:31`), and a timeout kills only the direct child (`meta_rules.rs:441-448`). research-factory-432. A list cut at the export's `--limit` makes `unknown-task` wrong with no warning: research-factory-433. Since research-factory-414 the export starts before the archive walk and runs while the files are read. | 207, 414 |
 | A done task with a record names it | board evidence; rule in masters `AGENTS.md` | 208 |
 
 ### 7.2 Board note and record
@@ -465,45 +558,137 @@ Two machines inside an experiment were implicit until 12 November 2026:
 ### 7.4 Text and its derivatives
 
 Covered in section 4.1 (stale derivative). The joint is between `papers` (writer) and `lab search` (reader); the sha256 in each sidecar is the shared state.
+A linked worktree breaks this joint for `lab related` and `lab open`; see 3.7.
+`lab archive check` prints the errors of its stale-derivative check only on stderr (2.5, research-factory-494).
 
 ### 7.5 Tool version and project
 
 `merged ─► installed ─► required by the project`. A project that needs a lab version states it; install is by git revision of the merge commit.
-**(implicit)**: nothing compares the installed version with the one a project needs, except the masters lesson loop (lab ≥ 0.3.0). `lab brief` reports a too-old version under research-factory-207.
+Explicit since 207: `[lab] min_version` (`src/config.rs:86`). `lab brief` says first when the installed lab is older (`version_note`, `src/brief.rs:545`).
 
 ## 8. Implicit machines found
 
-| # | Machine | Section | Outcome |
+Each row names its verdict and the task that holds each open gap.
+Rows 21, 24, 30 and 31 describe machines outside the research-factory-414 audit (the board and experiments); they keep their earlier outcome.
+
+| # | Machine | Section | Status |
 |---|---|---|---|
-| 1 | Record status moves | 2.1 | Fixed by 207 |
-| 2 | Partial supersession (`amends`) | 2.1 | Fixed by 207, 200 |
-| 3 | Numbered id reservation | 2.2 | Fixed by 207 |
-| 4 | Follow-up folder metadata | 2.2 | Fixed by 189, 193 |
-| 5 | Generated index freshness | 2.4 | Removed by 207, 208 |
-| 6 | Record completion | 2.5 | Fixed by 207 |
-| 7 | Topic page current or historical | 2.6 | Fixed by 189, 193 |
-| 8 | Entry page freshness | 2.6 | Fixed by 193 |
-| 9 | Open question | 2.6 | Moved to the board by 208 |
-| 10 | Search index and its stages | 3.1 | Built by 187 |
-| 11 | Degraded query | 3.3 | Built by 187, 192 |
-| 12 | Missed query and rejected alias | 3.4 | Built by 205 |
-| 13 | Paper lifecycle | 4.1 | Built by 188, 198, 213, 191 |
-| 14 | Stale derivative | 4.1 | Built by 198, 213, 191 |
-| 15 | Seen index | 4.3 | Fixed by 188 |
-| 16 | Run record placeholder, import pairing | 4.5 | Fixed by 231 (prov 0.1.2); pairing was already explicit |
-| 17 | Board task for a signal | 5.3 | Fixed by 217 (lab 0.17.0) |
-| 18 | Retro candidate dismissal | 5.7 | Fixed by 205 |
-| 19 | Rule lifecycle | 5.8 | Fixed by 232 |
-| 20 | Session order | 5.9 | Fixed by 207, 208 |
-| 21 | Feedback state | 6 | Proposed in agent-board-454 (note) |
-| 22 | Record and task link | 7.1 | Fixed by 189, 207, 208 |
-| 23 | Board note to record | 7.2 | Built by 187 (board scope) |
-| 24 | Experiment to build | 7.3 | Held by the umbrella task |
-| 25 | Tool version needed by a project | 7.5 | Fixed by 207 |
-| 26 | Id on the default branch or in another worktree | 2.2 | Fixed by 227, 337; renumber by 336 |
-| 27 | Link target tracked, ignored or untracked | 2.5 | Fixed by 228 (warning) |
-| 28 | Stored check run | 5.5 | Fixed by 228 (skill rule, opt-in hook) |
-| 29 | Worktree data | 5.6 | Fixed by 312, 316 (masters hook); an unseeded worktree's run is refused by 392 (lab 0.24.0) |
-| 30 | Experiment call batch | 7.3 | Fixed by 224 and 322 with its sub-tasks 323, 324, 327, 332, 333 |
-| 31 | Test-set judgment pin | 7.3 | Fixed by 245, 340, 341 |
-| 32 | Board export cache | 3.6 | Built by 345 (lab 0.22.0) |
+| 1 | Record status moves | 2.1 | Fixed by research-factory-207 for terminal statuses. Other moves are free: research-factory-434 (lab guard), research-factory-501 (`rejected` in masters; owner's decision, ask open). |
+| 2 | Partial supersession (`amends`) | 2.1 | Fixed by research-factory-207, research-factory-200. |
+| 3 | Numbered id reservation | 2.2 | Fixed by research-factory-207. Lock with no time limit: research-factory-430. Silent reset of a reserved-ids file: research-factory-431. |
+| 4 | Follow-up folder metadata | 2.2 | Fixed by research-factory-189, research-factory-193. |
+| 5 | Generated index freshness | 2.4 | Fixed (removed) by research-factory-207, research-factory-208. |
+| 6 | Record completion | 2.5 | Fixed by research-factory-207. `update` skips the front-matter check with `write_indexes = false`: research-factory-426. Duplicate-record check hides a git failure: research-factory-493. |
+| 7 | Topic page current or historical | 2.6 | Fixed by research-factory-189, research-factory-193. |
+| 8 | Entry page freshness | 2.6 | Fixed by research-factory-193. |
+| 9 | Open question | 2.6 | Moved to the board by research-factory-208. |
+| 10 | Search index and its stages | 3.1 | Built by research-factory-187. Temporary file after a kill: research-factory-416. No test of the budget stop: research-factory-417. Silent rebuild on an open error: refuted (probe). Document drift (`failed` stage, integrity check, vectors) fixed in research-factory-414. |
+| 11 | Degraded query | 3.3 | Built by research-factory-187, research-factory-192. MCP tools drop notices: research-factory-418. Notes walk through ignored folders: research-factory-424. `files` scope loses the notes notices: refuted (probe). One notes walk for `notes` and `files`: fixed in research-factory-414. |
+| 12 | Missed query and rejected alias | 3.4 | Built by research-factory-205. Parallel writers lose retro decisions and thesaurus lines: research-factory-419. |
+| 13 | Paper lifecycle | 4.1 | Built by research-factory-188, research-factory-198, research-factory-213, research-factory-191. Gaps: research-factory-467, research-factory-468, research-factory-469, research-factory-470, research-factory-473, research-factory-474, research-factory-475. 17 null-depth entries: claim refuted as a gap (registry check, 0 depth findings). |
+| 14 | Stale derivative | 4.1, 7.4 | Built by research-factory-198, research-factory-213, research-factory-191. papers skips unreadable inputs: held by research-factory-495. lab prints its check errors only on stderr: research-factory-494. |
+| 15 | Seen index | 4.3 | Fixed by research-factory-188 for registered papers. A DOI held only by a skipped invalid note gives "not seen": research-factory-466. |
+| 16 | Run record placeholder, import pairing | 4.5 | Placeholder explicit since prov 0.1.0. Filled `complete` state added by research-factory-231 (prov 0.1.2, a8f3c59). 0-byte record after a kill: research-factory-444. No exit from `incomplete`: research-factory-445. Path without hash not reported: research-factory-448. No fsync before rename: research-factory-449. |
+| 17 | Board task for a signal | 5.3 | Fixed by research-factory-217 (lab 0.17.0). Duplicate task on a resend after a crash or timeout: research-factory-435. No resend after the task closed while the condition stays: research-factory-439. |
+| 18 | Retro candidate dismissal | 5.7 | Fixed by research-factory-205; test `a_dismissed_candidate_does_not_return`. |
+| 19 | Rule lifecycle | 5.8 | Fixed by research-factory-232. |
+| 20 | Session order | 5.9 | Fixed by research-factory-207, research-factory-208. |
+| 21 | Feedback state | 6 | Proposed in agent-board-454 (note). |
+| 22 | Record and task link | 7.1 | Fixed by research-factory-189, research-factory-207, research-factory-208. Board failure is an Info note and a pass. Export error output, 30 s hold and kill: research-factory-432. List cut at `--limit`: research-factory-433. Export overlaps the archive walk: fixed in research-factory-414. |
+| 23 | Board note to record | 7.2 | Built by research-factory-187 (board scope); its cache is row 32. |
+| 24 | Experiment to build | 7.3 | Held by the umbrella task research-factory-211. |
+| 25 | Tool version needed by a project | 7.5 | Fixed by research-factory-207 (`min_version`, `version_note`). |
+| 26 | Id on the default branch or in another worktree | 2.2 | Fixed by research-factory-227, research-factory-337. Renumber by research-factory-336; no rollback on a failed write: research-factory-429. |
+| 27 | Link target tracked, ignored or untracked | 2.5 | Fixed by research-factory-228 (warning). Scan limited to link targets: fixed in research-factory-414. |
+| 28 | Stored check run | 5.5 | Fixed by research-factory-228 (skill rule, opt-in hook), research-factory-391, research-factory-392. Hook fast path: fixed in research-factory-414. |
+| 29 | Worktree data | 5.6 | Fixed by research-factory-312, research-factory-316 (masters hook); an unseeded worktree's run is refused by research-factory-392 (lab 0.24.0). |
+| 30 | Experiment call batch | 7.3 | Fixed by research-factory-224 and research-factory-322 with its sub-tasks 323, 324, 327, 332, 333. |
+| 31 | Test-set judgment pin | 7.3 | Fixed by research-factory-245, research-factory-340, research-factory-341. |
+| 32 | Board export cache | 3.6 | Built by research-factory-345. Foreground lock wait with no limit: research-factory-420. Corrupt `board.json` reported as absent: research-factory-421. No timeout test: research-factory-417. |
+| 33 | Paper texts in a linked worktree | 3.7 | `lab related` and `lab open` lack the main-checkout fallback: research-factory-422. `project.registry` ignored: research-factory-423. Unreadable sidecar skipped silently: research-factory-491. Numeric registry keys skipped: research-factory-492. |
+| 34 | Signal state and loop log in a loop run | 5.2 | Signal state saved after all sends: research-factory-435. Log rotation outside the lock: research-factory-438. Unreadable `signals.json` fails every loop: research-factory-440. Failed background start not seen: research-factory-443. |
+| 35 | Lesson file writers | 5.1 | Unlocked writes with a fixed temporary name: research-factory-437. Hand edit without a History line: by design (git history records it). |
+| 36 | Check with no time limit | 5.5 | research-factory-436. |
+| 37 | Seal exits and cache | 2.3 | Deleted manifest-sealed file has no exit: research-factory-425. Check writes the cache, comment says read-only: research-factory-427. Front matter that is not a mapping: research-factory-428. One reader per commit: fixed in research-factory-414. |
+| 38 | Waits of the papers network | 4.3 | Registry lock and throttle waits with no limit: research-factory-471. Unreadable cooldown file: research-factory-472. PDF reader join: research-factory-476. Browser link cap, not probed: research-factory-480. Graph fallback order: held by research-factory-495. |
+| 39 | claimcheck verdict inputs | 4.4 | Unclosed quotation: research-factory-450. One text path with two sha256: research-factory-451. Unreadable checked file aborts the run: research-factory-452. Number searched twice: research-factory-453. |
+| 40 | claimcheck kept quotation | 4.4 | By design; each state has a test (`claimcheck tests/rules.rs:2011`, `:2058`, `:2087`, `:2147`). |
+| 41 | claimcheck text index | 4.4 | Eager build: research-factory-454. Registry lines parsed twice: research-factory-455. |
+| 42 | prov run interrupt guard | 4.5 | By design (tests `prov tests/cli.rs:1596`, `:1620`, `:1749`). Placeholder before the guard: refuted at 8743e9d (fixed in prov 9ea76bb). |
+| 43 | prov command output drain | 4.5 | research-factory-446. |
+| 44 | prov preflight tool probes | 4.5 | research-factory-447. |
+| 45 | agentprof scan output set | 9.1 | Mixed set after a stop in the rename phase; `report` compares counts only: research-factory-456. |
+| 46 | agentprof Claude candidate read | 9.1 | Whole-file read of each candidate: research-factory-457. Path-boundary needle: by design (test `cwd_mentions_stop_at_path_boundaries`). |
+| 47 | agentprof Claude open turns | 9.1 | Counts tool calls, documents say turns: research-factory-458. |
+| 48 | agentprof Claude content blocks | 9.1 | A failed parse drops every block silently: research-factory-459. |
+| 49 | agentprof T3 run payload | 9.1 | Fallback to model `unknown` with no note: research-factory-459. |
+| 50 | agentprof Codex rollout state | 9.1 | Rule by design. 468 repeated `transcript-missing` warnings per scan: research-factory-460. |
+| 51 | agentprof Codex turn and `last_ts` | 9.1 | By design at segment ends; a test pins it. End-of-file branch test: research-factory-498. |
+| 52 | ireval duplicate policy | 9.2 | By design (probe; test `check_reports_duplicates_in_unjudged_queries`). |
+| 53 | ireval missing-query policy | 9.2 | By design (probe; test `config_supplies_defaults_and_flags_override`). |
+| 54 | ireval config source | 9.2 | Not recorded in JSON: research-factory-461. Check message text not asserted: research-factory-462. |
+| 55 | ireval tie reorder | 9.2 | By design (README, tests); no ties in the 5 real runs. |
+| 56 | ireval score input and output pipe | 9.2 | NaN panic: refuted (probe; the parser rejects NaN). Broken pipe: refuted (probe). |
+| 57 | trading archive INDEX and status fields | 9.3 | INDEX after a crash: by design (test `test_index_rewrites_stale_index_after_rename`). Idea status moves: research-factory-463. Paper `status: read`: research-factory-464. Tests: research-factory-465. |
+
+## 9. Session, evaluation and trading machines
+
+These tools are outside lab.
+agentprof reads agent sessions (section 5.9). ireval scores retrieval runs for experiments (section 7.3). The trading project checks its notes archive with `scripts/archive.py`.
+
+### 9.1 agentprof (0.5.0, 6a72921)
+
+| Machine | States | Code | Gap and verdict |
+|---|---|---|---|
+| Scan output set **(implicit)** | old set; staged (hidden `.<name>.<pid>.tmp`, synced); renamed in order; mixed | `write_outputs` (`agentprof src/scan.rs:1265-1287`) stages three files, then renames sessions, findings and `scan.json` (`scan.rs:1284`). A staging error removes the temporary files (`scan.rs:1275-1281`). | A stop during the rename phase leaves a mix, with no rollback. `report` compares counts only (`agentprof src/report.rs:181`), so a mix with equal counts passes. The test at `scan.rs:1309` covers a staging failure only. Confirmed (probe): research-factory-456. |
+| Claude candidate read | candidate; read whole; prefilter hit or miss; parsed | `agentprof src/scan.rs:463-482`; `cwd_needle` (`agentprof src/claude.rs:108-111`); `mentions_cwd` (`scan.rs:324-326`) | Every candidate is read whole. A parallel prefilter cut the median full scan from 8.39 s to 6.27 s in a prototype: research-factory-457. The needle stops at path boundaries, by design (test `cwd_mentions_stop_at_path_boundaries`, `scan.rs:1344`). |
+| Claude open turns | tool call pending; answered; open at end | `agentprof src/claude.rs:889-892`; `agentprof src/session.rs:314-319` | `open_turns` counts unanswered tool calls, not turns; README line 163 says turns. Confirmed (probe: `turns` 1, `open_turns` 2): research-factory-458. |
+| Claude content blocks | parsed; dropped | `agentprof src/claude.rs:684`, `:784` (`unwrap_or_default`) | One bad block drops every block of the message, with no note. Confirmed (probe): research-factory-459. |
+| T3 run payload | parsed; defaulted | `agentprof src/t3.rs:128-135`, `:312-314` | A malformed payload gives model `unknown`, with no note. Confirmed (probe): research-factory-459. |
+| Codex rollout presence | plain; zstd; missing | `agentprof src/codex.rs:589-600`; rule at `agentprof src/detect.rs:648-660` | The `transcript-missing` rule matches the state, by design. On this machine 468 such warnings repeat at each full scan. research-factory-460 summarises them. |
+| Codex spawn fixpoint | pass n; stable | `agentprof src/scan.rs:628-646` | Each pass parses `source` again. No waste: about 6 ms for 3 passes over 1,680 threads. |
+| Codex turn and `last_ts` | turn open; turn closed at a segment end | `agentprof src/codex.rs:1040-1062`, note at `:1092-1094` | By design at segment ends; a test pins it. The end-of-file branch has no test: research-factory-498. |
+| Billing mode lookup | matched; not matched | `agentprof src/billing.rs:98-105`; window at `:42` | The reverse scan has no early break. No waste. Test `lookup_needs_same_cwd_and_window`. |
+
+The archive shell lexer (`agentprof src/archive.rs:330-827`) was not read; research-factory-498 holds it (section 10).
+
+### 9.2 ireval (0.3.0, fb47fb2)
+
+| Machine | States | Code | Gap and verdict |
+|---|---|---|---|
+| Duplicate policy | `Error` (default); `First` | `ireval src/eval.rs:209-212`; flag at `ireval src/main.rs:289-291`; `check` uses `First` (`main.rs:599`) | By design. Probe: the default run exits 2, `--duplicates first` exits 0, and `check` exits 1 with `run-duplicate-doc`. Test `check_reports_duplicates_in_unjudged_queries`. |
+| Missing-query policy | flag; config; `skip` | `ireval src/main.rs:266-268` | The flag beats the config, which beats `skip`. By design; verified by probe and test `config_supplies_defaults_and_flags_override`. |
+| Config source **(implicit)** | discovered; loaded; not recorded | `discover` (`ireval src/config.rs:62`), `load` (`:74`); `settings_json` (`ireval src/main.rs:316-325`) | The JSON settings do not record the config path. Confirmed: research-factory-461. The `check` severity override (`main.rs:604-609`) has a test, but no test asserts its message text: research-factory-462. |
+| Ties | ranked by score descending, then docid descending | `trec_order` (`ireval src/eval.rs:109-113`); finding `tie-reorders-run` (`eval.rs:490`) | By design (README, named tests). The 5 real runs hold no ties. |
+| Score input | parsed; rejected | `parse_run` (`ireval src/input.rs:161`); NaN check (`input.rs:210`) | A NaN score could panic at `eval.rs:113`. Refuted (probe): the parser rejects it with `score is NaN` and exit 2. |
+| Output path | written; broken pipe | `out` (`ireval src/main.rs:369-379`); broken pipe at `:375` | Refuted (probe): a closed pipe causes no fault. |
+
+The `score` command is an alias of `eval`; verified by probe and test `score_is_an_alias_of_eval`.
+
+### 9.3 trading (911e485)
+
+`scripts/archive.py` loads notes (`load_notes`, `trading scripts/archive.py:93`), checks markets (`check_markets`, `:134`), validates (`validate`, `:140`), checks links (`check_links`, `:196`), renders the INDEX (`render`, `:225`) and runs (`main`, `:297`).
+`scripts/archive.py.lock` is a uv lockfile, not runtime state.
+
+| Machine | States | Gap and verdict |
+|---|---|---|
+| INDEX | fresh; stale after a crash between rename and rewrite | The next run rewrites a stale INDEX. By design: test `test_index_rewrites_stale_index_after_rename`. |
+| Idea status **(implicit)** | the values of `status` in an idea note | `validate` (`trading scripts/archive.py:140-193`) does not check status moves. Confirmed: research-factory-463. |
+| Paper status **(implicit)** | the values of `status` in a paper note | `status: read` is accepted on a paper with no recorded text. Confirmed: research-factory-464. |
+| Link target | present; missing | A link to a missing directory is reported. Refuted as a silent gap (probe: 93 broken-link errors). |
+
+Only 3 tests cover the archive, all of them for the INDEX rebuild: research-factory-465.
+The YAML loader takes 180-470 ms without the C loader. Measured; not a defect.
+
+## 10. Code the audit did not read
+
+The research-factory-414 audit read each tool in part. These tasks hold the code it did not read:
+
+| Tool | Code not read | Task |
+|---|---|---|
+| papers | `verify.rs` lookups (`:534-680`), `arxiv.rs`, `crossref.rs`, `atom.rs`, `notes.rs`, `text.rs`, `refs.rs`, `id.rs`, `finding.rs`, most of `structure.rs`, `sources.rs`, `cite.rs`, `bib.rs`, `check.rs`, `catalogue.rs`, `http.rs`, `openalex.rs`, `searchlog.rs` and `graph.rs`; `card.rs:190-494`; parts of `main.rs`; the tests were not run. Also the graph fallback order (4.3) and the unreadable inputs of `derivative::check` (4.1). | research-factory-495 |
+| prov | `run.rs` environment selection, `program_info`, the `rerun` and `verify` bodies and output formatting; the `manifest.rs` build walk, verify body and diff; the `import.rs` parse, resolve and import body; `lineage.rs:70-248`; `walk.rs:1-142` and `:253-290`; `compare.rs`, `dupes.rs` and `finding.rs`. | research-factory-496 |
+| claimcheck | `check.rs` citations, document walk, `check_depth`, `reference_entry` and `check_document`; `source.rs` normalisation and index internals; `matcher.rs` past its signatures; `main.rs`; `tests/cli.rs`. Also the `lab` and claimcheck claims of section 4.6. | research-factory-497 |
+| agentprof | Most of `scan.rs`, `claude.rs`, `codex.rs`, `detect.rs`, `session.rs` and `t3.rs`; `billing.rs:1-41` and `:113-144`; the archive shell lexer `archive.rs:330-827`; `util.rs`, `pricing.rs`, `main.rs`; `tests/scan.rs`. Also a test of the Codex end-of-file branch (9.1). | research-factory-498 |
+| ireval | The rest of `eval.rs`, `main.rs` and `config.rs`. | research-factory-499 |
+| lab | `src/stats.rs`, `src/finding.rs` and the rest of `src/evaluate.rs` (past `Verdict`, `measured` and `new_units`). | research-factory-500 |
