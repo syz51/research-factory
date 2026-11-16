@@ -210,7 +210,7 @@ uv run --no-project python measure.py "$E4B_TESTSET" out2 > raw/round2-compare.j
 uv run --no-project --with scipy python analyze.py raw/round2-compare.jsonl
 # Regrade (research-factory-342): the test set at masters 410b5e4, the transcripts from air
 git -C <masters> archive 410b5e4 docs/process/archive-search-testset-2026-11-12 | (mkdir -p ts && tar x -C ts)
-storagectl get air:research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
+storagectl get cloud:archive/research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
 T=ts/docs/process/archive-search-testset-2026-11-12
 uv run --no-project python measure.py "$T" out > raw/regrade-342/round1-need.jsonl
 uv run --no-project python measure.py "$T" screen > raw/regrade-342/round2-screen.jsonl
