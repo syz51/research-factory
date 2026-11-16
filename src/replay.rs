@@ -358,8 +358,7 @@ pub fn replay(
             continue;
         }
         let linked = link_inputs(project, &replay_root, &specs)?;
-        let versions = check::versions(project, &replay_root, &specs);
-        let ran = check::run_checks(project, &replay_root, &specs, &versions, &linked, None);
+        let ran = check::run_checks(project, &replay_root, &specs, &linked, None);
         drop(tree);
         let header = RunHeader {
             schema: check::RUN_SCHEMA.into(),
@@ -428,18 +427,10 @@ pub(crate) fn run_base(
     }
     link_ignored(project, &base_root)?;
     let linked = link_inputs(project, &base_root, specs)?;
-    let versions = check::versions(project, &base_root, specs);
     // In a linked worktree, the work tree's run swaps in the main checkout's
     // copy of an ignored file a check names; the base run does the same.
     let fallback = crate::worktree::Fallback::find(root)?;
-    let mut ran = check::run_checks(
-        project,
-        &base_root,
-        specs,
-        &versions,
-        &linked,
-        fallback.as_ref(),
-    );
+    let mut ran = check::run_checks(project, &base_root, specs, &linked, fallback.as_ref());
     // The canonical path first: the raw one is part of it on macOS, where
     // the temporary directory is below the `/var` symlink.
     let mut from: Vec<String> = Vec::new();

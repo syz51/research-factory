@@ -2,10 +2,12 @@
 //! whose subject and message stay the same while the problem does, so its
 //! fingerprint survives unrelated edits.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::front::{self, Meta};
+use super::gitseal::AtRev;
 use super::markdown;
 use super::seal::{Entry, Manifest, State};
 use super::{Record, Spec, Texts, read_optional};
@@ -119,6 +121,10 @@ pub(super) fn invalid_problem(r: &Record) -> Option<Problem> {
 }
 
 pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
+    // The board export runs while the files are walked and read.
+    let board = (spec.cfg.model >= 2)
+        .then(|| super::meta_rules::BoardExport::start(spec))
+        .flatten();
     let mut extra = vec![&spec.sealed, &spec.links, &spec.current];
     extra.extend(spec.budgets.iter());
     let found = spec.walk(&extra)?;
@@ -158,7 +164,7 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
         }
     }
     if spec.cfg.seal == SealMode::Git {
-        let seals = Seals::Git(spec);
+        let seals = Seals::git(spec);
         link_problems(spec, &records, links, current, &seals, &mut texts, &mut out)?;
         out.extend(super::gitseal::problems(spec)?);
     } else {
@@ -171,7 +177,7 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
         seal_problems(spec, sealed, &manifest, &mut out)?;
     }
     if spec.cfg.model >= 2 {
-        super::meta_rules::problems(spec, &records, &mut texts, &mut out)?;
+        super::meta_rules::problems(spec, &records, &mut texts, board, &mut out)?;
     }
     out.sort_by(|a, b| {
         (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
@@ -533,15 +539,25 @@ pub(super) enum Seals<'a> {
         manifest: &'a Manifest,
     },
     /// `seal = "git"`: the sealed text of a file is its body at `HEAD`.
-    Git(&'a Spec<'a>),
+    Git(RefCell<AtRev<'a>>),
 }
 
-impl Seals<'_> {
+impl<'a> Seals<'a> {
+    /// The git seal of `spec`'s files, read from `HEAD`.
+    pub(super) fn git(spec: &'a Spec<'a>) -> Self {
+        Self::Git(RefCell::new(AtRev::new(spec, "HEAD")))
+    }
+
     /// How many bytes of `body`, the body of `file`, its seal covers; `None`
     /// when the file is not sealed or its seal does not hold.
     fn sealed_len(&self, file: &str, body: &[u8]) -> Result<Option<usize>, String> {
         match self {
-            Self::Git(spec) => super::gitseal::sealed_len(spec, file, body),
+            Self::Git(at) => Ok(at
+                .borrow_mut()
+                .sealed(file)?
+                .map(front::sealed_body)
+                .filter(|head| body.starts_with(head))
+                .map(<[u8]>::len)),
             Self::Manifest { sealed, manifest } => {
                 let entry = manifest.files.get(file);
                 let holds = sealed.contains(file)
@@ -661,11 +677,18 @@ fn link_problems(
         })
         .collect();
     let in_main = in_main_checkout(root, checked.union(&current), texts, &mut listings)?;
-    let untracked = if checked.is_empty() {
-        BTreeSet::new()
-    } else {
-        crate::worktree::untracked(root)?
-    };
+    // Only a link target can be an untracked file that a link needs, so git
+    // lists the untracked files at or below the targets, not the whole tree.
+    let mut targets = BTreeSet::new();
+    for file in &checked {
+        let dir = file.rsplit_once('/').map_or("", |(d, _)| d);
+        for link in &texts.doc(&root.join(file))?.links {
+            if let Target::There { rel: Some(r), .. } = resolve(root, dir, &link.dest) {
+                targets.insert(r);
+            }
+        }
+    }
+    let untracked = super::gitseal::untracked(root, &targets)?;
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
