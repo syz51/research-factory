@@ -238,6 +238,6 @@ Screening ended after batch 5, the maximum of 200 topics. At most 30 topics are 
 - One `cli` session per phrasing decides selection. A topic can pass or fail by chance. E4b's fresh `cli` sessions on its selected topics were correct 6 of 30 times, so a single failure is a weak signal.
 - The key grades files, from the paths an answer names, as in E4 and E4b. Each new grade comes from one blind Opus judge per unit.
 - Batch 5's 10 topics before completion are an upper bound. Batches 3 and 4 kept 5 of 15 after completion.
-- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool only, never in cloud storage:
-  - `air:research-factory/e4c-powered/e4c-screening-b1-b2.tgz`, `e4c-screening-b3.tgz`, `e4c-screening-b4.tgz` and `e4c-screening-b5.tgz`: each holds its batches' transcripts and session queues. These are the source copies of the queues.
-  - `air:research-factory/e4c-powered/e4c-work.tgz`: the batch script (`screen_batch.sh`), the batch logs of batches 3 to 5, the measured rows, the selected lists, and copies of the batch 3 to 5 queues.
+- The transcripts hold archive text and stay out of this repository. They are in the cloud archive (moved from the `air` pool on 16 November 2026, research-factory-487):
+  - `cloud:archive/research-factory/e4c-powered/e4c-screening-b1-b2.tgz`, `e4c-screening-b3.tgz`, `e4c-screening-b4.tgz` and `e4c-screening-b5.tgz`: each holds its batches' transcripts and session queues. These are the source copies of the queues.
+  - `cloud:archive/research-factory/e4c-powered/e4c-work.tgz`: the batch script (`screen_batch.sh`), the batch logs of batches 3 to 5, the measured rows, the selected lists, and copies of the batch 3 to 5 queues.

@@ -25,7 +25,9 @@ The masters repository has no remote. Which git-ignored or untracked files in it
 - `research-factory/coordinator-research-fa-…/`: 12 `.research/papers` files of the coordinator worktree.
 - `manifests/<repo>--<worktree>.tsv`: every untracked or ignored file with its status, size and sha256.
 
-The destination is `air`, not `cloud`. masters AGENTS.md ("Confidentiality and safety") rules out plain uploads of research material, and `pro` was offline.
+The destination was `air` at the time, not `cloud`: an agent read masters AGENTS.md ("Confidentiality and safety") as ruling out plain uploads of research material, and `pro` was offline.
+
+**Moved on 16 November 2026 (research-factory-490).** The owner did not make that rule and reversed it: an archive goes to the cloud archive, and `air` holds only active work. The copy is now at `cloud:archive/masters/worktree-rescue-2026-11-13/`. The sha256 of each of its 421 files, read back from cloud, equals the air copy; the air copy is removed. The `air:` and `~/Pool` paths below record where the copy was on 13 November. To verify now, fetch the folder with `storagectl get` and pass the local folder to `scripts/verify.sh`. The limit below about the Air's SSD no longer applies to this copy.
 
 ## Method
 

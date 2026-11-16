@@ -187,7 +187,7 @@ The board's weekly usage reading went from 88% before the pilot to 90% after the
 - Round 2's prompts are the test set's phrasings, whose grades were made for the `need`. See "Neither correct in 18 pairs".
 - Round 2's cost is confounded by the screening run before it (see "Cost" above). Round 1's is not: each condition started first in 12 sessions.
 - The start position comes from `order.log`. Sessions of one topic start within the same second, so the position is the order in which `xargs` started them.
-- The transcripts hold archive text and stay out of this repository. They are on the `air` storage pool at `research-factory/e4b-grep-hard/e4b-transcripts.tgz` (pilot, both rounds and the screening).
+- The transcripts hold archive text and stay out of this repository. They are in the cloud archive at `cloud:archive/research-factory/e4b-grep-hard/e4b-transcripts.tgz` (moved from the `air` pool on 16 November 2026, research-factory-487) (pilot, both rounds and the screening).
 
 ## Reproduce
 
@@ -208,9 +208,9 @@ uv run --no-project python screen.py select "$E4B_TESTSET" raw/round2-screen.jso
 uv run --no-project python order.py topics-round2.txt | E4B_OUT=out2 xargs -P4 -L1 sh run_session.sh
 uv run --no-project python measure.py "$E4B_TESTSET" out2 > raw/round2-compare.jsonl
 uv run --no-project --with scipy python analyze.py raw/round2-compare.jsonl
-# Regrade (research-factory-342): the test set at masters 410b5e4, the transcripts from air
+# Regrade (research-factory-342): the test set at masters 410b5e4, the transcripts from the cloud archive
 git -C <masters> archive 410b5e4 docs/process/archive-search-testset-2026-11-12 | (mkdir -p ts && tar x -C ts)
-storagectl get air:research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
+storagectl get cloud:archive/research-factory/e4b-grep-hard/e4b-transcripts.tgz e4b.tgz && tar xzf e4b.tgz
 T=ts/docs/process/archive-search-testset-2026-11-12
 uv run --no-project python measure.py "$T" out > raw/regrade-342/round1-need.jsonl
 uv run --no-project python measure.py "$T" screen > raw/regrade-342/round2-screen.jsonl
