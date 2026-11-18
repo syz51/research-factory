@@ -61,21 +61,21 @@ States are strings from `[lab.archive] statuses` (`src/config.rs:224`).
 | Transition or invariant | Enforced | Gap and verdict |
 |---|---|---|
 | Status is one of `statuses` | `front-matter-invalid` | None |
-| A required status is present | `missing-field` (`src/archive/rules.rs:207`) | None |
-| An inactive status names `superseded_by` or `withdrawn_reason` | `inactive-without-reason` (`src/archive/meta_rules.rs:275`) | By design: a superseded record that names no successor is caught only through `reason_statuses`. |
-| `supersedes` and `superseded_by` agree | `supersession-mismatch`, `superseded-but-active` (`src/archive/rules.rs:268-298`) | None |
-| A terminal status never changes | `status-reversed`, git seal only (`src/archive/gitseal.rs:537`) | None |
+| A required status is present | `missing-field` (`src/archive/rules.rs:213`) | None |
+| An inactive status names `superseded_by` or `withdrawn_reason` | `inactive-without-reason` (`src/archive/meta_rules.rs:278`) | By design: a superseded record that names no successor is caught only through `reason_statuses`. |
+| `supersedes` and `superseded_by` agree | `supersession-mismatch`, `superseded-but-active` (`src/archive/rules.rs:274-304`) | None |
+| A terminal status never changes | `status-reversed`, git seal only (`src/archive/gitseal.rs:756`) | None |
 | Any other move | not enforced | Confirmed (probe): `accepted` to `proposed` and `rejected` to `accepted` pass. Masters seals `rejected` but does not make it terminal. The lab guard is research-factory-434. Whether `rejected` is terminal in masters is the owner's decision, research-factory-501 (ask open). |
 
 The draft, final and appended states of model 2 belong to the seal (2.3), not to `status`.
-`amends` and `amended_by` are a relation (`amendment-mismatch`, `src/archive/meta_rules.rs:322`), not a state. research-factory-207 added the rule and research-factory-200 the graph edge.
+`amends` and `amended_by` are a relation (`amendment-mismatch`, `src/archive/meta_rules.rs:325`), not a state. research-factory-207 added the rule and research-factory-200 the graph edge.
 
 ### 2.2 Record identity
 
 | Machine | States | Enforcement | Gap and verdict |
 |---|---|---|---|
 | Numbered id | free, reserved, taken | `lab archive next --reserve` counts this checkout, the default branch and other worktrees (`src/archive/reserve.rs:51-86`). It writes the number under a lock in the main checkout's `.research` (`src/archive/reserve.rs:89-157`). | Confirmed (probe): the lock waits with no time limit (`reserve.rs:99`), research-factory-430. Confirmed (probe): a reserved-ids file that does not parse is reset silently (`reserve.rs:132-140`), so a number is given out twice, research-factory-431. |
-| Id on the default branch | free, taken here, taken there | `id-taken-on-default-branch` (`src/archive/gitseal.rs:219-286`) | None |
+| Id on the default branch | free, taken here, taken there | `id-taken-on-default-branch` (`src/archive/gitseal.rs:438-505`) | None |
 | Id change | id, renumbered | `lab archive renumber` refuses a taken id (`src/archive/renumber.rs:266-276`) and a sealed record (`renumber.rs:283-297`). | Confirmed (probe): it renames first (`renumber.rs:652`), then writes (`renumber.rs:654-661`). A failed write leaves the rename and broken links, with no rollback. It prints "changed" before the write. research-factory-429. |
 | Follow-up folder | without front matter, with front matter, with date | Fixed by 189 and 193 | None |
 
@@ -85,10 +85,10 @@ Manifest seal (`src/archive/seal.rs:40-48`): `New`, `Unchanged`, `Appended`, `Ed
 
 | Transition | Enforced | Gap and verdict |
 |---|---|---|
-| New → Unchanged | `lab archive seal`, `update` (`src/archive/mod.rs:407-463`) | Confirmed (probe): with `model = 2` and `write_indexes = false`, `update` seals a record with invalid front matter (`mod.rs:594-611`). `done` refuses it (`src/archive/done.rs:235-251`). research-factory-426. |
-| Unchanged → Edited | `sealed-edited` (`src/archive/rules.rs:886-893`) | None |
+| New → Unchanged | `lab archive seal`, `update` (`src/archive/mod.rs:407-463`) | Confirmed (probe): with `model = 2` and `write_indexes = false`, `update` seals a record with invalid front matter (`mod.rs:594-611`). `done` refuses it (`src/archive/done.rs:242-258`). research-factory-426. |
+| Unchanged → Edited | `sealed-edited` (`src/archive/rules.rs:979-986`) | None |
 | Edited → Unchanged | `lab archive seal --accept` (`mod.rs:526-570`) | None |
-| any → missing | `sealed-missing` (`rules.rs:898-909`) | Confirmed (probe): there is no exit. `--accept` fails on a deleted file, and the entry stays. research-factory-425. |
+| any → missing | `sealed-missing` (`rules.rs:991-1002`) | Confirmed (probe): there is no exit. `--accept` fails on a deleted file, and the entry stays. research-factory-425. |
 
 Git seal (`seal = "git"`, `src/archive/gitseal.rs`):
 
@@ -97,10 +97,10 @@ untracked ─► committed ─► sealed ─► appended ─► appended ...
                              └─► edited ─► error, unless [[lab.archive.accepted_edit]] names path, commit and reason
 ```
 
-- A file is sealed from the first commit where it matches `sealed` or has a status in `sealed_statuses`. Each later version must start with the sealed body (`gitseal.rs:506-547`).
-- The check stores the last clean commit in `<state_dir>/lab/archive-git-seal.json` (`gitseal.rs:666-675`). So `lab archive check` writes state, although its doc comment says read-only (`src/archive/mod.rs:633`). Confirmed (probe). The decision is to keep the write and fix the comment: research-factory-427.
-- Kept links and `lab check --new-only` read sealed text through one reader per commit (`AtRev`, `gitseal.rs:695-825`). Fixed in research-factory-414: the kept-link check went from 17 git calls to 3, and the `--new-only` seal lookup from 20 to 2.
-- The reader treats a record as sealed when an earlier version had a sealed status (`status_sealed_by`, `gitseal.rs:770`). A baseline counts only when the commit contains it (`gitseal.rs:803`).
+- A file is sealed from the first commit where it matches `sealed` or has a status in `sealed_statuses`. Each later version must start with the sealed body (`gitseal.rs:725-766`).
+- The check stores the last clean commit in `<state_dir>/lab/archive-git-seal.json` (`gitseal.rs:885-894`). So `lab archive check` writes state, although its doc comment says read-only (`src/archive/mod.rs:633`). Confirmed (probe). The decision is to keep the write and fix the comment: research-factory-427.
+- Kept links and `lab check --new-only` read sealed text through one reader per commit (`AtRev`, `gitseal.rs:914-1044`). Fixed in research-factory-414: the kept-link check went from 17 git calls to 3, and the `--new-only` seal lookup from 20 to 2.
+- The reader treats a record as sealed when an earlier version had a sealed status (`status_sealed_by`, `gitseal.rs:989`). A baseline counts only when the commit contains it (`gitseal.rs:1022`).
 - Confirmed (probe): front matter that stops being a YAML mapping makes the whole file the sealed text (`src/archive/front.rs:100-108`). The check then reports `sealed-edited`, though the body did not change. research-factory-428.
 
 ### 2.4 Generated index
@@ -112,7 +112,7 @@ The state `stale` then cannot occur in git. Fixed by 207; masters removes the co
 
 ### 2.5 Record completion
 
-`lab archive done` (`src/archive/done.rs:254-302`) is the one gate:
+`lab archive done` (`src/archive/done.rs:261-309`) is the one gate:
 
 ```text
 written ─► front matter valid ─► (manifest) sealed ─► search refreshed ─► links ─► task ─► sources ─► sealed (git)
@@ -120,10 +120,13 @@ written ─► front matter valid ─► (manifest) sealed ─► search refresh
 
 It exits non-zero at the first stage with an error.
 
-Link target: `untracked-link` (`src/archive/rules.rs:762-783`) is a Warn for a link to an untracked file, or to a directory that holds untracked files and nothing tracked.
+Link target: `untracked-link` (`src/archive/rules.rs:832-853`) is a Warn for a link to an untracked file, or to a directory that holds untracked files and nothing tracked.
 An untracked target exists only in this checkout, so the link breaks in every other checkout.
 `lab archive done` prints the fix for this Warn and still exits 0 (`src/archive/done.rs:73-76`).
-Ignored targets are not flagged; the worktree data seed (section 5.6) carries them.
+Since lab 0.26.0 (research-factory-388), `ignored-link` (`src/archive/rules.rs:854-871`) is a Warn for a link to a file or directory that git ignores, or to a directory that holds only ignored files, on a line that the change adds.
+A line counts as added when it differs from the merge base of HEAD with the default branch (`src/archive/gitseal.rs:215`); without a default branch or a merge base, no line counts.
+The other ignored-link findings are dropped after `[[lab.archive.allow]]` has matched them, so an entry stays in use after its branch merges (`src/archive/rules.rs:187`).
+The worktree data seed (section 5.6) still carries ignored targets to a linked worktree.
 Git lists untracked files only at those link targets (`src/archive/gitseal.rs:141-166`). Fixed in research-factory-414: the scan went from 1.06-1.54 s to 0.08-0.11 s on masters.
 
 Gaps in `lab archive check`:
@@ -529,7 +532,7 @@ task open ─► doing ─► record drafted (front matter: task, kind) ─► r
 |---|---|---|
 | A new record names a `task` and a `kind` | `lab archive check` | 189 |
 | The `task` exists on the board | `lab archive done` and `lab archive check`, through a configured board export command | 207 |
-| Board unreachable | `task-link-skipped`, an Info note (`src/archive/meta_rules.rs:530-540`). `lab archive check` exits 0, so it is a pass. Confirmed (probe): the export's error output is dropped (`meta_rules.rs:401`). A background process the export starts holds lab for 30 s (`meta_rules.rs:31`), and a timeout kills only the direct child (`meta_rules.rs:441-448`). research-factory-432. A list cut at the export's `--limit` makes `unknown-task` wrong with no warning: research-factory-433. Since research-factory-414 the export starts before the archive walk and runs while the files are read. | 207, 414 |
+| Board unreachable | `task-link-skipped`, an Info note (`src/archive/meta_rules.rs:533-543`). `lab archive check` exits 0, so it is a pass. Confirmed (probe): the export's error output is dropped (`meta_rules.rs:404`). A background process the export starts holds lab for 30 s (`meta_rules.rs:32`), and a timeout kills only the direct child (`meta_rules.rs:444-451`). research-factory-432. A list cut at the export's `--limit` makes `unknown-task` wrong with no warning: research-factory-433. Since research-factory-414 the export starts before the archive walk and runs while the files are read. | 207, 414 |
 | A done task with a record names it | board evidence; rule in masters `AGENTS.md` | 208 |
 
 ### 7.2 Board note and record

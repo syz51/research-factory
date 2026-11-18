@@ -31,6 +31,9 @@ pub(super) struct Problem {
     pub(super) detail: Option<String>,
     /// The link destination as written, for `[[lab.archive.allow]]`.
     pub(super) target: Option<String>,
+    /// Dropped once `[[lab.archive.allow]]` has matched it: an `ignored-link`
+    /// on a line that the change did not add.
+    pub(super) outside_change: bool,
 }
 
 impl Problem {
@@ -50,6 +53,7 @@ impl Problem {
             data: None,
             detail: None,
             target: None,
+            outside_change: false,
         }
     }
 
@@ -179,6 +183,8 @@ pub(super) fn problems(spec: &Spec) -> Result<Vec<Problem>, String> {
     if spec.cfg.model >= 2 {
         super::meta_rules::problems(spec, &records, &mut texts, board, &mut out)?;
     }
+    // After `[[lab.archive.allow]]` has matched them, so an entry stays in use.
+    out.retain(|p| !p.outside_change);
     out.sort_by(|a, b| {
         (&a.path, a.line, a.rule, &a.message).cmp(&(&b.path, b.line, b.rule, &b.message))
     });
@@ -643,6 +649,64 @@ fn in_main_checkout<'f>(
     fallback.resolve(missing.iter().map(String::as_str))
 }
 
+/// Of the link `targets`, relative to the root, those that git ignores: the
+/// ones that exist here and that `git check-ignore` matches, and those found
+/// in the main checkout (`in_main`), which git ignores by definition. A
+/// fresh clone lacks them. A directory that git tracks a file in does not
+/// count; one that holds only ignored files does. A target below a symbolic
+/// link or in a submodule is not asked about, since git refuses such a path.
+fn ignored_targets(
+    root: &Path,
+    targets: &BTreeSet<String>,
+    in_main: &BTreeSet<String>,
+    listings: &mut Listings,
+) -> Result<BTreeSet<String>, String> {
+    let mut plain: HashMap<&str, bool> = HashMap::new();
+    let mut here = Vec::new();
+    for r in targets {
+        if !r.is_empty()
+            && !in_main.contains(r)
+            && listings.exists(root, r)
+            && r.match_indices('/').all(|(i, _)| {
+                *plain.entry(&r[..i]).or_insert_with(|| {
+                    let abs = root.join(&r[..i]);
+                    abs.symlink_metadata().is_ok_and(|m| m.is_dir()) && !abs.join(".git").exists()
+                })
+            })
+        {
+            here.push(r.as_str());
+        }
+    }
+    let found = crate::worktree::ignored(root, here.iter().copied())?;
+    // A pattern such as `data/*` ignores the contents of a directory, not the
+    // directory itself, so a directory also counts when it holds files and
+    // git tracks nothing in it; one that holds untracked files is an
+    // `untracked-link` first. git check-ignore leaves tracked files out, but
+    // not a directory that holds them.
+    let dirs: Vec<&str> = here
+        .iter()
+        .copied()
+        .filter(|r| root.join(r).is_dir())
+        .collect();
+    let holding = super::gitseal::holding_tracked(root, &dirs)?;
+    let dirs: BTreeSet<&str> = dirs.into_iter().collect();
+    let mut ignored = BTreeSet::new();
+    for r in here {
+        let counts = if dirs.contains(&r) {
+            !holding.contains(r)
+                && (found.contains(r)
+                    || std::fs::read_dir(root.join(r)).is_ok_and(|mut d| d.next().is_some()))
+        } else {
+            found.contains(r)
+        };
+        if counts {
+            ignored.insert(r.to_string());
+        }
+    }
+    ignored.extend(in_main.iter().cloned());
+    Ok(ignored)
+}
+
 fn link_problems(
     spec: &Spec,
     records: &[Record],
@@ -689,6 +753,8 @@ fn link_problems(
         }
     }
     let untracked = super::gitseal::untracked(root, &targets)?;
+    let ignored = ignored_targets(root, &targets, &in_main, &mut listings)?;
+    let mut ignored_at = Vec::new();
     for file in checked.union(&current) {
         let abs_file = root.join(file);
         let doc = texts.doc(&abs_file)?;
@@ -785,6 +851,23 @@ fn link_problems(
                             );
                             p.severity = Severity::Warn;
                             out.push(p);
+                        } else if ignored.contains(r) {
+                            // A file that git ignores is in no commit: a fresh
+                            // clone lacks it.
+                            let mut p = problem(
+                                "ignored-link",
+                                format!(
+                                    "links to `{}`, which git ignores, so no commit holds it; \
+                                     add a `!` re-include rule to .gitignore or link a tracked \
+                                     file, or, in archive model 2, accept a file that must stay \
+                                     out of git with [[lab.archive.allow]]",
+                                    link.dest
+                                ),
+                            );
+                            p.severity = Severity::Warn;
+                            p.target = Some(link.dest.clone());
+                            ignored_at.push(out.len());
+                            out.push(p);
                         }
                     }
                     // Anchors are checked only in Markdown files inside the project.
@@ -832,6 +915,16 @@ fn link_problems(
                 }
             }
         }
+    }
+    // Only a link that the change adds is reported: older ones were
+    // reviewed when they were added, and many link data on purpose.
+    let files: BTreeSet<&str> = ignored_at.iter().map(|&i| out[i].path.as_str()).collect();
+    let added = super::gitseal::added_lines(root, &files)?;
+    for i in ignored_at {
+        let p = &mut out[i];
+        p.outside_change = !added
+            .as_ref()
+            .is_some_and(|a| p.line.is_some_and(|n| a.contains(&p.path, n)));
     }
     for k in kept.iter().filter(|k| !k.matched) {
         out.push(Problem::new(

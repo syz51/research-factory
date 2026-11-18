@@ -216,7 +216,9 @@ impl Fallback {
 }
 
 /// The ones of `paths`, relative to `dir`, that git ignores there, from one
-/// `git check-ignore --stdin`.
+/// `git check-ignore --stdin`. Empty outside a git repository or without git.
+/// git stops at a path below a symbolic link or in a submodule, so callers
+/// pass only paths whose directories are plain ones of this repository.
 pub fn ignored<'a>(
     dir: &Path,
     paths: impl IntoIterator<Item = &'a str>,
@@ -229,7 +231,7 @@ pub fn ignored<'a>(
     if input.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let mut child = Command::new("git")
+    let mut child = match Command::new("git")
         .args(["check-ignore", "-z", "--stdin"])
         .current_dir(dir)
         .env("LC_ALL", "C")
@@ -237,31 +239,40 @@ pub fn ignored<'a>(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("git check-ignore: {e}"))?;
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(e) => return Err(format!("git check-ignore: {e}")),
+    };
     let mut stdin = child.stdin.take().expect("stdin is piped");
     // Written from another thread, so a full stdout pipe cannot block both sides.
     let writer = std::thread::spawn(move || stdin.write_all(&input));
     let out = child
         .wait_with_output()
         .map_err(|e| format!("git check-ignore: {e}"))?;
-    writer
-        .join()
-        .expect("the writer thread does not panic")
-        .map_err(|e| format!("git check-ignore: {e}"))?;
-    // 0: some paths are ignored, 1: none is.
-    match out.status.code() {
-        Some(0) => Ok(out
-            .stdout
-            .split(|&b| b == 0)
-            .filter(|p| !p.is_empty())
-            .map(|p| String::from_utf8_lossy(p).into_owned())
-            .collect()),
-        Some(1) => Ok(BTreeSet::new()),
-        _ => Err(format!(
-            "git check-ignore: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
+    let written = writer.join().expect("the writer thread does not panic");
+    if String::from_utf8_lossy(&out.stderr).contains("not a git repository") {
+        return Ok(BTreeSet::new());
     }
+    // 0: some paths are ignored, 1: none is. git stops reading stdin when it
+    // fails, so the write error counts only after a success.
+    match out.status.code() {
+        Some(0 | 1) => {
+            written.map_err(|e| format!("git check-ignore: {e}"))?;
+        }
+        _ => {
+            return Err(format!(
+                "git check-ignore: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    Ok(out
+        .stdout
+        .split(|&b| b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect())
 }
 
 /// Runs git in `dir`; `None` when it exits with a failure code, such as a
