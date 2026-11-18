@@ -77,8 +77,9 @@ fn fix(rule: &str) -> Option<(Stage, &'static str)> {
         "ignored-link" => (
             Links,
             "add a `!` re-include rule to .gitignore if the file belongs in git, or link a tracked \
-             file; keep a private file ignored and accept the link with an [[lab.archive.allow]] \
-             entry that names the linking file, the link as `target` and a reason",
+             file; keep a private file ignored and, in archive model 2, accept the link with an \
+             [[lab.archive.allow]] entry that names the linking file, the link as `target` and a \
+             reason",
         ),
         "stale-derivative" => (
             Stage::Sources,

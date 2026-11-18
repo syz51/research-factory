@@ -430,7 +430,15 @@ fn a_link_that_a_change_adds_to_a_file_git_ignores_is_a_warning() {
     git(top, ceiling, &["switch", "-qc", "feat"]);
     git(top, ceiling, &["mv", "proj/docs/c.md", "proj/docs/d.md"]);
     // `data/forced.csv` matches the ignore pattern but is committed; `notes/`
-    // is an ignored directory that git tracks nothing in.
+    // is an ignored directory that git tracks nothing in; `runs/` holds only
+    // ignored files. Git takes the Markdown files for binary.
+    write(
+        top,
+        ".gitignore",
+        ".research/\ndata/\nnotes/\nprivate/\nproj/runs/*\n",
+    );
+    write(top, ".gitattributes", "*.md -diff\n");
+    write(&m, "runs/r.json", "{}\n");
     write(&m, "docs/a.md", "# A\n");
     write(&m, "data/absent.json", "{}\n");
     write(&m, "data/forced.csv", "a\n");
@@ -439,20 +447,20 @@ fn a_link_that_a_change_adds_to_a_file_git_ignores_is_a_warning() {
         &m,
         "docs/b.md",
         "# B\n\n[data](../data/big.csv)\n[forced](../data/forced.csv)\n[notes](../notes/)\n\
-         [tracked](tracked.md)\n",
+         [tracked](tracked.md)\n[runs](../runs/)\n",
     );
     git(top, ceiling, &["add", "-A"]);
     git(top, ceiling, &["commit", "-qm", "links"]);
 
     let out = lab(&m, &["archive", "check"]);
     let lines = ignored(&out);
-    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert_eq!(lines.len(), 3, "{}", stdout(&out));
     assert!(
         lines[0].starts_with("warn ignored-link docs/b.md:3")
             && lines[0].contains(
                 "`../data/big.csv`, which git ignores, so no commit holds it; add a `!` \
-                 re-include rule to .gitignore or link a tracked file, or accept a file that \
-                 must stay out of git with [[lab.archive.allow]]"
+                 re-include rule to .gitignore or link a tracked file, or, in archive model 2, \
+                 accept a file that must stay out of git with [[lab.archive.allow]]"
             ),
         "{}",
         lines[0]
@@ -462,12 +470,17 @@ fn a_link_that_a_change_adds_to_a_file_git_ignores_is_a_warning() {
         "{}",
         lines[1]
     );
+    assert!(
+        lines[2].starts_with("warn ignored-link docs/b.md:7") && lines[2].contains("`../runs/`"),
+        "{}",
+        lines[2]
+    );
     // A warning: the gate passes and names the fix.
     let done = lab(&m, &["archive", "done"]);
     assert_eq!(done.status.code(), Some(0), "{}", stdout(&done));
     assert!(
         stdout(&done).contains(
-            "keep a private file ignored and accept the link with an [[lab.archive.allow]]"
+            "keep a private file ignored and, in archive model 2, accept the link with an"
         ),
         "{}",
         stdout(&done)
@@ -514,7 +527,7 @@ fn a_link_that_a_change_adds_to_a_file_git_ignores_is_a_warning() {
     );
     let out = lab(&m, &["archive", "check"]);
     let lines = ignored(&out);
-    assert_eq!(lines.len(), 2, "{}", stdout(&out));
+    assert_eq!(lines.len(), 3, "{}", stdout(&out));
     assert!(
         lines[0].starts_with("warn ignored-link docs/b.md:3"),
         "{}",

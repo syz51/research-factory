@@ -653,8 +653,8 @@ fn in_main_checkout<'f>(
 /// ones that exist here and that `git check-ignore` matches, and those found
 /// in the main checkout (`in_main`), which git ignores by definition. A
 /// fresh clone lacks them. A directory that git tracks a file in does not
-/// count. A target below a symbolic link or in a submodule is not asked
-/// about, since git refuses such a path.
+/// count; one that holds only ignored files does. A target below a symbolic
+/// link or in a submodule is not asked about, since git refuses such a path.
 fn ignored_targets(
     root: &Path,
     targets: &BTreeSet<String>,
@@ -677,12 +677,30 @@ fn ignored_targets(
             here.push(r.as_str());
         }
     }
+    let found = crate::worktree::ignored(root, here.iter().copied())?;
+    // A pattern such as `data/*` ignores the contents of a directory, not the
+    // directory itself, so a directory also counts when it holds files and
+    // git tracks nothing in it; one that holds untracked files is an
+    // `untracked-link` first. git check-ignore leaves tracked files out, but
+    // not a directory that holds them.
+    let dirs: Vec<&str> = here
+        .iter()
+        .copied()
+        .filter(|r| root.join(r).is_dir())
+        .collect();
+    let holding = super::gitseal::holding_tracked(root, &dirs)?;
+    let dirs: BTreeSet<&str> = dirs.into_iter().collect();
     let mut ignored = BTreeSet::new();
-    // git check-ignore leaves tracked files out, but not a directory that
-    // holds them.
-    for r in crate::worktree::ignored(root, here)? {
-        if !root.join(&r).is_dir() || !crate::worktree::tracks(root, &r)? {
-            ignored.insert(r);
+    for r in here {
+        let counts = if dirs.contains(&r) {
+            !holding.contains(r)
+                && (found.contains(r)
+                    || std::fs::read_dir(root.join(r)).is_ok_and(|mut d| d.next().is_some()))
+        } else {
+            found.contains(r)
+        };
+        if counts {
+            ignored.insert(r.to_string());
         }
     }
     ignored.extend(in_main.iter().cloned());
@@ -841,8 +859,8 @@ fn link_problems(
                                 format!(
                                     "links to `{}`, which git ignores, so no commit holds it; \
                                      add a `!` re-include rule to .gitignore or link a tracked \
-                                     file, or accept a file that must stay out of git with \
-                                     [[lab.archive.allow]]",
+                                     file, or, in archive model 2, accept a file that must stay \
+                                     out of git with [[lab.archive.allow]]",
                                     link.dest
                                 ),
                             );

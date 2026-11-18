@@ -168,6 +168,31 @@ pub(super) fn untracked(root: &Path, paths: &BTreeSet<String>) -> Result<BTreeSe
     Ok(found)
 }
 
+/// Of `dirs`, relative to `root`, those that git tracks a file in. Empty
+/// outside a git work tree or without git.
+pub(super) fn holding_tracked(root: &Path, dirs: &[&str]) -> Result<BTreeSet<String>, String> {
+    let mut files = BTreeSet::new();
+    // Bounded so that the arguments stay well below the system's limit. With
+    // no pathspec, ls-files would list the whole tree.
+    for chunk in dirs.chunks(1000) {
+        let specs: Vec<String> = chunk.iter().map(|d| format!(":(literal){d}")).collect();
+        let mut args = vec!["-z", "--"];
+        args.extend(specs.iter().map(String::as_str));
+        files.extend(listed(root, &args)?.unwrap_or_default());
+    }
+    Ok(dirs
+        .iter()
+        .filter(|d| {
+            let under = format!("{d}/");
+            files
+                .range(under.clone()..)
+                .next()
+                .is_some_and(|f| f.starts_with(&under))
+        })
+        .map(|d| d.to_string())
+        .collect())
+}
+
 /// The lines that a change adds to its files: see [`added_lines`].
 pub(super) struct Added {
     /// Files that git does not track: every line is new.
@@ -253,6 +278,8 @@ pub(super) fn added_lines(root: &Path, files: &BTreeSet<&str>) -> Result<Option<
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
+            // A file git takes for binary still gets its hunks.
+            "--text",
             "--src-prefix=a/",
             "--dst-prefix=b/",
             "--relative",
