@@ -491,9 +491,10 @@ fn retrieve(
             ))?
             .query_map([format!("\"{text}\"")], |r| r.get(0))?
             .collect::<Result<_, _>>()?
-        } else if !text.is_ascii() {
-            // Too short for a trigram, such as a two-character Chinese or
-            // Japanese word: scan the words.
+        } else if !text.is_ascii() && !text.chars().any(han::unspaced) {
+            // Too short for a trigram, such as a two-letter Korean or
+            // Cyrillic part of a word: scan the words. A Chinese character
+            // or a kana is a word of its own, never a part of one.
             conn.prepare(&format!(
                 "SELECT term FROM units_vocab WHERE instr(term, ?1) > 0 ORDER BY doc DESC LIMIT {PART_OF}"
             ))?

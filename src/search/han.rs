@@ -54,12 +54,16 @@ pub fn narrow(c: char) -> char {
     }
 }
 
-/// The words of `text` as a reader counts them: each unspaced character is
-/// one, and so is each other run of characters between spaces.
+/// The words of `text` as a reader counts them: each run of characters
+/// between spaces is one, and in a run with unspaced characters each of them
+/// is one, with one more for letters or digits beside them.
 pub fn word_count(text: &str) -> usize {
     text.split_whitespace()
         .map(|chunk| {
             let single = chunk.chars().filter(|c| unspaced(*c)).count();
+            if single == 0 {
+                return 1;
+            }
             let other = chunk
                 .split(unspaced)
                 .any(|run| run.chars().any(char::is_alphanumeric));
@@ -203,7 +207,21 @@ unsafe extern "C" fn split(
         let Some(source) = source.filter(changes) else {
             return whole();
         };
-        let plain = |run: &str| run.chars().map(narrow).collect::<String>().to_lowercase();
+        // The parent's form of each run keeps its folding (case, diacritics).
+        // The runs pair with the text's by their order.
+        fn runs(s: &str) -> impl Iterator<Item = &str> {
+            s.split(unspaced).filter(|run| !run.is_empty())
+        }
+        let mut parents = std::str::from_utf8(folded)
+            .ok()
+            .filter(|folded| runs(folded).count() == runs(source).count())
+            .map(|folded| runs(folded).collect::<Vec<_>>().into_iter());
+        let mut plain = |run: &str| -> String {
+            match parents.as_mut().and_then(Iterator::next) {
+                Some(parent) => parent.chars().map(narrow).collect(),
+                None => run.chars().map(narrow).collect::<String>().to_lowercase(),
+            }
+        };
         let send = |word: &str, from: usize, to: usize| {
             (pass.emit)(
                 pass.ctx,
@@ -362,6 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn kana_and_mixed_words_split_and_keep_the_parent_folding() {
+        let conn = table();
+        conn.execute(
+            "INSERT INTO t (body) VALUES (?1)",
+            ["BERT模型とCafé学 ひらがなカタカナ"],
+        )
+        .unwrap();
+        let find = |query: &str| rows(&conn, "SELECT body FROM t WHERE t MATCH ?1", query).len();
+        // A Latin run beside Chinese is the word it is alone, without its
+        // diacritics.
+        assert_eq!(find("bert"), 1);
+        assert_eq!(find("cafe"), 1);
+        assert_eq!(find("\"BERT 模型\""), 1);
+        assert_eq!(find("\"ＢＥＲＴ模型\""), 1);
+        // Kana: one word per character, a phrase in order.
+        assert_eq!(find("\"らがな\""), 1);
+        assert_eq!(find("\"タカナ\""), 1);
+        assert_eq!(find("\"がらな\""), 0);
+    }
+
+    #[test]
     fn other_words_stay_whole() {
         let conn = table();
         conn.execute("INSERT INTO t (body) VALUES (?1)", ["Café naïve retrieval"])
@@ -387,6 +426,11 @@ mod tests {
         assert_eq!(word_count("two words"), 2);
         assert_eq!(word_count("學而時習之，不亦説乎"), 9);
         assert_eq!(word_count("第176頁 and more"), 5);
-        assert_eq!(word_count("¶ 。"), 0);
+        // Other text counts as it did: each run between spaces.
+        assert_eq!(word_count("| 12 | 34 |"), 5);
+        assert_eq!(word_count("ok - done"), 3);
+        // A message of three characters is not short.
+        assert_eq!(word_count("好的。"), 2);
+        assert_eq!(word_count("可以了"), 3);
     }
 }
