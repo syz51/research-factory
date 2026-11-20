@@ -1,9 +1,11 @@
 //! Units of plain text (scopes `texts` and `sessions`): passages of about
 //! `WINDOW_WORDS` words, cut at line ends within spans of lines.
 
+use super::han;
 use super::units::Unit;
 
-/// A passage of plain text holds about this many words.
+/// A passage of plain text holds about this many words. A Chinese character
+/// or a kana counts as a word (`han::word_count`).
 pub const WINDOW_WORDS: usize = 200;
 
 /// A span of lines of a text, 1-based and inclusive, under one heading.
@@ -56,7 +58,7 @@ pub fn windows(text: &str, spans: &[Span]) -> Vec<Unit> {
         let mut start = span.first;
         let mut words = 0;
         for n in span.first..=last {
-            words += lines[n - 1].split_whitespace().count();
+            words += han::word_count(lines[n - 1]);
             if words < WINDOW_WORDS && n < last {
                 continue;
             }

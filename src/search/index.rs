@@ -18,10 +18,10 @@ use rusqlite::{Connection, ErrorCode, OpenFlags, Transaction, TransactionBehavio
 use sha2::{Digest, Sha256};
 
 use super::sources::{self, Doc, Loader, Resolver, Said};
-use super::{Context, Scope, graph};
+use super::{Context, Scope, graph, han};
 
 /// Raised when a table, a tokenizer or the way a unit is cut changes.
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 /// How many stale derivatives a notice names.
 const STALE_NAMED: usize = 3;
 
@@ -84,7 +84,7 @@ CREATE TABLE units(
 CREATE INDEX units_file ON units(file_id);
 CREATE VIRTUAL TABLE units_fts USING fts5(
     ids, title, summary, heading, meta, body,
-    tokenize = 'porter unicode61 remove_diacritics 2'
+    tokenize = 'porter lab_han unicode61 remove_diacritics 2'
 );
 CREATE VIRTUAL TABLE units_vocab USING fts5vocab(units_fts, 'row');
 CREATE VIRTUAL TABLE units_inst USING fts5vocab(units_fts, 'instance');
@@ -267,6 +267,7 @@ fn open_current(ctx: &Context) -> Result<Option<Connection>, String> {
     }
     let read = || -> rusqlite::Result<Connection> {
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        han::register(&conn)?;
         conn.busy_timeout(Duration::from_millis(ctx.cfg.lock_timeout_ms))?;
         let value = |key: &str| {
             conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| {
@@ -384,6 +385,7 @@ fn set_built(tx: &Transaction, scopes: &BTreeSet<Scope>) -> rusqlite::Result<()>
 fn write_new(ctx: &Context, tmp: &Path) -> Result<Said, String> {
     let run = || -> Result<Said, Fault> {
         let mut conn = Connection::open(tmp)?;
+        han::register(&conn)?;
         // The file is thrown away on failure, so it needs no journal.
         conn.execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")?;
         conn.execute_batch(SCHEMA)?;
@@ -816,6 +818,7 @@ mod tests {
     #[test]
     fn the_weights_rank_title_and_heading_first_then_body_then_ids_and_meta_then_summary() {
         let conn = Connection::open_in_memory().unwrap();
+        han::register(&conn).unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         let names: Vec<String> = conn
             .prepare("SELECT * FROM units_fts")

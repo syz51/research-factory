@@ -154,7 +154,7 @@ fn left_out(text: &str) -> Option<&'static str> {
         .iter()
         .find(|(_, openings)| openings.iter().any(|o| text.starts_with(o)))
         .map(|(rule, _)| *rule)
-        .or_else(|| (text.split_whitespace().count() < MIN_WORDS).then_some("short"))
+        .or_else(|| (super::han::word_count(text) < MIN_WORDS).then_some("short"))
 }
 
 /// One unit per message the student typed, at its transcript line. The

@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::index::{BODY_COLUMN, Fault, WEIGHTS};
 use super::refs::{normal_arxiv, normal_doi};
 use super::thesaurus::Entry;
-use super::{Class, Context, Scope, graph};
+use super::{Class, Context, Scope, graph, han};
 
 /// Candidates taken from each retrieval of one phrasing.
 const CANDIDATES: usize = 100;
@@ -397,7 +397,8 @@ fn id_list(ids: impl Iterator<Item = i64>) -> String {
     ids.map(|i| i.to_string()).collect::<Vec<_>>().join(",")
 }
 
-/// The units one phrasing retrieves, best first, and the terms no unit holds.
+/// The units one phrasing retrieves, best first, and the terms that no unit
+/// holds, neither as a word nor as part of one.
 fn retrieve(
     conn: &Connection,
     ctx: &Context,
@@ -481,6 +482,7 @@ fn retrieve(
         }
     }
     // Trigrams: a term the word index lacks may be part of an indexed word.
+    let mut part_of = HashSet::new();
     for &i in &unknown {
         let text = phrasing.terms[i].text();
         let words: Vec<String> = if text.chars().count() >= 3 {
@@ -516,6 +518,7 @@ fn retrieve(
                 // A part of a word counts less than the word.
                 entry.1 += PART_WEIGHT * (1.0 + (count as f64).ln());
                 entry.2 |= 1 << i;
+                part_of.insert(i);
             }
         }
     }
@@ -591,6 +594,8 @@ fn retrieve(
             candidates.push(c);
         }
     }
+    // A term that is part of an indexed word has units, so it is not absent.
+    unknown.retain(|i| !part_of.contains(i));
     // Unordered: `search` ranks the fused scores.
     Ok((candidates, unknown))
 }
@@ -1082,10 +1087,18 @@ fn snippet(conn: &Connection, unit: i64, phrasing: &Phrasing) -> Result<String, 
         .map(Term::fts)
         .collect::<Vec<_>>()
         .join(" OR ");
+    // A Chinese character is one word of the index, so a passage of such
+    // text needs more words to be as long; 64 is the most FTS5 gives.
+    let unspaced = |t: &Term| t.tokens.iter().any(|w| w.chars().any(han::unspaced));
+    let width = if phrasing.terms.iter().any(unspaced) {
+        64
+    } else {
+        24
+    };
     let by_words: Option<String> = conn
         .query_row(
             &format!(
-                "SELECT snippet(units_fts, {BODY_COLUMN}, '', '', '…', 24) FROM units_fts \
+                "SELECT snippet(units_fts, {BODY_COLUMN}, '', '', '…', {width}) FROM units_fts \
                  WHERE units_fts MATCH ?1 AND rowid = ?2"
             ),
             params![any, unit],
