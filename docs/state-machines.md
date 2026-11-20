@@ -322,7 +322,7 @@ Guards:
 Defects outside the redesign, fixed by research-factory-219 (papers 0.7.0):
 
 - `verified` is written by `papers verify --record`. `papers registry check` now reads it:
-  - a status other than `match`, `mismatch` or `not-found` is `invalid-value`;
+  - a status other than `match`, `mismatch`, `not-found` or, since papers 0.16.0, `manual` is `invalid-value`;
   - a bad `at` date is `malformed-date`;
   - a recorded `mismatch` or `not-found` is `verified-mismatch` (warn).
 - `duplicate_of` links are checked. A cycle is `duplicate-cycle` (error, once per cycle). A chain longer than one link is `duplicate-chain` (warn), which names the key it ends at.
@@ -380,7 +380,7 @@ Speed, measured by research-factory-414:
 | Machine | States | Defect |
 |---|---|---|
 | Finding | reported; severity Error or Warn | No baseline or allow state. `lab check --new-only` supplies the baseline from outside, and since lab 0.21.0 the merge base with the default branch, so a finding the change adds to the files it touches is gated. Accepted. |
-| Quote verdict | exact match (no finding); near match, similarity 0.8 or more (`quote-not-found`, Warn); not verbatim, similarity below 0.8 (`quote-not-found`, Error); kept (Info) | Threshold: `quotes.error_below`, default 0.8 (`claimcheck src/config.rs:41`). The Warn or Error split is at `claimcheck src/check.rs:921-936`. Gap: an unclosed quotation gets no finding (`claimcheck src/doc.rs:643`). Confirmed (probe): research-factory-450. |
+| Quote verdict | exact match (no finding); near match, similarity 0.8 or more (`quote-not-found`, Warn); not verbatim, similarity below 0.8 (`quote-not-found`, Error); since claimcheck 0.16.0, different only in traditional or simplified characters (`quote-script-only`, Warn); kept (Info) | Threshold: `quotes.error_below`, default 0.8 (`claimcheck src/config.rs:41`). The Warn or Error split is at `claimcheck src/check.rs:921-936`. Gap: an unclosed quotation gets no finding (`claimcheck src/doc.rs:643`). Confirmed (probe): research-factory-450. |
 | Number verdict | found; near (context or rounded); not found (`number-not-in-source`, Warn); changed text only (`source-text-changed`, Warn) | Gap: a number not found is searched twice in each text (`claimcheck src/check.rs:1078`, `:1156`). Speed only: research-factory-453. |
 | Source text load | loaded; hash mismatch (`source-text-changed`, Warn; matches do not count as supported); missing (`source-text-missing`, Warn) | Fixed by research-factory-220 (claimcheck 0.11.0, commit bc7c914). Gap: a text path shared by two references uses the first sha256 only (`claimcheck src/check.rs:40`). Confirmed (probe): research-factory-451, which also checks whether masters has such a path. |
 | Checked file read | read; unreadable | Gap: a checked file that is not valid UTF-8 aborts the whole run, with exit 2 and no output (`claimcheck src/lib.rs:178`). Confirmed (probe): research-factory-452. |

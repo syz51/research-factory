@@ -33,7 +33,7 @@ This catches failure 1 whatever produced the bibliography, as long as the work i
 
 ### 2. Claims match their sources (`claimcheck`)
 
-- `quote-not-found`: a quotation attributed to a source must appear in that source's extracted text, after normalising whitespace, hyphenation and ligatures. The finding reports the closest match and its similarity, so a person can tell a misquote from an extraction artefact.
+- `quote-not-found`: a quotation attributed to a source must appear in that source's extracted text, after normalising whitespace, hyphenation and ligatures. The finding reports the closest match and its similarity, so a person can tell a misquote from an extraction artefact. Since claimcheck 0.16.0, a quotation that differs only in traditional or simplified Chinese characters is the warning `quote-script-only`.
 - `number-not-in-source`: a number in a sentence that cites a source must appear in that source's text. This catches the most damaging kind of unsupported claim (a wrong figure) without any judgement about paraphrase.
 - `uncited`, `labels` and `ref-list`: claims without a citation, citations of keys that do not exist, and reference lists that disagree with the registry.
 
@@ -81,7 +81,7 @@ The before-and-after comparison is observational: the documents, the models and 
 - **Errors in a correctly quoted source.** Checks compare a claim with its source, not the source with the truth. A wrong figure quoted correctly passes.
 - **Extraction errors.** A quotation can fail to match because PDF extraction garbled it. The finding shows the closest match so that a person can tell which case it is.
 - **Paraphrase and synthesis.** No deterministic check decides whether a summary of three papers is fair. That remains a judgement, made by a person or an advisory judge.
-- **Works no index lists.** These cannot be verified automatically; they are reported for a person to confirm from the landing page or the PDF.
+- **Works no index lists.** These cannot be verified automatically; they are reported for a person to confirm from the landing page or the PDF. Since papers 0.16.0, the person records the check as a `checked` date in the note, and `papers verify` then records the status `manual`.
 - **Profiling estimates.** Cost figures are estimates at published API prices, not invoices. Subscription plans bill differently.
 
 ## Sources
