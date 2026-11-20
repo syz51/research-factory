@@ -9,6 +9,7 @@
 mod board;
 mod chat;
 mod graph;
+mod han;
 mod index;
 pub(crate) mod learn;
 mod mcp;

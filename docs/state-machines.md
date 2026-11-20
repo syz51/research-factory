@@ -158,15 +158,15 @@ locked: another process holds the write lock; the query answers from the last co
 
 | Transition | Trigger | Guard | Enforced by |
 |---|---|---|---|
-| absent → building | first `lab search`, `lab search index` or a scope set never built | the write lock; the wait stops at `lock_timeout_ms` (30 s) with exit 2 | `build` `src/search/index.rs:314-330` |
-| building → fresh | the build writes `index.db.tmp-<pid>` and renames it over the index | the old file is never edited in place | `index.rs:333` |
-| fresh → stale | a source's stamp differs from the stored one | checked at each query | `refresh` `index.rs:442` |
-| stale → refreshing | the query itself (incremental) | only changed sources are read; the write lock must be free, or the query answers stale (`index.rs:491`) | `refresh` |
-| refreshing → fresh, or stale with notice | the refresh ends, or reaches `refresh_budget_ms` (5 s) | `lab search index` and `refresh` have no budget (`src/search/mod.rs:787`) | `index.rs:513`, `:544` |
-| any → building | stored schema version (`6`, `index.rs:24`) or fingerprint differs; the meta table does not read | any other open error than busy also rebuilds (`index.rs:291`) | `open_current` `index.rs:263-293` |
+| absent → building | first `lab search`, `lab search index` or a scope set never built | the write lock; the wait stops at `lock_timeout_ms` (30 s) with exit 2 | `build` `src/search/index.rs:315-331` |
+| building → fresh | the build writes `index.db.tmp-<pid>` and renames it over the index | the old file is never edited in place | `index.rs:334` |
+| fresh → stale | a source's stamp differs from the stored one | checked at each query | `refresh` `index.rs:444` |
+| stale → refreshing | the query itself (incremental) | only changed sources are read; the write lock must be free, or the query answers stale (`index.rs:493`) | `refresh` |
+| refreshing → fresh, or stale with notice | the refresh ends, or reaches `refresh_budget_ms` (5 s) | `lab search index` and `refresh` have no budget (`src/search/mod.rs:788`) | `index.rs:515`, `:546` |
+| any → building | stored schema version (`7`, `index.rs:24`) or fingerprint differs; the meta table does not read | any other open error than busy also rebuilds (`index.rs:292`) | `open_current` `index.rs:263-294` |
 | any → building (forced) | SQLite returns `DatabaseCorrupt` or `NotADatabase` | there is no `PRAGMA integrity_check` | `open` `index.rs:107`, `:236` |
 
-A batch of queries (`lab search --run`) refreshes once and reuses that refresh's stale flag and notices for each query (`refresh_batch` `src/search/mod.rs:801`, `open_listed` `index.rs:165`). Fixed in research-factory-414: 20 topics took 1.2-4.1 s instead of 10-26 s, with byte-identical output.
+A batch of queries (`lab search --run`) refreshes once and reuses that refresh's stale flag and notices for each query (`refresh_batch` `src/search/mod.rs:802`, `open_listed` `index.rs:165`). Fixed in research-factory-414: 20 topics took 1.2-4.1 s instead of 10-26 s, with byte-identical output.
 
 Stages: `lexical`, `dense`, `rerank`, `graph`. `lexical` and `graph` are `ready`; `dense` and `rerank` are `missing` (`src/search/mod.rs:266-269`).
 No stage is ever `failed`. A query with a configured missing stage is `partial`, and the output and the trace name the stage (`mod.rs:969`).
@@ -175,7 +175,7 @@ Gaps:
 
 - A killed build leaves `index.db.tmp-<pid>` (up to about 118 MB on masters). The next query does not remove it. An error in the build does remove it. Confirmed: research-factory-416.
 - The graph stage is `ready` even when it finds no paper edges (3.7). Confirmed: research-factory-423.
-- No test covers the stop at the refresh budget (`index.rs:544`): research-factory-417.
+- No test covers the stop at the refresh budget (`index.rs:546`): research-factory-417.
 - An open error other than busy rebuilds the index silently. Refuted (probe): a bad `index.db` is rebuilt, the query exits 0, and stderr names the cause.
 
 ### 3.2 Unit

@@ -471,8 +471,9 @@ fn another_schema_version_and_a_corrupt_file_rebuild_the_index() {
             [],
         )
         .unwrap();
-        // A rebuild drops what an index of another version held.
-        conn.execute("DELETE FROM units_fts", []).unwrap();
+        // A rebuild drops what an index of another version held. `units_fts`
+        // itself opens only with lab's tokenizer.
+        conn.execute("DELETE FROM units", []).unwrap();
     }
     assert_eq!(json(d, &["wombat"])["state"], "hits");
     assert_eq!(version(d), current);
@@ -713,7 +714,8 @@ fn a_part_of_a_word_finds_a_word_whose_stem_changes_when_stemmed_again() {
     );
     let report = json(d, &["atabas"]);
     assert_eq!(paths(&report), ["docs/notes/db.md"]);
-    assert_eq!(report["unknown"][0]["word"], "atabas");
+    // Found as part of a word, so not reported as missing from the index.
+    assert_eq!(report["unknown"], serde_json::json!([]));
 }
 
 #[test]

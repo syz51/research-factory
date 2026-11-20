@@ -577,6 +577,64 @@ fn a_decimal_number_matches_without_trailing_zeros() {
     assert_eq!(hits(&report)[0]["path"], "docs/result.md");
 }
 
+/// A project with an edition in traditional characters, in lines that end
+/// inside sentences as Kanripo writes them, and a study in simplified ones.
+fn chinese(d: &Path) {
+    write(d, "research.toml", CONFIG);
+    // 60 lines of 16 characters, then the line end inside the sentence.
+    let filler = "天地玄黄宇宙洪荒日月盈昃辰宿列張¶\n".repeat(60);
+    let edition = format!(
+        "{filler}子曰學而時習之不亦説乎有朋自逺方来不亦¶\n樂乎人不知而不愠不亦君子乎¶\n{filler}"
+    );
+    write(d, "sources/texts/lunyu.txt", &edition);
+    let entries = [
+        serde_json::json!({"key": "lunyu", "title": "論語集解", "authors": ["何晏"],
+            "texts": [{"path": "sources/texts/lunyu.txt"}]}),
+        serde_json::json!({"key": "chen", "title": "“学而时习之”与《论语》的开端",
+            "authors": ["陈赟"], "year": 2012}),
+    ];
+    let lines: Vec<String> = entries.iter().map(Value::to_string).collect();
+    write(d, "references.jsonl", &(lines.join("\n") + "\n"));
+}
+
+#[test]
+fn chinese_is_found_in_either_script_and_across_a_line_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    chinese(d);
+    // Either script finds both the traditional edition and the simplified study.
+    for query in ["论语", "論語"] {
+        let report = json(d, &["--in", "refs", query]);
+        let mut found = keys(&report);
+        found.sort_unstable();
+        assert_eq!(found, ["chen", "lunyu"], "{query}");
+    }
+    for query in ["学而时习之", "學而時習之"] {
+        let report = json(d, &["--in", "texts", query]);
+        assert_eq!(keys(&report), ["lunyu"], "{query}");
+        // The snippet shows the text as the edition writes it.
+        let snippet = hits(&report)[0]["snippet"].as_str().unwrap();
+        assert!(snippet.contains("學而時習之"), "{snippet}");
+    }
+    // The phrase runs over `¶` and the line end.
+    let report = json(d, &["--in", "texts", "有朋自逺方来不亦樂乎"]);
+    assert_eq!(keys(&report), ["lunyu"]);
+    assert_eq!(report["unknown"], serde_json::json!([]));
+    let text = search(d, &["--in", "texts", "有朋自逺方来不亦樂乎"]);
+    assert!(!text.contains("Not in the index"), "{text}");
+    // A text without sections is cut into passages: the hit names the lines
+    // around the sentence, not the 122 lines of the file.
+    let hit = &hits(&report)[0];
+    let (start, end) = (hit["start"].as_u64().unwrap(), hit["end"].as_u64().unwrap());
+    assert!(start <= 61 && 62 <= end, "{hit}");
+    assert!(end - start < 30, "{hit}");
+    // Characters that are not next to each other are not a phrase.
+    assert_eq!(json(d, &["--in", "texts", "习时而学"])["state"], "zero");
+    // A word of one character and one of two are found as before.
+    assert_eq!(keys(&json(d, &["--in", "texts", "愠"])), ["lunyu"]);
+    assert_eq!(keys(&json(d, &["--in", "texts", "君子"])), ["lunyu"]);
+}
+
 fn git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(
