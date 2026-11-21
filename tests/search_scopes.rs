@@ -692,6 +692,39 @@ fn a_linked_worktree_reads_ignored_texts_from_the_main_checkout() {
     assert!(!stderr(&o).contains(said), "{}", stderr(&o));
 }
 
+/// A linked worktree whose ignored `sources` is a symbolic link to the main
+/// checkout's folder: git refuses each path below the link, so lab asks it
+/// about the link instead (research-factory-675).
+#[cfg(unix)]
+#[test]
+fn a_linked_worktree_searches_texts_below_a_linked_ignored_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (main, linked) = (dir.path().join("main"), dir.path().join("linked"));
+    project(&main);
+    // No trailing slash: git matches a pattern with one only to a directory,
+    // and the link is not one.
+    write(&main, ".gitignore", "/sources\n.research/\n");
+    git(&main, &["init", "-q", "-b", "main"]);
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-q", "-m", "fixture"]);
+    git(&main, &["worktree", "add", "-q", linked.to_str().unwrap()]);
+    std::os::unix::fs::symlink(main.join("sources"), linked.join("sources")).unwrap();
+    let o = lab(&linked, &["search", "--rebuild", "--in", "texts"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        !stderr(&o).contains("beyond a symbolic link"),
+        "{}",
+        stderr(&o)
+    );
+    let report = json(
+        &linked,
+        &["--in", "texts", "\"quantum annealing scheduling\""],
+    );
+    let hit = &hits(&report)[0];
+    assert_eq!(hit["key"], "16");
+    assert_eq!(hit["path"], "sources/texts/16.txt");
+}
+
 /// The config with `board_export` in `[lab.archive]` and, when given, in
 /// `[lab.search]`.
 fn board_config(archive: &str, search: Option<&str>) -> String {

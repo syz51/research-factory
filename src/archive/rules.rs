@@ -653,8 +653,9 @@ fn in_main_checkout<'f>(
 /// ones that exist here and that `git check-ignore` matches, and those found
 /// in the main checkout (`in_main`), which git ignores by definition. A
 /// fresh clone lacks them. A directory that git tracks a file in does not
-/// count; one that holds only ignored files does. A target below a symbolic
-/// link or in a submodule is not asked about, since git refuses such a path.
+/// count; one that holds only ignored files does. A target in a submodule is
+/// not asked about, since git refuses such a path; one below a symbolic link
+/// counts when git ignores the link (`worktree::ignored`).
 fn ignored_targets(
     root: &Path,
     targets: &BTreeSet<String>,
@@ -668,10 +669,9 @@ fn ignored_targets(
             && !in_main.contains(r)
             && listings.exists(root, r)
             && r.match_indices('/').all(|(i, _)| {
-                *plain.entry(&r[..i]).or_insert_with(|| {
-                    let abs = root.join(&r[..i]);
-                    abs.symlink_metadata().is_ok_and(|m| m.is_dir()) && !abs.join(".git").exists()
-                })
+                *plain
+                    .entry(&r[..i])
+                    .or_insert_with(|| !root.join(&r[..i]).join(".git").exists())
             })
         {
             here.push(r.as_str());
