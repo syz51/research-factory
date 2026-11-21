@@ -217,9 +217,48 @@ impl Fallback {
 
 /// The ones of `paths`, relative to `dir`, that git ignores there, from one
 /// `git check-ignore --stdin`. Empty outside a git repository or without git.
-/// git stops at a path below a symbolic link or in a submodule, so callers
-/// pass only paths whose directories are plain ones of this repository.
+/// git refuses a path below a symbolic link ("beyond a symbolic link"), so a
+/// path below a link in `dir`, such as a linked `sources/text`, counts as
+/// ignored when git ignores the link itself. git also stops at a path in a
+/// submodule, so callers pass no such path.
 pub fn ignored<'a>(
+    dir: &Path,
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>, String> {
+    // Each path with the path that git is asked about: the outermost link
+    // above it, or the path itself.
+    let asked: Vec<(&str, &str)> = paths.into_iter().map(|p| (p, below_link(dir, p))).collect();
+    let probes: BTreeSet<&str> = asked.iter().map(|&(_, probe)| probe).collect();
+    let found = check_ignore(dir, probes)?;
+    Ok(asked
+        .into_iter()
+        .filter(|(_, probe)| found.contains(*probe))
+        .map(|(p, _)| p.to_string())
+        .collect())
+}
+
+/// The outermost symbolic link among the parent directories of `rel` in
+/// `dir`, as a prefix of `rel`, or `rel` itself when no parent is a link.
+fn below_link<'a>(dir: &Path, rel: &'a str) -> &'a str {
+    let Some(parents) = rel.rfind('/') else {
+        return rel;
+    };
+    for (end, _) in rel[..parents]
+        .match_indices('/')
+        .chain(std::iter::once((parents, "")))
+    {
+        let prefix = &rel[..end];
+        if !prefix.is_empty()
+            && std::fs::symlink_metadata(dir.join(prefix)).is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return prefix;
+        }
+    }
+    rel
+}
+
+/// The ones of `paths` that `git check-ignore --stdin` in `dir` names.
+fn check_ignore<'a>(
     dir: &Path,
     paths: impl IntoIterator<Item = &'a str>,
 ) -> Result<BTreeSet<String>, String> {
