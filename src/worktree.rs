@@ -384,3 +384,82 @@ pub fn changed_since(dir: &Path, base: &str) -> Result<BTreeSet<String>, String>
     files.extend(diff.split('\0').filter(|p| !p.is_empty()).map(String::from));
     Ok(files)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A repository with a plain `sources` that holds a link `text` to a
+    /// folder outside it, as in guwen's worktrees.
+    fn nested() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, target) = (dir.path().join("repo"), dir.path().join("target"));
+        std::fs::create_dir_all(target.join("inner/deep")).unwrap();
+        std::fs::write(target.join("inner/deep/a.txt"), "a").unwrap();
+        std::fs::write(target.join("b.txt"), "b").unwrap();
+        std::fs::create_dir_all(repo.join("sources")).unwrap();
+        symlink(&target, repo.join("sources/text")).unwrap();
+        (dir, repo)
+    }
+
+    #[test]
+    fn below_link_names_the_outermost_link_parent() {
+        let (_dir, repo) = nested();
+        assert_eq!(below_link(&repo, "sources/text/b.txt"), "sources/text");
+        assert_eq!(
+            below_link(&repo, "sources/text/inner/deep/a.txt"),
+            "sources/text"
+        );
+        // The link itself, a plain path and a path with no parent stay.
+        assert_eq!(below_link(&repo, "sources/text"), "sources/text");
+        assert_eq!(below_link(&repo, "sources/other.txt"), "sources/other.txt");
+        assert_eq!(below_link(&repo, "top.txt"), "top.txt");
+        // A link inside the linked folder does not move the answer inward.
+        symlink(repo.join("sources"), repo.join("sources/text/inner/back")).unwrap();
+        assert_eq!(
+            below_link(&repo, "sources/text/inner/back/x.txt"),
+            "sources/text"
+        );
+    }
+
+    #[test]
+    fn a_path_below_a_link_is_ignored_only_when_the_link_is() {
+        let (_dir, repo) = nested();
+        std::fs::write(repo.join("sources/keep.md"), "k").unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), "/sources/text\n").unwrap();
+        let paths = [
+            "sources/text/b.txt",
+            "sources/text/inner/deep/a.txt",
+            "sources/keep.md",
+        ];
+        let found = ignored(&repo, paths).unwrap();
+        assert_eq!(
+            found,
+            BTreeSet::from([
+                "sources/text/b.txt".to_string(),
+                "sources/text/inner/deep/a.txt".to_string()
+            ])
+        );
+        // A tracked link is not ignored although the pattern matches it, so
+        // nothing below it is.
+        git(&repo, &["add", "-f", "sources/text"]);
+        git(&repo, &["commit", "-q", "-m", "fixture"]);
+        assert!(ignored(&repo, paths).unwrap().is_empty());
+    }
+}
